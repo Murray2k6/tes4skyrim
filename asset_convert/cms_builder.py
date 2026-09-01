@@ -45,10 +45,9 @@ from .mopp import walk_mopp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from subprocess_flags import POPEN_FLAGS, windows_cmd  # noqa: E402
+from . import paths
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_MOPP_BRIDGE = str(_PROJECT_ROOT / 'external' / 'mopp_bridge'
-                   / 'dovah_hkp_mesh_mopp_bridge.exe')
+_MOPP_BRIDGE = str(paths.MOPP_BRIDGE)
 
 _BITS_PER_INDEX = 17
 _BITS_PER_W_INDEX = 18
@@ -67,7 +66,7 @@ def run_mopp_bridge(vertices, triangles, shape_keys, timeout=300):
     """
     if not os.path.exists(_MOPP_BRIDGE):
         return None
-    temp_dir = os.path.join(_PROJECT_ROOT, 'temp')
+    temp_dir = str(paths.REPO / 'temp')
     os.makedirs(temp_dir, exist_ok=True)
     uid = uuid.uuid4().hex
     tmp_in = os.path.join(temp_dir, f'moppbridge_{uid}.json')

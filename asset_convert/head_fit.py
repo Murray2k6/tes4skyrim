@@ -59,6 +59,7 @@ surface (build_field), so skinned head gear takes the identical mapping.
 from pathlib import Path
 
 import numpy as np
+from . import paths
 
 try:
     from scipy.spatial import cKDTree
@@ -66,7 +67,7 @@ try:
 except ImportError:
     _SCIPY = False
 
-_GEN_DIR = Path(__file__).parent / 'generated'
+_GEN_DIR = paths.GENERATED
 
 # HAIR IS BAKED PER RACE GROUP (2026-08-24).  A races.tri on a type-3 (Hair)
 # HDPT was tried and the ENGINE DOES NOT APPLY IT (vanilla never ships one on

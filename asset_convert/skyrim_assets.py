@@ -24,8 +24,9 @@ BSA-sourced files are SSE-format; read them with asset_convert.sse_nif
 
 import os
 from pathlib import Path
+from . import paths
 
-_REPO = Path(__file__).parent.parent
+_REPO = paths.REPO
 _CACHE_DIR = _REPO / 'export' / 'skyrim_assets'
 
 _skyrim_data_override = None

@@ -50,14 +50,10 @@ from subprocess_flags import POPEN_FLAGS, windows_cmd  # noqa: E402
 
 from .spt_generator import (TreeGeometry, WORLD_SCALE, COLLISION_MIN_RADIUS,
                             build_tree)
+from . import paths
 
-# The harness is a COMMITTED build artifact in native/dist/, beside the
-# navmesh .pyd, so an end user needs no C++ toolchain (see native/dist/
-# README.md).  Source: native/src/spt_engine/, built by
-# `python native/build.py --programs`.  Absent = engine path unavailable and
-# the caller falls back to the pure-Python generator.
-HARNESS = (Path(__file__).resolve().parent.parent
-           / 'native' / 'dist' / 'spt_engine_dump.exe')
+#: Committed build artifact from native/src/spt_engine/; absent = use the Python fallback.
+HARNESS = paths.SPT_ENGINE_DUMP
 
 # The dump is pure geometry, so it is worth caching: one subprocess per
 # (spt, seed) instead of one per TREE record sharing that .spt.

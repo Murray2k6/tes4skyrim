@@ -49,6 +49,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from subprocess_flags import POPEN_FLAGS, windows_cmd, to_wine_path  # noqa: E402
 from tes5_import.writer import pack_tes4_header  # noqa: E402
+from . import paths
 
 # ---------------------------------------------------------------------------
 # Size limits
@@ -292,7 +293,7 @@ def _run_bsarch(
     return True
 
 
-_DEFAULT_EXPORT = Path(__file__).resolve().parent.parent / 'export'
+_DEFAULT_EXPORT = paths.EXPORT
 
 
 def _out_root(output_dir, plugin: str, export_root=None):
@@ -361,8 +362,7 @@ def pack_bsas(
         dict with keys: packed (list of BSA paths), skipped (list),
         errors (list), loaders (list of generated .esl paths).
     """
-    bsarch = bsarch_path or str(Path(__file__).resolve().parent.parent
-                                / 'external' / 'bsarch' / 'BSArch.exe')
+    bsarch = bsarch_path or str(paths.BSARCH)
     if not Path(bsarch).is_file():
         msg = (
             "BSArch.exe not found.  Place BSArch.exe in external/bsarch/BSArch.exe "

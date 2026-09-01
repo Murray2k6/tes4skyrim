@@ -45,6 +45,8 @@ verify with ``python tools/nif/nif_perf.py --baseline ...``.
 import os
 import sys
 
+from . import paths
+
 _NATIVE = None
 _NUMPY = None
 
@@ -121,9 +123,7 @@ def native():
             if mod in sys.modules:
                 _NATIVE = sys.modules[mod]
                 return _NATIVE
-            dist = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'native', 'dist')
+            dist = str(paths.NATIVE_DIST)
             suffix = sysconfig.get_config_var('EXT_SUFFIX') or '.pyd'
             path = os.path.join(dist, mod + suffix)
             if not os.path.exists(path):

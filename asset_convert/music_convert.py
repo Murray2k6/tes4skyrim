@@ -38,8 +38,9 @@ from worker_budget import worker_count  # noqa: E402
 from output_layout import asset_root as _asset_root, plugin_out_root  # noqa: E402
 
 from .audio_converter import find_ffmpeg, find_xwmaencode  # noqa: E402
+from . import paths
 
-_DEFAULT_EXPORT = Path(__file__).resolve().parent.parent / 'export'
+_DEFAULT_EXPORT = paths.EXPORT
 
 BS = chr(92)
 

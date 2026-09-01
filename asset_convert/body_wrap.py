@@ -54,6 +54,7 @@ import numpy as np
 
 # Apply all PyFFI patches (time.clock fix, nif.xml condition fixes) before import
 from . import pyffi_monkey_patch as _patch  # noqa: F401
+from . import paths
 
 try:
     from pyffi.formats.nif import NifFormat
@@ -63,9 +64,9 @@ except ImportError:
 
 from .skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
 
-_REPO = Path(__file__).parent.parent
-_GEN_DIR = Path(__file__).parent / 'generated'
-_OB_BODY_DIR = _REPO / 'export' / 'Oblivion.esm' / 'meshes' / 'characters' / '_male'
+_REPO = paths.REPO
+_GEN_DIR = paths.GENERATED
+_OB_BODY_DIR = paths.EXPORT / 'Oblivion.esm' / 'meshes' / 'characters' / '_male'
 
 # The HEAD group.  Oblivion files the head outside _male\ (it is shared between
 # genders -- there is no femalehead), so these are named relative to the

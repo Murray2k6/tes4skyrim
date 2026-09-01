@@ -47,8 +47,9 @@ from worker_budget import worker_count  # noqa: E402
 # voicemap/liptext files. Without an explicit `extract_dir` the export root is
 # assumed, which is where the registry lives for every caller that omits it.
 from output_layout import asset_root as _asset_root, plugin_out_root
+from . import paths
 
-_DEFAULT_EXPORT = Path(__file__).resolve().parent.parent / 'export'
+_DEFAULT_EXPORT = paths.EXPORT
 
 
 def _out_root(output_dir, source_name, extract_dir=None):
@@ -91,8 +92,7 @@ def find_ffmpeg(ffmpeg_path: str = 'ffmpeg') -> 'str | None':
         candidates = [ffmpeg_path]
     else:
         candidates = []
-        project_root = Path(__file__).resolve().parent.parent
-        bundled = project_root / 'external' / 'ffmpeg' / 'ffmpeg.exe'
+        bundled = paths.EXTERNAL / 'ffmpeg' / 'ffmpeg.exe'
         if bundled.is_file():
             candidates.append(str(bundled))
         candidates.append('ffmpeg')
@@ -123,9 +123,7 @@ def find_xwmaencode(search_dir: 'str | None' = None) -> 'str | None':
     candidates = []
     if search_dir:
         candidates.append(Path(search_dir) / 'xWMAEncode.exe')
-    # Project root = parent of this file's directory
-    project_root = Path(__file__).resolve().parent.parent
-    candidates.append(project_root / 'external' / 'xwmaencode' / 'xWMAEncode.exe')
+    candidates.append(paths.EXTERNAL / 'xwmaencode' / 'xWMAEncode.exe')
 
     for cand in candidates:
         if cand.is_file():
@@ -160,8 +158,7 @@ def find_lipgenerator(search_dir: 'str | None' = None) -> 'str | None':
     candidates = []
     if search_dir:
         candidates.append(Path(search_dir) / 'LipGenerator.exe')
-    project_root = Path(__file__).resolve().parent.parent
-    candidates.append(project_root / 'external' / 'lipgen' / 'LipGenerator.exe')
+    candidates.append(paths.EXTERNAL / 'lipgen' / 'LipGenerator.exe')
     try:
         import winreg
         for subkey in (r'SOFTWARE\WOW6432Node\Bethesda Softworks\Skyrim Special Edition',

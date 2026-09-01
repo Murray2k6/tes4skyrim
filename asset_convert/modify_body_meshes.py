@@ -37,6 +37,7 @@ import argparse, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asset_convert.pyffi_monkey_patch  # noqa: F401 — must precede NifFormat
+from asset_convert import paths
 from pyffi.formats.nif import NifFormat
 
 # Body-part slot for lower body (hips + upper legs)
@@ -344,10 +345,9 @@ def main():
                         help='Explicit extracted Skyrim meshes tree '
                              '(default: auto-extract from the SSE BSAs)')
     parser.add_argument('--output-dir',
-                        default=os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                             'output', 'oblivion.esm', 'meshes',
-                                             'actors', 'character',
-                                             'character assets'),
+                        default=str(paths.OUTPUT / 'oblivion.esm'
+                                    / 'meshes' / 'actors' / 'character'
+                                    / 'character assets'),
                         help='Output directory for modified body meshes')
     args = parser.parse_args()
 

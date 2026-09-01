@@ -9,6 +9,7 @@ import numpy as np
 
 # Apply all PyFFI patches (time.clock fix, nif.xml condition fixes) before import
 from . import pyffi_monkey_patch as _patch  # noqa: F401
+from . import paths
 
 try:
     from pyffi.formats.nif import NifFormat
@@ -38,13 +39,10 @@ NIF_FLAGS = 14  # Standard Skyrim NiAVObject flags
 # Cache: (filepath) → list of NiTriShape blocks (cloned once, reused per NIF)
 _BODY_GEOM_CACHE: dict[str, list] = {}
 
-# Preferred path for body-fill geometry: the modified body (after modify_body_meshes.py
-# has been run) splits part-32 into torso(32)+upper-legs(44), preventing the cuirass
-# from hiding the legs.  Falls back to the vanilla body auto-extracted from the
-# SSE BSAs (see skyrim_assets) if not yet generated.
-_SKYRIM_BODY_DIR_MODIFIED = (Path(__file__).parent.parent /
-                             'output' / 'oblivion.esm' / 'meshes' /
-                             'actors' / 'character' / 'character assets')
+#: Modified body: part-32 split into torso+upper-legs so a cuirass cannot hide the legs.
+_SKYRIM_BODY_DIR_MODIFIED = (paths.OUTPUT / 'oblivion.esm' / 'meshes'
+                             / 'actors' / 'character'
+                             / 'character assets')
 
 # Keywords in the Oblivion skin texture path → (male_nif, female_nif) basename
 # Order matters: 'upperbody'/'leg' → body NIF, 'hand' → hands NIF, 'foot' → feet NIF
@@ -965,13 +963,11 @@ def splice_body_geometry(data, skin_info: dict, fill_body_part: int = 32) -> int
     # OB body skin is already stripped, so every trishape present is armor.
     armor_surf = _armor_surface(armor_root)
 
-    # Load Skyrim skeleton data for positioning stub bones.
-    _gen_dir = Path(__file__).parent / 'generated'
     sk_skel_m, sk_skel_f = {}, {}
     try:
         from .skin_retarget import _load_skeleton
-        sk_skel_m = _load_skeleton(_gen_dir / 'skeleton_bones_skyrim_male.json')
-        sk_skel_f = _load_skeleton(_gen_dir / 'skeleton_bones_skyrim_female.json')
+        sk_skel_m = _load_skeleton(paths.GENERATED / 'skeleton_bones_skyrim_male.json')
+        sk_skel_f = _load_skeleton(paths.GENERATED / 'skeleton_bones_skyrim_female.json')
     except Exception:
         pass
 

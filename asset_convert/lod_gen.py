@@ -25,16 +25,13 @@ from .game_paths import win_join
 # Paths
 # ---------------------------------------------------------------------------
 
-SCRIPT_DIR = Path(__file__).parent.parent.resolve()
-sys.path.insert(0, str(SCRIPT_DIR))
+from . import paths
+
+sys.path.insert(0, str(paths.REPO))
 from subprocess_flags import POPEN_FLAGS, windows_cmd  # noqa: E402
 
-# LODGen 3.0.36.0. This replaced the 2.2.0.0 build of the same name, which
-# let an unparseable model throw out of a worker thread and take the whole
-# process down, losing every tile after it. See run_lodgen().
-LODGEN_EXE = (
-    SCRIPT_DIR / "external" / "lodgen" / "LODGenx64.exe"
-)
+#: LODGen 3.0.36.0; 2.2.0.0 let one bad model kill the process. See run_lodgen().
+LODGEN_EXE = paths.LODGEN
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ Skip reason codes (printed in skip list at end of batch_convert):
 """
 
 import collections as _collections
+import json as _json
 import io as _io
 import logging as _logging
 import os
@@ -38,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from worker_budget import worker_count  # noqa: E402
 
 from . import landscape_normals   # owns the shared stand-in normal's path
+from . import paths
 from .skyrim_overrides import (
     ARMOR_DEFAULT_BODY_PART,
     ARMOR_GEOMETRY_BODY_PARTS,
@@ -459,12 +461,10 @@ def _shield_attach_transform():
     if _SHIELD_ATTACH_T is not None:
         return _SHIELD_ATTACH_T
 
-    import json as _json
-    gen = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generated')
     try:
-        with open(os.path.join(gen, 'skeleton_bones_oblivion.json')) as f:
+        with open(paths.GENERATED / 'skeleton_bones_oblivion.json') as f:
             ob = {k: np.array(v, dtype=np.float64) for k, v in _json.load(f).items()}
-        with open(os.path.join(gen, 'skeleton_bones_skyrim_male.json')) as f:
+        with open(paths.GENERATED / 'skeleton_bones_skyrim_male.json') as f:
             sk = {k: np.array(v, dtype=np.float64) for k, v in _json.load(f).items()}
 
         def _anat_hand_frame(hand, mid_base, thumb_base):

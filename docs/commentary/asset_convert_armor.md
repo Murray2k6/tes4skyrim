@@ -5,6 +5,7 @@
 ## Contents
 
 - [NIF worn armor conversion](#nif-worn-armor-conversion)
+- [Closing the last ~10% cuirass-edge gap](#cuirass-edge-gap-ideas)
 - [Body-wrap armor fitting (2026-07-10/11, asset_convert/body_wrap.py)](#body-wrap-armor-fitting)
 - [NIF weapon Prn (attach node) contract](#nif-weapon-prn-contract)
 - [NIF torch Prn — Skyrim carries the torch on the SHIELD node (SOLVED 2026-08-01)](#nif-torch-prn-skyrim-carries)
@@ -263,3 +264,46 @@ the heads in their respective head-pivot frames, measured from
 OB headhuman.nif vs SK malehead.nif (see docs/commentary/asset_convert_nif.md):
   skull top   OB +13.6  SK +11.5  -> dz = -2.1
   Y span      OB [-3.75, +11.31]  SK [-5.97, +11.58] -> the SK skull
+
+
+## Closing the last ~10% cuirass-edge gap — 17 ideas, 11 measured failures
+<a id="cuirass-edge-gap-ideas"></a>
+
+Moved out of `skin_retarget.py`, where it was 260 lines of comment above the
+first statement. Baseline at the time: **cuirass 10.80%, gauntlets 2.43%,
+boots 0.45%** edge failure (thresholds 15% / 15% / 10%).
+
+Root cause, measured: 418/418 UpperBody failures are Clavicle-adjacent
+(238 Clavicle-Clavicle + 104 Clavicle-UpperArmTwist + 76
+UpperArmTwist-UpperArmTwist). Adjacent vertices carry different bone-weight
+ratios, so DQS gives them slightly different effective rotations and the edge
+between them stretches. The residual arm RMSD ~4.0 is a rotation-only floor:
+UpperArmTwist (err 13.4) and ForearmTwist (err 9.4) are ~56% of arm cost and
+come from bone LENGTH differences, which rotation cannot fix.
+
+**Tried and reverted — do not retry without new evidence:**
+
+| Idea | Approach | Result |
+|---|---|---|
+| 1 | Pre-FK per-chain bone-length scaling | reverted |
+| 5 | Post-FK per-chain Procrustes/Kabsch snap | reverted |
+| 7 | Targeted twist-bone delta propagation | reverted |
+| 8 | Factored global+local FK | cuirass 10.80% -> 13.8% |
+| 9 | Edge spring relaxation, bone-dominance anchored | 10.80% -> 8.83%, but UV-seam twin vertices tore visible holes; DISABLED |
+| 10 | Laplacian deformation, bone-position constrained | all variants reverted; uniform Laplacian unsuitable |
+| 11 | Virtual intermediate shoulder-blend bone | 10.80% -> 10.04%, worse than spring |
+| 13 | ARAP | cuirass -> 36.21%, boots -> 18.79% |
+| 14 | Weight sharpening, gamma sweep 1.5-4.0 | reverted to gamma=1.0 |
+| 15 | Cotangent Laplacian correction | cuirass -> 32.5%, catastrophic |
+| 16 | Anchor co-rotation prediction (deformation transfer) | 9.05% -> 9.91% |
+
+**Never tried** (predictions only, no measurement): Gaussian pre-warp (2),
+thin-plate-spline warp (3), ARAP as originally framed (4), chain-level affine
+FK with shear (6), seam-welded spring relaxation (12), anchor-constrained
+spring with co-rotation targets (17).
+
+The pattern across 11 failures: any method that lets non-rigid deformation
+touch the mesh globally trades a small edge-length win for large distortion
+elsewhere. Idea 9 is the only one that ever improved the number, and it
+shipped disabled because the artifact it introduced was worse than the metric
+it fixed.

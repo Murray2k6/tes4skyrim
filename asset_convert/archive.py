@@ -26,8 +26,9 @@ import zipfile
 from pathlib import Path
 
 from subprocess_flags import POPEN_FLAGS, windows_cmd
+from . import paths
 
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = paths.REPO
 SEVENZIP_EXE = SCRIPT_DIR / 'external' / '7zip' / '7z.exe'
 
 # Extensions this module can open. `.bsa` is deliberately absent: BSAs are read
