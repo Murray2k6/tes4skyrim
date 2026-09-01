@@ -35,7 +35,8 @@ import math
 import os
 import struct
 import sys
-import zlib
+
+from tes5_import.tes5_reader import walk
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,90 +48,58 @@ ANGLE_STALL = (2 ** 24) * TWO_PI
 # Skyrim worldspaces span roughly +/-2^22 units; beyond this a position is junk.
 POS_LIMIT = 1.0e9
 
-
-def _f32_stalls(a):
-    """True if `a -= 2*pi` (or `+=`) cannot move `a` in float32."""
-    if a != a or a in (float('inf'), float('-inf')):
-        return True
-    step = struct.unpack('<f', struct.pack('<f', TWO_PI))[0]
-    cur = struct.unpack('<f', struct.pack('<f', a))[0]
-    if cur > step:
-        return struct.unpack('<f', struct.pack('<f', cur - step))[0] == cur
-    if cur < 0.0:
-        return struct.unpack('<f', struct.pack('<f', cur + step))[0] == cur
-    return False
+#: Placed-reference signatures that carry a 6-float DATA, plus CELL for grids.
+_WANTED = (b'CELL', b'REFR', b'ACHR', b'ACRE')
 
 
-def _subs(body):
-    out, q = {}, 0
-    while q + 6 <= len(body):
-        sig = body[q:q + 4]
-        size = struct.unpack_from('<H', body, q + 4)[0]
-        q += 6
-        out.setdefault(sig, body[q:q + size])
-        q += size
-    return out
+def _why_unnormalizable(x, y, z, rx, ry, rz) -> list:
+    """Every reason the engine cannot normalize this DATA, as text."""
+    why = []
+    for nm, a in (('RX', rx), ('RY', ry), ('RZ', rz)):
+        if a != a:
+            why.append('%s=NaN' % nm)
+        elif a in (float('inf'), float('-inf')):
+            why.append('%s=Inf' % nm)
+        elif abs(a) > ANGLE_STALL:
+            why.append('%s=%g (normalize loop cannot terminate)' % (nm, a))
+    for nm, v in (('X', x), ('Y', y), ('Z', z)):
+        if v != v or abs(v) > POS_LIMIT:
+            why.append('%s=%g' % (nm, v))
+    return why
 
 
 def scan(path):
-    data = open(path, 'rb').read()
-    bad = []
+    """`(refs_with_DATA, [(fid, sig, cell_grid, pos, reasons), ...])`."""
+    with open(path, 'rb') as fh:
+        data = fh.read()
     total = 0
     cellpos = {}
     pending = []
 
-    def walk(off, end, stack):
-        nonlocal total
-        p = off
-        while p + 24 <= end:
-            sig = data[p:p + 4]
-            if sig == b'GRUP':
-                gsize, label, gtype = struct.unpack_from('<IiI', data, p + 4)
-                walk(p + 24, p + gsize, stack + [(gtype, label)])
-                p += gsize
-                continue
-            size, flags, fid = struct.unpack_from('<III', data, p + 4)
-            body = data[p + 24:p + 24 + size]
-            if flags & 0x00040000:
-                try:
-                    body = zlib.decompress(body[4:])
-                except zlib.error:
-                    body = b''
-            if sig == b'CELL':
-                xclc = _subs(body).get(b'XCLC')
-                if xclc and len(xclc) >= 8:
-                    cellpos[fid] = struct.unpack_from('<ii', xclc, 0)
-            elif sig in (b'REFR', b'ACHR', b'ACRE'):
-                d = _subs(body).get(b'DATA')
-                if d and len(d) >= 24:
-                    total += 1
-                    x, y, z, rx, ry, rz = struct.unpack_from('<6f', d, 0)
-                    why = []
-                    for nm, a in (('RX', rx), ('RY', ry), ('RZ', rz)):
-                        if a != a:
-                            why.append('%s=NaN' % nm)
-                        elif a in (float('inf'), float('-inf')):
-                            why.append('%s=Inf' % nm)
-                        elif abs(a) > ANGLE_STALL:
-                            why.append('%s=%g (normalize loop cannot '
-                                       'terminate)' % (nm, a))
-                    for nm, v in (('X', x), ('Y', y), ('Z', z)):
-                        if v != v or abs(v) > POS_LIMIT:
-                            why.append('%s=%g' % (nm, v))
-                    if why:
-                        cell = next((l for t, l in reversed(stack) if t == 6),
-                                    None)
-                        pending.append((fid, sig.decode('latin-1'), cell,
-                                        (x, y, z), why))
-            p += 24 + size
+    for rec, stack in walk(data, *_WANTED):
+        subs = rec.sub_map()
+        if rec.sig == b'CELL':
+            xclc = subs.get(b'XCLC')
+            if xclc and len(xclc) >= 8:
+                cellpos[rec.form_id] = struct.unpack_from('<ii', xclc, 0)
+            continue
+        d = subs.get(b'DATA')
+        if not d or len(d) < 24:
+            continue
+        total += 1
+        pos = struct.unpack_from('<6f', d, 0)
+        why = _why_unnormalizable(*pos)
+        if why:
+            pending.append((rec.form_id, rec.sig.decode('latin-1'),
+                            stack.cell, pos[:3], why))
 
-    walk(0, len(data), [])
-    for fid, sig, cell, pos, why in pending:
-        bad.append((fid, sig, cellpos.get(cell), pos, why))
+    bad = [(fid, sig, cellpos.get(cell), pos, why)
+           for fid, sig, cell, pos, why in pending]
     return total, bad
 
 
 def main():
+    """Report every unnormalizable placed reference; exit 1 if any."""
     ap = argparse.ArgumentParser(
         description='Find placed refs the engine cannot normalize (hard hang)')
     ap.add_argument('--plugin', required=True)

@@ -27,13 +27,12 @@ import math
 import os
 import struct
 import sys
-import zlib
 from collections import Counter
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from output_layout import paths
+from tes5_import.tes5_reader import records
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_HEADER = 24
 
 # (record sig, subrecord) -> (offset, count) of floats to test in the payload.
 # Only fields the engine reads geometrically at load are listed; a wrong entry
@@ -52,65 +51,45 @@ FLOAT_FIELDS = {
     (b'LAND', b'VHGT'): (0, 1),
 }
 
+#: The record signatures FLOAT_FIELDS can match, so the walk reads no others.
+_WANTED = tuple({sig for sig, _ in FLOAT_FIELDS})
 
-def _subrecords(body):
-    o = 0
-    while o + 6 <= len(body):
-        st = body[o:o + 4]
-        ss = struct.unpack_from('<H', body, o + 4)[0]
-        yield st, body[o + 6:o + 6 + ss]
-        o += 6 + ss
+
+def _classify(v: float, max_abs: float):
+    """'NaN', 'Infinity', 'absurd', or None when the float is sane."""
+    if math.isnan(v):
+        return 'NaN'
+    if math.isinf(v):
+        return 'Infinity'
+    return 'absurd' if abs(v) > max_abs else None
 
 
 def audit(path, label, max_list, max_abs):
+    """Report and count every poisoned float in one plugin."""
     with open(path, 'rb') as f:
-        d = f.read()
-    hdr = struct.unpack_from('<I', d, 4)[0]
+        data = f.read()
     bad = Counter()
     examples = {}
     checked = 0
 
-    def walk(o, e):
-        nonlocal checked
-        while o < e:
-            sig = d[o:o + 4]
-            size = struct.unpack_from('<I', d, o + 4)[0]
-            if sig == b'GRUP':
-                walk(o + _HEADER, o + size)
-                o += size
+    for rec in records(data, *_WANTED):
+        for st, payload in rec.subs():
+            spec = FLOAT_FIELDS.get((rec.sig, st))
+            if not spec:
                 continue
-            flags = struct.unpack_from('<I', d, o + 8)[0]
-            fid = struct.unpack_from('<I', d, o + 12)[0]
-            body = d[o + _HEADER:o + _HEADER + size]
-            if flags & 0x00040000:
-                try:
-                    body = zlib.decompress(body[4:])
-                except zlib.error:
-                    body = b''
-            for st, payload in _subrecords(body):
-                spec = FLOAT_FIELDS.get((sig, st))
-                if not spec:
+            off, count = spec
+            if len(payload) < off + 4 * count:
+                continue
+            for i, v in enumerate(struct.unpack_from(f'<{count}f',
+                                                     payload, off)):
+                checked += 1
+                kind = _classify(v, max_abs)
+                if kind is None:
                     continue
-                off, count = spec
-                if len(payload) < off + 4 * count:
-                    continue
-                vals = struct.unpack_from('<%df' % count, payload, off)
-                for i, v in enumerate(vals):
-                    checked += 1
-                    if math.isnan(v):
-                        kind = 'NaN'
-                    elif math.isinf(v):
-                        kind = 'Infinity'
-                    elif abs(v) > max_abs:
-                        kind = 'absurd'
-                    else:
-                        continue
-                    key = (sig.decode(), st.decode(), i, kind)
-                    bad[key] += 1
-                    examples.setdefault(key, (fid, v))
-            o += _HEADER + size
+                key = (rec.sig.decode(), st.decode(), i, kind)
+                bad[key] += 1
+                examples.setdefault(key, (rec.form_id, v))
 
-    walk(_HEADER + hdr, len(d))
     n = sum(bad.values())
     print(f"--- {label}: {checked:,} floats checked -> "
           + (f"{n} POISONED" if n else "CLEAN"))
@@ -122,6 +101,7 @@ def audit(path, label, max_list, max_abs):
 
 
 def main():
+    """Audit every named plugin and return the poisoned-float total."""
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)

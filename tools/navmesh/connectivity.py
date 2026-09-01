@@ -31,11 +31,11 @@ import argparse
 import mmap
 import struct
 import sys
-import zlib
 from collections import Counter
 
-REC_HDR = 24
-GRP_HDR = 24
+from tes5_import.tes5_reader import REC_HDR
+from tes5_import.tes5_reader import records as reader_records
+from tes5_import.tes5_reader import subrecords as reader_subrecords
 
 EDGE_LINK_SIZE = 10          # Type U32 + Navmesh U32 + Triangle S16
 DOOR_TRI_SIZE = 10           # Triangle S16 + CRC U32 + Door FormID U32
@@ -51,37 +51,15 @@ VANILLA_EXTERIOR_LINK_RATE = 0.84
 
 
 def walk(data, start, end):
-    p = start
-    while p < end - 8:
-        sig = data[p:p + 4]
-        if sig == b'GRUP':
-            size = struct.unpack('<I', data[p + 4:p + 8])[0]
-            if size < GRP_HDR:
-                return
-            yield from walk(data, p + GRP_HDR, p + size)
-            p += size
-            continue
-        size, flags = struct.unpack('<II', data[p + 4:p + 12])
-        fid = struct.unpack('<I', data[p + 12:p + 16])[0]
-        body = data[p + REC_HDR:p + REC_HDR + size]
-        if flags & 0x00040000:
-            try:
-                body = zlib.decompress(body[4:])
-            except zlib.error:
-                body = b''
-        yield sig.decode('latin1'), fid, body
-        p += REC_HDR + size
+    """Yield `(sig, FormID, body)` for every record in `[start, end)`."""
+    for rec in reader_records(data, span=(start, end)):
+        yield rec.sig.decode('latin1'), rec.form_id, rec.body
 
 
 def subrecords(body):
-    out = []
-    p = 0
-    while p < len(body) - 5:
-        sig = body[p:p + 4].decode('latin1')
-        ln = struct.unpack('<H', body[p + 4:p + 6])[0]
-        out.append((sig, body[p + 6:p + 6 + ln]))
-        p += 6 + ln
-    return out
+    """`[(sig, data), ...]` with the tag decoded; XXXX is already resolved."""
+    return [(tag.decode('latin1'), data)
+            for tag, data in reader_subrecords(body)]
 
 
 class NavMesh:

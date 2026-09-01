@@ -53,8 +53,9 @@ import csv
 import math
 import struct
 import sys
-import zlib
 from collections import Counter
+
+from tes5_import.tes5_reader import subrecords, walk
 
 # NVNM constants — mirror tes5_import/pgrd_to_navm.py.
 _PATHING_CELL_CRC = 0xA5E9A03C
@@ -86,51 +87,13 @@ _DOWNFACE_EPS = 1e-6
 
 
 # ---------------------------------------------------------------------------
-# Record walking (shared shape with tools/navmesh/dump.py)
+# Record walking
 # ---------------------------------------------------------------------------
 
-def iter_records(data, start, end, path=()):
-    """Yield (sig, formid, body, grup_path) recursing into GRUPs."""
-    off = start
-    while off + 24 <= end:
-        sig = data[off:off + 4]
-        size = struct.unpack_from('<I', data, off + 4)[0]
-        if sig == b'GRUP':
-            label = struct.unpack_from('<I', data, off + 8)[0]
-            gtype = struct.unpack_from('<i', data, off + 12)[0]
-            grp_end = off + size
-            yield from iter_records(data, off + 24, min(grp_end, end),
-                                     path + ((gtype, label),))
-            off = grp_end
-            continue
-        flags = struct.unpack_from('<I', data, off + 8)[0]
-        formid = struct.unpack_from('<I', data, off + 12)[0]
-        body = data[off + 24:off + 24 + size]
-        if flags & 0x00040000:                      # Compressed
-            try:
-                body = zlib.decompress(body[4:])
-            except zlib.error:
-                body = b''
-        yield sig.decode('latin1'), formid, body, path
-        off += 24 + size
-
-
 def _iter_subrecords(body):
-    """Yield (sig, data) honouring the XXXX oversized-subrecord protocol."""
-    off = 0
-    override = None
-    while off + 6 <= len(body):
-        sig = body[off:off + 4].decode('latin1')
-        size = struct.unpack_from('<H', body, off + 4)[0]
-        off += 6
-        if sig == 'XXXX':
-            override = struct.unpack_from('<I', body, off)[0]
-            off += size
-            continue
-        real = override if override is not None else size
-        override = None
-        yield sig, body[off:off + real]
-        off += real
+    """Yield `(sig, data)` with the tag decoded; XXXX is already resolved."""
+    for tag, data in subrecords(body):
+        yield tag.decode('latin1'), data
 
 
 # ---------------------------------------------------------------------------
@@ -558,21 +521,13 @@ def scan(path, want_doors=True):
     navi_bodies = []
     teleport_doors = {}            # door REFR fid -> parent cell fid
     door_xndp = {}                 # door REFR fid -> (navm fid, tri) or None
-    # A NAVM lives in a CELL's temporary child group (type 9); the enclosing
-    # type-6 group's label is the CELL FormID, so the parent cell is readable
-    # from the GRUP path without a second pass.
-    for sig, fid, body, gpath in iter_records(data, start, len(data)):
+    for rec, stack in walk(data, span=(start, len(data))):
+        sig, fid, body = rec.sig.decode('latin1'), rec.form_id, rec.body
         if sig == 'NAVM':
             for ssig, sdata in _iter_subrecords(body):
                 if ssig == 'NVNM':
                     nm = parse_nvnm(fid, sdata)
-                    cell = nm.cell
-                    if not cell:
-                        for gtype, label in reversed(gpath):
-                            if gtype == 6:
-                                cell = label
-                                break
-                    meshes.append((nm, cell))
+                    meshes.append((nm, nm.cell or stack.cell or 0))
                     break
         elif sig == 'NAVI':
             navi_bodies.append(body)
@@ -586,12 +541,7 @@ def scan(path, want_doors=True):
                     xndp = (struct.unpack_from('<I', sdata, 0)[0],
                             struct.unpack_from('<h', sdata, 4)[0])
             if has_xtel:
-                cell = 0
-                for gtype, label in reversed(gpath):
-                    if gtype == 6:
-                        cell = label
-                        break
-                teleport_doors[fid] = cell
+                teleport_doors[fid] = stack.cell or 0
                 door_xndp[fid] = xndp
     return meshes, navi_bodies, teleport_doors, door_xndp, mask
 

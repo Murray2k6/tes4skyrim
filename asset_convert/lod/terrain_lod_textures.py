@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from asset_convert.game_paths import win_join
+from tes5_import.tes5_reader import records
 
 # 4096 game units per cell; landscape diffuse repeats every 2 cells in Skyrim.
 # Oblivion authored the same, so one .dds spans a 2x2 cell region at UV [0,1].
@@ -60,55 +61,6 @@ MURK_MAX = 0.9             # never fully hide the ground texture
 # ---------------------------------------------------------------------------
 # Output-ESM parsing: LTEX FormID -> diffuse/normal texture path
 # ---------------------------------------------------------------------------
-
-def _sub(body: bytes, tag: bytes):
-    p = 0
-    n = len(body)
-    while p + 6 <= n:
-        s = body[p:p+4]
-        sz = struct.unpack_from('<H', body, p+4)[0]
-        if s == tag:
-            return body[p+6:p+6+sz]
-        p += 6 + sz
-    return None
-
-
-def _zstr(b) -> str:
-    if b is None:
-        return ''
-    return bytes(b).rstrip(b'\x00').decode('latin-1', errors='replace')
-
-
-def iter_records(raw: bytes):
-    """Yield (sig, fid, body) for every record, descending into groups.
-
-    Handles compressed records transparently.
-    """
-    import zlib
-    n = len(raw)
-    hdr_size = struct.unpack_from('<I', raw, 4)[0]
-    stack = [(24 + hdr_size, n)]
-    while stack:
-        p, end = stack.pop()
-        while p < end and p + 24 <= n:
-            sig = raw[p:p+4]
-            if sig == b'GRUP':
-                g_size = struct.unpack_from('<I', raw, p+4)[0]
-                stack.append((p+24, p+g_size))
-                p += g_size
-                continue
-            data_size = struct.unpack_from('<I', raw, p+4)[0]
-            flags = struct.unpack_from('<I', raw, p+8)[0]
-            fid = struct.unpack_from('<I', raw, p+12)[0]
-            body = raw[p+24:p+24+data_size]
-            if flags & 0x00040000 and len(body) >= 4:
-                try:
-                    body = zlib.decompress(body[4:])
-                except Exception:
-                    pass
-            yield sig.decode('latin-1', 'replace'), fid, body
-            p += 24 + data_size
-
 
 # Keyed on (path, mtime_ns, size) like lod_gen._PARSED_ESM_CACHE. The result is
 # a pure function of the file and carries NO worldspace scoping, yet the terrain
@@ -142,17 +94,15 @@ def build_ltex_texture_map(esm_path: Path) -> dict:
             return dict(hit)
 
     raw = esm_path.read_bytes()
-    txst = {}   # TXST FormID -> (tx00, tx01)
-    ltex_tnam = {}  # LTEX FormID -> TXST FormID
-    for sig, fid, body in iter_records(raw):
-        if sig == 'TXST':
-            tx00 = _zstr(_sub(body, b'TX00'))
-            tx01 = _zstr(_sub(body, b'TX01'))
-            txst[fid] = (tx00, tx01)
-        elif sig == 'LTEX':
-            tnam = _sub(body, b'TNAM')
-            if tnam and len(tnam) >= 4:
-                ltex_tnam[fid] = struct.unpack_from('<I', tnam)[0]
+    txst = {}
+    ltex_tnam = {}
+    for rec in records(raw, b'TXST', b'LTEX'):
+        if rec.sig == b'TXST':
+            txst[rec.form_id] = (rec.string(b'TX00'), rec.string(b'TX01'))
+            continue
+        tnam = rec.sub(b'TNAM')
+        if tnam and len(tnam) >= 4:
+            ltex_tnam[rec.form_id] = struct.unpack_from('<I', tnam)[0]
 
     out = {}
     for lfid, tfid in ltex_tnam.items():

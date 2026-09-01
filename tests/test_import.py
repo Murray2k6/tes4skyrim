@@ -43,6 +43,7 @@ from tes5_import.text_reader import (
     parse_record_block,
     unescape_value,
 )
+from tes5_import.tes5_reader import records as reader_records
 from tes5_import.writer import (
     FORM_VERSION_SSE,
     GROUP_HEADER_SIZE,
@@ -1411,23 +1412,11 @@ class TestSkyrimRecordFormat:
 
     def _read_record(self, fid):
         """Read a record by FormID from Skyrim.esm."""
-        import mmap
         with open(self.SKYRIM_ESM, 'rb') as f:
-            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            pos = 0
-            while pos < len(mm) - 24:
-                sig = mm[pos:pos+4]
-                if sig == b'GRUP':
-                    pos += 24
-                    continue
-                sz = struct.unpack_from('<I', mm, pos+4)[0]
-                rec_fid = struct.unpack_from('<I', mm, pos+12)[0]
-                if rec_fid == fid:
-                    rec = bytes(mm[pos:pos+24+sz])
-                    mm.close()
-                    return rec
-                pos += 24 + sz
-            mm.close()
+            data = f.read()
+        for rec in reader_records(data, bodies=()):
+            if rec.form_id == fid:
+                return data[rec.offset:rec.end]
         return None
 
     def test_skyrim_dialogue_generic_qust(self):

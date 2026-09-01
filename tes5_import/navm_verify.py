@@ -275,12 +275,37 @@ def adopt_if_unchanged(jobs: list, geom_cache, sample: int = None) -> bool:
     return True
 
 
+def door_centers_cache_path(collision_cache: str):
+    """The door panel-centroid cache, which sits beside the collision cache."""
+    if not collision_cache:
+        return None
+    return os.path.join(os.path.dirname(collision_cache),
+                        'door_centers_cache.json')
+
+
+def init_context(base_model_by_fid, door_fids, collision_cache,
+                 formid_offset, geom_cache, injected_formids,
+                 door_centers_cache) -> None:
+    """Populate this process's navm_worker globals before any run_job call.
+
+    MUST run before `prepare`, which rebuilds sampled cells in THIS process.
+    disable_gc=False keeps the parent's collector; the pool's copies pass True.
+
+    See: docs/commentary/tes5_import_navmesh.md#verifying-a-cache-against-fresh-geometry
+    """
+    from . import navm_worker
+    navm_worker.init_worker(base_model_by_fid, door_fids, collision_cache,
+                            formid_offset, geom_cache, injected_formids,
+                            disable_gc=False,
+                            door_centers_cache=door_centers_cache)
+
+
 def prepare(jobs: list, geom_cache) -> None:
     """Ready the navmesh cache for this run: adopt if salvageable, then sample.
 
     The one call the import makes.  Adoption rescues a cache whose tag moved
     but whose geometry still reproduces; marking then picks the cells this run
-    re-verifies.
+    re-verifies.  `init_context` MUST have run first.
     """
     if not geom_cache:
         return

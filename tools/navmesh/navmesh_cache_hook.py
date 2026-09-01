@@ -83,14 +83,6 @@ NAVMESH_PATHS = ('tes5_import/navmesh/', 'tes5_import/pgrd_to_navm.py')
 # cross-cell portals into the NVNM *after* geometry comes out of the cache, so
 # editing it changes the written mesh but never the cached geometry.
 NAVMESH_FUNCS = {
-    'tes5_import/import_main.py': frozenset({
-        '_navmesh_geom_cache',    # computes the tag itself
-        '_navm_model_key',        # builds the collision keys _geom_hash digests
-        '_build_base_model_index',
-        '_build_door_fid_set',    # door set feeds the door wedges
-        '_gather_navm_jobs',      # decides which cells are built, and with what
-        '_precompute_navmeshes',  # wires the cache into the pool
-    }),
     'asset_convert/collision/collision_extract.py': frozenset({
         'collision_digest',       # the per-mesh digest every cell hash consumes
         'collision_content_hash',

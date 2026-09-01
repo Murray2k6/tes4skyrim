@@ -115,8 +115,8 @@ def asset_name(plugin: str) -> str:
 
 def source_tag(plugin: str) -> str | None:
     """The navmesh source tag the CURRENT code would use for this plugin."""
-    from tes5_import import import_main as im
-    got = im._navmesh_geom_cache(collision_path(plugin))
+    from tes5_import.navmesh import pool as navm_pool
+    got = navm_pool.navmesh_geom_cache(collision_path(plugin))
     return got[1] if got else None
 
 

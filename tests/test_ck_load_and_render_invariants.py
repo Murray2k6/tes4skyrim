@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tes5_import.record_types.items import convert_STAT, convert_TREE
+from tes5_import.tes5_reader import GRP_WORLD_CHILDREN, records, walk
 
 PLUGIN = 'Oblivion.esm'
 CELL_SIZE = 4096.0
@@ -162,66 +163,28 @@ def placements(esm):
     """
     data = esm.read_bytes()
 
-    def subs(body):
-        out, p, n = {}, 0, len(body)
-        while p + 6 <= n:
-            sig = body[p:p + 4]
-            size = struct.unpack_from('<H', body, p + 4)[0]
-            out[sig] = body[p + 6:p + 6 + size]
-            p += 6 + size
-        return out
-
-    def body_of(off, size, flags):
-        raw = data[off + 24:off + 24 + size]
-        if flags & F_COMPRESSED:
-            try:
-                return zlib.decompress(raw[4:])
-            except zlib.error:
-                return b''
-        return raw
-
     radius, base_flags = {}, {}
-    p, n = 0, len(data)
-    while p + 24 <= n:
-        if data[p:p + 4] == b'GRUP':
-            p += 24
-            continue
-        sig = data[p:p + 4]
-        size, flags, fid = struct.unpack_from('<III', data, p + 4)
-        if sig in (b'STAT', b'TREE'):
-            base_flags[fid] = (sig.decode(), flags)
-            v = subs(body_of(p, size, flags)).get(b'OBND')
-            if v and len(v) >= 12:
-                x1, y1, _z1, x2, y2, _z2 = struct.unpack('<6h', v)
-                r = max(abs(x1), abs(x2)) ** 2 + max(abs(y1), abs(y2)) ** 2
-                if r:
-                    radius[fid] = r ** 0.5
-        p += 24 + size
+    for rec in records(data, b'STAT', b'TREE'):
+        base_flags[rec.form_id] = (rec.sig.decode(), rec.flags)
+        v = rec.sub(b'OBND')
+        if v and len(v) >= 12:
+            x1, y1, _z1, x2, y2, _z2 = struct.unpack('<6h', v)
+            r = max(abs(x1), abs(x2)) ** 2 + max(abs(y1), abs(y2)) ** 2
+            if r:
+                radius[rec.form_id] = r ** 0.5
 
     refs = []
-
-    def walk(off, end, stack):
-        p = off
-        while p + 24 <= end:
-            if data[p:p + 4] == b'GRUP':
-                gsize, label, gtype = struct.unpack_from('<IiI', data, p + 4)
-                walk(p + 24, p + gsize, stack + [gtype])
-                p += gsize
-                continue
-            sig = data[p:p + 4]
-            size, flags, _fid = struct.unpack_from('<III', data, p + 4)
-            if sig == b'REFR' and 1 in stack:
-                s = subs(body_of(p, size, flags))
-                nm, dat = s.get(b'NAME'), s.get(b'DATA')
-                if nm and len(nm) >= 4 and dat and len(dat) >= 12:
-                    base = struct.unpack_from('<I', nm, 0)[0]
-                    r = radius.get(base)
-                    if r:
-                        px, py, _pz = struct.unpack_from('<fff', dat, 0)
-                        refs.append((r, px, py, flags))
-            p += 24 + size
-
-    walk(0, len(data), [])
+    for rec, stack in walk(data, b'REFR'):
+        if not stack.has_type(GRP_WORLD_CHILDREN):
+            continue
+        s = rec.sub_map()
+        nm, dat = s.get(b'NAME'), s.get(b'DATA')
+        if nm and len(nm) >= 4 and dat and len(dat) >= 12:
+            base = struct.unpack_from('<I', nm, 0)[0]
+            r = radius.get(base)
+            if r:
+                px, py, _pz = struct.unpack_from('<fff', dat, 0)
+                refs.append((r, px, py, rec.flags))
     return refs, base_flags
 
 

@@ -36,10 +36,9 @@ import argparse
 import math
 import struct
 import sys
-import zlib
 from collections import defaultdict
 
-COMPRESSED = 0x00040000
+from tes5_import.tes5_reader import walk
 
 # Creation Kit rejects an exterior cell whose |X| or |Y| exceeds this and tries
 # to DELETE it during "Initializing References" (the compare is literally
@@ -47,18 +46,6 @@ COMPRESSED = 0x00040000
 # TESObjectCELL's init-references virtual, guarded by an editor-only flag; the
 # failure path logs "Unable to delete invalid coord cell (%i, %i)").
 CK_MAX_CELL_COORD = 100
-
-
-def _subs(buf):
-    """First occurrence of each subrecord signature in a record body."""
-    out, pos = {}, 0
-    while pos + 6 <= len(buf):
-        sig = buf[pos:pos + 4]
-        size = struct.unpack_from('<H', buf, pos + 4)[0]
-        pos += 6
-        out.setdefault(sig, buf[pos:pos + size])
-        pos += size
-    return out
 
 
 def scan(path, want_refs=False):
@@ -77,58 +64,35 @@ def scan(path, want_refs=False):
     cells = {}                       # cell fid -> (edid, wrld, interior)
     refs = {}                        # refr fid -> (cell fid, x, y)
     xtel = {}                        # refr fid -> destination door fid
-    cur_cell = None
 
-    stack, pos = [], 0
-    while pos + 24 <= len(data):
-        while stack and pos >= stack[-1][0]:
-            stack.pop()
-        sig = data[pos:pos + 4]
-        if sig == b'TES4':
-            pos += 24 + struct.unpack_from('<I', data, pos + 4)[0]
-            continue
-        if sig == b'GRUP':
-            gsize, label, gtype = struct.unpack_from('<IiI', data, pos + 4)[:3]
-            stack.append((pos + gsize, gtype, label))
-            pos += 24
-            continue
-        size, flags, fid = struct.unpack_from('<III', data, pos + 4)
-        if sig in (b'WRLD', b'CELL'):
-            body = data[pos + 24:pos + 24 + size]
-            if flags & COMPRESSED:
-                body = zlib.decompress(body[4:])
-            d = _subs(body)
-            edid = d.get(b'EDID', b'').split(b'\x00')[0].decode('ascii', 'replace')
-            if sig == b'WRLD':
-                worlds[fid] = edid
-            else:
-                cur_cell = fid
-                wrld = next((g[2] for g in stack if g[1] == 1), None)
-                dat = d.get(b'DATA', b'\0')
-                cells[fid] = (edid, wrld, bool(dat[0] & 1))
-                if any(g[1] in (4, 5) for g in stack):
-                    n_block_cells += 1
-                    xclc = d.get(b'XCLC')
-                    if xclc is None:
-                        gridless.append((fid, edid, wrld))
-                    elif len(xclc) >= 8:
-                        gx, gy = struct.unpack_from('<ii', xclc)
-                        grids[(wrld, gx, gy)].append(fid)
-        elif want_refs and sig in (b'REFR', b'ACHR'):
-            body = data[pos + 24:pos + 24 + size]
-            if flags & COMPRESSED:
-                body = zlib.decompress(body[4:])
-            d = _subs(body)
-            dat = d.get(b'DATA')
+    wanted = (b'WRLD', b'CELL') + ((b'REFR', b'ACHR') if want_refs else ())
+    for rec, stack in walk(data, *wanted):
+        fid = rec.form_id
+        if rec.sig == b'WRLD':
+            worlds[fid] = rec.string(b'EDID')
+        elif rec.sig == b'CELL':
+            wrld = stack.worldspace
+            edid = rec.string(b'EDID')
+            dat = rec.sub(b'DATA') or b'\0'
+            cells[fid] = (edid, wrld, bool(dat[0] & 1))
+            if stack.of_type(4) is not None or stack.of_type(5) is not None:
+                n_block_cells += 1
+                xclc = rec.sub(b'XCLC')
+                if xclc is None:
+                    gridless.append((fid, edid, wrld))
+                elif len(xclc) >= 8:
+                    gx, gy = struct.unpack_from('<ii', xclc)
+                    grids[(wrld, gx, gy)].append(fid)
+        else:
+            dat = rec.sub(b'DATA')
             if dat and len(dat) >= 8:
                 x, y = struct.unpack_from('<ff', dat)
-                refs[fid] = (cur_cell, x, y)
-            t = d.get(b'XTEL')
+                refs[fid] = (stack.cell, x, y)
+            t = rec.sub(b'XTEL')
             if t and len(t) >= 16:
                 # formid(4) + posX,posY,posZ(12) + rotX,rotY,rotZ(12) [+flags]
                 door, tx, ty = struct.unpack_from('<Iff', t)
                 xtel[fid] = (door, tx, ty)
-        pos += 24 + size
 
     return worlds, gridless, grids, n_block_cells, cells, refs, xtel
 

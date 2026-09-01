@@ -1,6 +1,9 @@
 """Verify the WRLD->CNAM->CLMT->WLST->WTHR->IMSP->IMGS + REGN->RDWT chain
 in a converted TES5 plugin."""
-import struct, sys, zlib
+import struct
+import sys
+
+from tes5_import.tes5_reader import records as read_records
 
 path = sys.argv[1]
 data = open(path, 'rb').read()
@@ -8,34 +11,10 @@ data = open(path, 'rb').read()
 records = {}   # fid -> (sig, subrecords list)
 by_sig = {}
 
-def parse_subs(buf):
-    subs, pos = [], 0
-    while pos + 6 <= len(buf):
-        sig = buf[pos:pos+4]
-        size = struct.unpack_from('<H', buf, pos+4)[0]
-        pos += 6
-        subs.append((sig, buf[pos:pos+size]))
-        pos += size
-    return subs
-
-pos = 0
-while pos + 24 <= len(data):
-    sig = data[pos:pos+4]
-    if sig == b'TES4':
-        size = struct.unpack_from('<I', data, pos+4)[0]
-        pos += 24 + size
-        continue
-    if sig == b'GRUP':
-        pos += 24
-        continue
-    size, flags, fid = struct.unpack_from('<III', data, pos+4)
-    body = data[pos+24:pos+24+size]
-    if flags & 0x00040000:
-        body = zlib.decompress(body[4:])
-    s = sig.decode('ascii')
-    records[fid] = (s, parse_subs(body))
-    by_sig.setdefault(s, []).append(fid)
-    pos += 24 + size
+for rec in read_records(data):
+    s = rec.sig.decode('ascii')
+    records[rec.form_id] = (s, rec.subs())
+    by_sig.setdefault(s, []).append(rec.form_id)
 
 print({k: len(v) for k, v in sorted(by_sig.items())
        if k in ('WTHR', 'IMGS', 'CLMT', 'REGN', 'WRLD', 'SPGD')})

@@ -24,15 +24,14 @@ import argparse
 import os
 import struct
 import sys
-import zlib
 from collections import Counter
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from output_layout import paths
+from tes5_import.tes5_reader import REC_HDR, records, subrecords
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, SCRIPT_DIR)
 
-_HEADER = 24
 
 # Subrecords whose payload is exactly one FormID, per xEdit's definitions.
 # Kept deliberately narrow: a mis-typed entry invents dangling references that
@@ -79,73 +78,30 @@ NOT_FORMID = {
 
 
 def read_masters(data):
-    hdr = struct.unpack_from('<I', data, 4)[0]
-    o, end, out = _HEADER, _HEADER + hdr, []
-    while o + 6 <= end:
-        st = data[o:o + 4]
-        ss = struct.unpack_from('<H', data, o + 4)[0]
-        if st == b'MAST':
-            out.append(data[o + 6:o + 6 + ss]
-                       .rstrip(b'\0').decode('ascii', 'replace'))
-        o += 6 + ss
-    return out
+    """The plugin's MAST names, in declaration order, CASE PRESERVED.
+
+    `tes5_reader.masters` lowercases; these names are used as output/<name>
+    path components, so the on-disk spelling has to survive.
+    """
+    size = struct.unpack_from('<I', data, 4)[0]
+    return [d.rstrip(b'\0').decode('ascii', 'replace')
+            for tag, d in subrecords(data[REC_HDR:REC_HDR + size])
+            if tag == b'MAST']
 
 
 def own_formids(data):
     """FormIDs this file's records carry."""
-    hdr = struct.unpack_from('<I', data, 4)[0]
-    ids = set()
-
-    def walk(o, e):
-        while o < e:
-            sig = data[o:o + 4]
-            size = struct.unpack_from('<I', data, o + 4)[0]
-            if sig == b'GRUP':
-                walk(o + _HEADER, o + size)
-                o += size
-            else:
-                ids.add(struct.unpack_from('<I', data, o + 12)[0])
-                o += _HEADER + size
-
-    walk(_HEADER + hdr, len(data))
-    return ids
+    return {rec.form_id for rec in records(data, bodies=())}
 
 
 def iter_refs(data):
     """(record_sig, record_fid, sub_sig, referenced_fid) across the file."""
-    hdr = struct.unpack_from('<I', data, 4)[0]
-
-    def subs(sig, body, flags):
-        if flags & 0x00040000:
-            try:
-                body = zlib.decompress(body[4:])
-            except zlib.error:
-                return
-        o = 0
-        while o + 6 <= len(body):
-            st = body[o:o + 4]
-            ss = struct.unpack_from('<H', body, o + 4)[0]
-            if (st in FORMID_SUBS and ss == 4
-                    and (sig, st) not in NOT_FORMID):
-                yield st, struct.unpack_from('<I', body, o + 6)[0]
-            o += 6 + ss
-
-    def walk(o, e):
-        while o < e:
-            sig = data[o:o + 4]
-            size = struct.unpack_from('<I', data, o + 4)[0]
-            if sig == b'GRUP':
-                yield from walk(o + _HEADER, o + size)
-                o += size
-            else:
-                flags = struct.unpack_from('<I', data, o + 8)[0]
-                fid = struct.unpack_from('<I', data, o + 12)[0]
-                body = data[o + _HEADER:o + _HEADER + size]
-                for st, ref in subs(sig, body, flags):
-                    yield sig, fid, st, ref
-                o += _HEADER + size
-
-    yield from walk(_HEADER + hdr, len(data))
+    for rec in records(data):
+        for st, payload in rec.subs():
+            if (st in FORMID_SUBS and len(payload) == 4
+                    and (rec.sig, st) not in NOT_FORMID):
+                yield (rec.sig, rec.form_id, st,
+                       struct.unpack_from('<I', payload, 0)[0])
 
 
 def audit(name, output_dir, max_list):

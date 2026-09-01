@@ -31,13 +31,12 @@ another copy to keep in sync.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import struct
-import zlib
 from pathlib import Path
 
 from asset_convert.lod.terrain_lod import (shipped_lod_worldspaces, master_names)
+from tes5_import.tes5_reader import FLAG_PERSISTENT, records, walk
 
 
 # Shared-folder resolution -- see output_layout. An imported mod's plugins keep
@@ -217,35 +216,16 @@ def touched_worldspace_fids(plugin_esm: Path) -> set:
     from asset_convert.lod.esm_scan import formid_remap_table
     plugin_esm = Path(plugin_esm)
     gmap = formid_remap_table(plugin_esm)
-    raw = plugin_esm.read_bytes()
-    n = len(raw)
     found: set = set()
 
     def g(fid: int) -> int:
         return gmap[fid >> 24] | (fid & 0x00FFFFFF)
 
-    def scan(start, end, cur_wrld):
-        p = start
-        while p < end and p + 24 <= n:
-            sig = raw[p:p + 4]
-            size = struct.unpack_from('<I', raw, p + 4)[0]
-            if sig == b'GRUP':
-                g_type = struct.unpack_from('<I', raw, p + 12)[0]
-                nxt = cur_wrld
-                if g_type == 1:
-                    nxt = g(struct.unpack_from('<I', raw, p + 8)[0])
-                scan(p + 24, p + size, nxt)
-                p += size
-                continue
-            if sig == b'WRLD':
-                found.add(g(struct.unpack_from('<I', raw, p + 12)[0]))
-            elif cur_wrld and sig in (b'CELL', b'LAND', b'REFR'):
-                found.add(cur_wrld)
-            p += 24 + size
-
-    if n < 24:
-        return found
-    scan(24 + struct.unpack_from('<I', raw, 4)[0], n, 0)
+    for rec, stack in walk(plugin_esm.read_bytes(), bodies=()):
+        if rec.sig == b'WRLD':
+            found.add(g(rec.form_id))
+        elif rec.sig in (b'CELL', b'LAND', b'REFR') and stack.worldspace:
+            found.add(g(stack.worldspace))
     return found
 
 
@@ -671,44 +651,22 @@ def _wrld_land_bounds(esm: Path, wrld_fid: int):
     except OSError:
         return None
 
-    min_gx = min_gy = None
-    max_gx = max_gy = None
-    cur_world = None
-    i = 0
-    n = len(data)
-    while i + 24 <= n:
-        sig = data[i:i + 4]
-        if sig == b'GRUP':
-            size, label, gtype = struct.unpack('<I4si', data[i + 4:i + 16])
-            # type 1 = worldspace children; the label is the WRLD FormID.
-            if gtype == 1:
-                cur_world = struct.unpack('<I', label)[0]
-            i += 24
+    xs: list = []
+    ys: list = []
+    for rec, stack in walk(data):
+        if (rec.sig != b'CELL' or stack.worldspace != wrld_fid
+                or rec.flags & FLAG_PERSISTENT):
             continue
-        size, flags = struct.unpack('<II', data[i + 4:i + 12])
-        if sig == b'CELL' and cur_world == wrld_fid and not (flags & 0x400):
-            body = data[i + 24:i + 24 + size]
-            if flags & 0x00040000:
-                try:
-                    body = zlib.decompress(body[4:])
-                except Exception:
-                    body = b''
-            j = 0
-            while j + 6 <= len(body):
-                sub = body[j:j + 4]
-                sz = struct.unpack('<H', body[j + 4:j + 6])[0]
-                if sub == b'XCLC' and sz >= 8:
-                    gx, gy = struct.unpack('<ii', body[j + 6:j + 14])
-                    min_gx = gx if min_gx is None else min(min_gx, gx)
-                    max_gx = gx if max_gx is None else max(max_gx, gx)
-                    min_gy = gy if min_gy is None else min(min_gy, gy)
-                    max_gy = gy if max_gy is None else max(max_gy, gy)
-                    break
-                j += 6 + sz
-        i += 24 + size
+        xclc = rec.sub(b'XCLC')
+        if xclc and len(xclc) >= 8:
+            gx, gy = struct.unpack_from('<2i', xclc)
+            xs.append(gx)
+            ys.append(gy)
 
-    if min_gx is None:
+    if not xs:
         return None
+    min_gx, max_gx = min(xs), max(xs)
+    min_gy, max_gy = min(ys), max(ys)
     return (min_gx * 4096.0, min_gy * 4096.0,
             (max_gx + 1) * 4096.0, (max_gy + 1) * 4096.0)
 
@@ -719,30 +677,10 @@ def _wrld_formid(esm: Path, edid: str):
         data = esm.read_bytes()
     except OSError:
         return None
-    off = 0
-    while True:
-        k = data.find(b'WRLD', off)
-        if k < 0:
-            return None
-        off = k + 4
-        if k + 24 > len(data):
-            return None
-        size, flags, fid = struct.unpack('<IiI', data[k + 4:k + 16])
-        if size == 0 or size > 500000 or (flags & 0x00040000):
-            continue
-        body = data[k + 24:k + 24 + size]
-        j = 0
-        while j + 6 <= len(body):
-            sub = body[j:j + 4]
-            if not re.fullmatch(rb'[A-Z0-9_]{4}', sub):
-                break
-            sz = struct.unpack('<H', body[j + 4:j + 6])[0]
-            if sub == b'EDID':
-                name = body[j + 6:j + 6 + sz].rstrip(b'\0')
-                if name.decode('ascii', 'replace') == edid:
-                    return fid
-                break
-            j += 6 + sz
+    for rec in records(data, b'WRLD'):
+        if rec.string(b'EDID') == edid:
+            return rec.form_id
+    return None
 
 
 def _wrld_bounds(esm: Path, edid: str):
@@ -750,54 +688,35 @@ def _wrld_bounds(esm: Path, edid: str):
 
     Reads the built ESM rather than the export so the bounds are exactly what
     the engine will see, including anything the override path rewrote.
+
+    MNAM's NW/SE cell corners are preferred: they are what the map frames,
+    which on Skyrim itself is only a third of the NAM0/NAM9 landmass
+    rectangle -- the rest is unexplorable filler the map never shows.
+    NAM0/NAM9 is the fallback when those corners are absent.
     """
     try:
         data = esm.read_bytes()
     except OSError:
         return None
-    sig_ok = re.compile(rb'[A-Z0-9_]{4}')
-    off = 0
-    while True:
-        k = data.find(b'WRLD', off)
-        if k < 0:
-            return None
-        off = k + 4
-        if k + 24 > len(data):
-            return None
-        size, flags = struct.unpack('<II', data[k + 4:k + 12])
-        if size == 0 or size > 500000 or (flags & 0x00040000):
+    for rec in records(data, b'WRLD'):
+        if rec.string(b'EDID') != edid:
             continue
-        body = data[k + 24:k + 24 + size]
-        j = 0
-        name = None
-        n0 = n9 = mnam = None
-        while j + 6 <= len(body):
-            sig = body[j:j + 4]
-            if not sig_ok.fullmatch(sig):
-                break
-            sz = struct.unpack('<H', body[j + 4:j + 6])[0]
-            val = body[j + 6:j + 6 + sz]
-            if sig == b'EDID':
-                name = val.rstrip(b'\0').decode('ascii', 'replace')
-            elif sig == b'NAM0' and sz == 8:
-                n0 = struct.unpack('<ff', val)
-            elif sig == b'NAM9' and sz == 8:
-                n9 = struct.unpack('<ff', val)
-            elif sig == b'MNAM' and sz >= 16:
-                mnam = struct.unpack('<hhhh', val[8:16])
-            j += 6 + sz
-        if name == edid:
-            # The map frames MNAM's NW/SE cell corners, which on Skyrim itself
-            # is only a third of the NAM0/NAM9 landmass rectangle -- the rest
-            # is unexplorable filler the map never shows.  Prefer it, and fall
-            # back to NAM0/NAM9 only when the corners are absent.
-            if mnam:
-                from asset_convert.lod.worldmap_clouds import framed_rect
-                rect = framed_rect(mnam[0], mnam[1], mnam[2], mnam[3])
-                if rect:
-                    return rect
-            if n0 and n9:
-                return (n0[0], n0[1], n9[0], n9[1])
+        subs = rec.sub_map()
+        n0 = subs.get(b'NAM0')
+        n9 = subs.get(b'NAM9')
+        n0 = struct.unpack('<2f', n0) if n0 and len(n0) == 8 else None
+        n9 = struct.unpack('<2f', n9) if n9 and len(n9) == 8 else None
+        mnam = subs.get(b'MNAM')
+        mnam = struct.unpack_from('<4h', mnam, 8) if (
+            mnam and len(mnam) >= 16) else None
+        if mnam:
+            from asset_convert.lod.worldmap_clouds import framed_rect
+            rect = framed_rect(mnam[0], mnam[1], mnam[2], mnam[3])
+            if rect:
+                return rect
+        if n0 and n9:
+            return (n0[0], n0[1], n9[0], n9[1])
+    return None
 
 
 def merge_cloud_bank(out_root: Path, merged_dir: Path, edid: str,

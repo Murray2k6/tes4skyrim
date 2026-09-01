@@ -29,56 +29,24 @@ no object LOD, so it can gate a build.
 
 import argparse
 import os
-import struct
 import sys
-import zlib
 from collections import Counter
 
+from tes5_import.tes5_reader import GRP_EXT_BLOCK, walk
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def _subs(body):
-    out, p, n = {}, 0, len(body)
-    while p + 6 <= n:
-        sig = body[p:p + 4]
-        size = struct.unpack_from('<H', body, p + 4)[0]
-        out[sig] = body[p + 6:p + 6 + size]
-        p += 6 + size
-    return out
 
 
 def _worldspaces(path):
     """WRLD fid -> EditorID, and a count of its exterior block cells."""
     data = open(path, 'rb').read()
     names, cells = {}, Counter()
-
-    def walk(off, end, stack):
-        p = off
-        while p + 24 <= end:
-            if data[p:p + 4] == b'GRUP':
-                gsize, label, gtype = struct.unpack_from('<IiI', data, p + 4)
-                walk(p + 24, p + gsize, stack + [(gtype, label)])
-                p += gsize
-                continue
-            sig = data[p:p + 4]
-            size, flags, fid = struct.unpack_from('<III', data, p + 4)
-            body = data[p + 24:p + 24 + size]
-            if flags & 0x00040000:
-                try:
-                    body = zlib.decompress(body[4:])
-                except zlib.error:
-                    body = b''
-            if sig == b'WRLD':
-                edid = _subs(body).get(b'EDID', b'')
-                names[fid] = edid.split(bytes(1))[0].decode('latin-1')
-            elif sig == b'CELL' and any(t == 4 for t, _ in stack):
-                # A type-1 GRUP's label is the owning worldspace's FormID.
-                wrld = next((l for t, l in stack if t == 1), None)
-                if wrld is not None and _subs(body).get(b'XCLC'):
-                    cells[wrld] += 1
-            p += 24 + size
-
-    walk(0, len(data), [])
+    for rec, stack in walk(data, b'WRLD', b'CELL'):
+        if rec.sig == b'WRLD':
+            names[rec.form_id] = rec.string(b'EDID')
+        elif (stack.of_type(GRP_EXT_BLOCK) is not None
+                and stack.worldspace is not None and rec.sub(b'XCLC')):
+            cells[stack.worldspace] += 1
     return names, cells
 
 

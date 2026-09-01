@@ -49,6 +49,7 @@ build_edge_links, and same-cell teleport pairs are an interior idiom.
 
 import struct
 
+from .tes5_reader import REC_HDR, decompress, subrecords
 from .writer import pack_subrecord, pack_string_subrecord
 from .pgrd_to_navm import (
     _build_navmesh_grid,
@@ -321,36 +322,13 @@ def split_disconnected_interiors(navm_cache: dict, writer,
 
 def _decode_record(navm_bytes) -> _Nvnm:
     """Decode a packed (compressed) NAVM record into an _Nvnm, or None."""
-    import zlib
     flags = struct.unpack_from('<I', navm_bytes, 8)[0]
-    body = navm_bytes[24:]
-    if flags & 0x00040000:
-        body = zlib.decompress(body[4:])
-    edid = None
-    onam = None
-    nvnm = None
-    p = 0
-    size_override = None
-    while p + 6 <= len(body):
-        sig = body[p:p + 4]
-        size = struct.unpack_from('<H', body, p + 4)[0]
-        if sig == b'XXXX':
-            # Oversized-subrecord protocol: the real size of the NEXT
-            # subrecord, whose own size field is 0 (see pack_subrecord).
-            size_override = struct.unpack_from('<I', body, p + 6)[0]
-            p += 6 + size
-            continue
-        if size_override is not None:
-            size = size_override
-            size_override = None
-        payload = body[p + 6:p + 6 + size]
-        if sig == b'EDID':
-            edid = payload.rstrip(b'\0').decode('latin1')
-        elif sig == b'NVNM':
-            nvnm = payload
-        elif sig == b'ONAM':
-            onam = payload
-        p += 6 + size
+    subs = {}
+    for tag, payload in subrecords(decompress(navm_bytes[REC_HDR:], flags)):
+        subs.setdefault(tag, payload)
+    nvnm, onam, edid = (subs.get(b'NVNM'), subs.get(b'ONAM'),
+                        subs.get(b'EDID'))
+    edid = None if edid is None else edid.rstrip(b'\0').decode('latin1')
     if nvnm is None:
         return None
     nv = _Nvnm(nvnm)

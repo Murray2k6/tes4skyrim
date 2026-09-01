@@ -17,6 +17,9 @@ import hashlib
 import struct
 import threading
 
+from .tes5_reader import (GRP_HDR, GRP_TEMPORARY_CHILDREN, REC_HDR,
+                          SUB_HDR, walk)
+
 # --- Derived FormID region -------------------------------------------------
 # Generated records (ARMA, OTFT, NAVM, ...) get ids hashed from their SOURCE
 # record rather than from a counter — see PluginWriter.derive_formid.
@@ -59,9 +62,9 @@ _RUNTIME_HEADROOM = 0x100000
 # existing save, so the version is what documents that it was intended.
 FORMID_SCHEME_VERSION = 1
 
-RECORD_HEADER_SIZE = 24
-GROUP_HEADER_SIZE = 24
-SUBRECORD_HEADER_SIZE = 6
+RECORD_HEADER_SIZE = REC_HDR
+GROUP_HEADER_SIZE = GRP_HDR
+SUBRECORD_HEADER_SIZE = SUB_HDR
 FORM_VERSION_SSE = 44
 HEDR_VERSION_SSE = 1.7100000381469727  # float32 representation of 1.71
 
@@ -1005,27 +1008,13 @@ class PluginWriter:
         master's load-order index qualify.
         """
         out = []
-
-        def walk(blob, temporary=False):
-            off, end = 0, len(blob)
-            while off + GROUP_HEADER_SIZE <= end:
-                sig = blob[off:off + 4]
-                size = struct.unpack_from('<I', blob, off + 4)[0]
-                if sig == b'GRUP':
-                    gtype = struct.unpack_from('<i', blob, off + 12)[0]
-                    # 9 = temporary children, 8 = persistent, 10 = visible-distant
-                    walk(blob[off + GROUP_HEADER_SIZE:off + size],
-                         temporary or gtype == 9)
-                    off += size
-                else:
-                    if temporary and sig in ONAM_SIGNATURES:
-                        fid = struct.unpack_from('<I', blob, off + 12)[0]
-                        if (fid >> 24) & 0xFF < self.own_index:
-                            out.append(fid)
-                    off += RECORD_HEADER_SIZE + size
-
+        own = self.own_index
         for blob in group_blobs:
-            walk(blob)
+            for rec, stack in walk(blob, *ONAM_SIGNATURES, bodies=(),
+                                   span=(0, len(blob))):
+                if ((rec.form_id >> 24) & 0xFF < own
+                        and stack.of_type(GRP_TEMPORARY_CHILDREN) is not None):
+                    out.append(rec.form_id)
         return out
 
     def write(self, filepath: str):

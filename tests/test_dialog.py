@@ -49,6 +49,7 @@ from tes5_import.dialog_converter import (
     make_dlvw,
     should_skip_dial,
 )
+from tes5_import.tes5_reader import records
 from tes5_import.text_reader import set_formid_index_offset
 
 
@@ -125,17 +126,9 @@ class _FakeWriter:
 
 def _walk_records(blob):
     """Yield (sig, formid, full_record_bytes), descending into nested GRUPs."""
-    pos = 0
-    while pos + 24 <= len(blob):
-        sig = blob[pos:pos+4].decode('ascii', 'replace')
-        size = struct.unpack_from('<I', blob, pos+4)[0]
-        if sig == 'GRUP':
-            yield from _walk_records(blob[pos+24:pos+size])
-            pos += size
-        else:
-            fid = struct.unpack_from('<I', blob, pos+12)[0]
-            yield sig, fid, blob[pos:pos+24+size]
-            pos += 24 + size
+    for rec in records(blob, bodies=(), span=(0, len(blob))):
+        yield (rec.sig.decode('ascii', 'replace'), rec.form_id,
+               blob[rec.offset:rec.end])
 
 
 # ---------------------------------------------------------------------------

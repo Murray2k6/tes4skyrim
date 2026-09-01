@@ -33,6 +33,10 @@ from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
 from asset_convert.lod.terrain_lod_falloutnv import edid_keyed_lod_tiles, resolve_edid_keyed
 from output_layout import assets_for
+from tes5_import.tes5_reader import (GRP_TOP,
+                                     GRP_WORLD_CHILDREN,
+                                     header_end, read_group,
+                                     read_record, records, walk)
 
 try:
     from pyffi.formats.nif import NifFormat
@@ -124,32 +128,15 @@ NORMAL_SIZE_DIVISOR = 2
 # ---------------------------------------------------------------------------
 
 def find_worldspace_fid(raw: bytes, n: int, edid: str):
-    """Linear scan for a WRLD record matching edid; return its FormID or None."""
-    p = 0
-    while p < n - 24:
-        sig4 = raw[p:p+4]
-        if sig4 == b'WRLD':
-            size = struct.unpack_from('<I', raw, p+4)[0]
-            if p + 24 + size > n:
-                break
-            fid  = struct.unpack_from('<I', raw, p+12)[0]
-            body = raw[p+24:p+24+size]
-            q = 0
-            while q + 6 <= len(body):
-                s  = body[q:q+4]
-                sz = struct.unpack_from('<H', body, q+4)[0]
-                if s == b'EDID':
-                    if body[q+6:q+6+sz].rstrip(b'\x00').decode('latin-1', errors='replace') == edid:
-                        return fid
-                    break
-                q += 6 + sz
-            p += 24 + size
-        elif sig4 == b'GRUP':
-            p += 24          # descend into group
-        else:
-            if p + 8 > n: break
-            size = struct.unpack_from('<I', raw, p+4)[0]
-            p += 24 + size
+    """FormID of the WRLD named `edid`, or None.
+
+    Scoped to the top-level WRLD block, which holds every WRLD in the file,
+    and skips each worldspace's children -- so it never touches the ~1.17M
+    cell records behind them.  `n` is accepted for call compatibility.
+    """
+    for rec in records(raw, b'WRLD'):
+        if rec.string(b'EDID') == edid:
+            return rec.form_id
     return None
 
 
@@ -192,68 +179,60 @@ def detect_terrain_worldspaces(esm_path: Path, include_children: bool = False):
         fh.close()
 
 
+def _top_wrld_group(raw):
+    """The top-level GRUP labelled 'WRLD', or None.
+
+    Every WRLD record in a file lives inside it, so nothing else need be read.
+    """
+    p = header_end(raw)
+    while p + 24 <= len(raw):
+        group = read_group(raw, p)
+        if group is None or group.end <= p:
+            return None
+        if group.type == GRP_TOP and group.label_sig == b'WRLD':
+            return group
+        p = group.end
+    return None
+
+
 def _scan_wrld_block(raw, include_children: bool):
     """The WRLD-block reader behind `detect_terrain_worldspaces`."""
-    n = len(raw)
-    if n < 24:
+    if len(raw) < 24:
         return []
 
-    edid_by_fid   = {}     # wrld_fid -> EditorID
-    parent_by_fid = {}     # wrld_fid -> parent WRLD FormID (WNAM), 0 = root
-    size_by_fid   = {}     # wrld_fid -> byte size of its child group
+    edid_by_fid: dict = {}
+    parent_by_fid: dict = {}
+    size_by_fid: dict = {}
 
-    def _sub(body, tag4):
-        p = 0
-        while p + 6 <= len(body):
-            sz = struct.unpack_from('<H', body, p+4)[0]
-            if body[p:p+4] == tag4:
-                return body[p+6:p+6+sz]
-            p += 6 + sz
-        return None
+    block = _top_wrld_group(raw)
+    if block is None:
+        return []
 
-    # Top-level groups are laid out end to end after the file header; only the
-    # one labelled 'WRLD' holds worldspaces, and every WRLD record in the file
-    # is inside it.
-    p = 24 + struct.unpack_from('<I', raw, 4)[0]
-    while p + 24 <= n:
-        if raw[p:p+4] != b'GRUP':
-            break
-        g_size = struct.unpack_from('<I', raw, p+4)[0]
-        if g_size < 24:
-            break                                  # malformed; don't spin
-        if raw[p+8:p+12] != b'WRLD':
-            p += g_size
+    q, cur = block.start + 24, None
+    while q + 24 <= block.end:
+        group = read_group(raw, q)
+        if group is not None:
+            if group.end <= q:
+                break
+            if group.type == GRP_WORLD_CHILDREN:
+                owner = group.label_fid or cur
+                if owner is not None:
+                    size_by_fid[owner] = (size_by_fid.get(owner, 0)
+                                          + group.end - group.start)
+            q = group.end
             continue
-
-        q, cur = p + 24, None
-        while q + 24 <= n and q < p + g_size:
-            if raw[q:q+4] == b'GRUP':
-                g2 = struct.unpack_from('<I', raw, q+4)[0]
-                if g2 < 24:
-                    break
-                # A type-1 group is this worldspace's children; its label is
-                # the owning WRLD FormID, so it attributes even when a file
-                # interleaves records and groups unexpectedly.
-                if struct.unpack_from('<I', raw, q+12)[0] == 1:
-                    owner = struct.unpack_from('<I', raw, q+8)[0] or cur
-                    if owner is not None:
-                        size_by_fid[owner] = size_by_fid.get(owner, 0) + g2
-                q += g2
-            else:
-                size = struct.unpack_from('<I', raw, q+4)[0]
-                fid  = struct.unpack_from('<I', raw, q+12)[0]
-                if raw[q:q+4] == b'WRLD':
-                    body = raw[q+24:q+24+size]
-                    edid = _sub(body, b'EDID')
-                    if edid:
-                        edid_by_fid[fid] = edid.rstrip(b'\x00').decode(
-                            'latin-1', errors='replace')
-                    wnam = _sub(body, b'WNAM')
-                    if wnam and len(wnam) >= 4:
-                        parent_by_fid[fid] = struct.unpack_from('<I', wnam)[0]
-                    cur = fid
-                q += 24 + size
-        break
+        rec, nxt = read_record(raw, q, block.end)
+        if rec is None:
+            break
+        if rec.sig == b'WRLD':
+            edid = rec.string(b'EDID')
+            if edid:
+                edid_by_fid[rec.form_id] = edid
+            wnam = rec.sub(b'WNAM')
+            if wnam and len(wnam) >= 4:
+                parent_by_fid[rec.form_id] = struct.unpack_from('<I', wnam)[0]
+            cur = rec.form_id
+        q = nxt
 
     ranked = []
     for fid in edid_by_fid:
@@ -318,32 +297,11 @@ def _scan_cell_coords(esm_path: Path, coords: dict):
     """
     from asset_convert.lod.esm_scan import formid_remap_table
     gmap = formid_remap_table(Path(esm_path))
-    raw = esm_path.read_bytes()
-    n = len(raw)
-    p = 24 + struct.unpack_from('<I', raw, 4)[0]
-    stack = [(p, n)]
-    while stack:
-        p, end = stack.pop()
-        while p < end and p + 24 <= n:
-            sig = raw[p:p + 4]
-            size = struct.unpack_from('<I', raw, p + 4)[0]
-            if sig == b'GRUP':
-                stack.append((p + 24, p + size))
-                p += size
-                continue
-            if sig == b'CELL':
-                _f = struct.unpack_from('<I', raw, p + 12)[0]
-                fid = gmap[_f >> 24] | (_f & 0x00FFFFFF)
-                body = raw[p + 24:p + 24 + size]
-                o = 0
-                while o + 6 <= len(body):
-                    s2 = body[o:o + 4]
-                    sz = struct.unpack_from('<H', body, o + 4)[0]
-                    if s2 == b'XCLC' and sz >= 8:
-                        coords[fid] = struct.unpack_from('<ii', body, o + 6)
-                        break
-                    o += 6 + sz
-            p += 24 + size
+    for rec in records(esm_path.read_bytes(), b'CELL'):
+        xclc = rec.sub(b'XCLC')
+        if xclc and len(xclc) >= 8:
+            fid = gmap[rec.form_id >> 24] | (rec.form_id & 0x00FFFFFF)
+            coords[fid] = struct.unpack_from('<2i', xclc)
 
 
 def lod_capable_worldspaces(export_dir: Path, out_root: Path = None,
@@ -610,143 +568,87 @@ def scan_land_file(esm_path: Path, worldspace_edid: str,
               f"FormID known; taking no LAND from it")
         return
 
-    def _read_rec(p):
-        if p + 24 > n:
-            return None, p + 1
-        sig  = raw[p:p+4].decode('latin-1', errors='replace')
-        size = struct.unpack_from('<I', raw, p+4)[0]
-        fid  = g(struct.unpack_from('<I', raw, p+12)[0])
-        body = raw[p+24: p+24+size]
-        return (sig, fid, body), p+24+size
+    def prune(group, _stack) -> bool:
+        """Skip a type-1 GRUP belonging to a worldspace we do not want."""
+        return (target_wrld_fid is not None
+                and group.type == GRP_WORLD_CHILDREN
+                and g(group.label_fid) != target_wrld_fid)
 
-    def _sub(body, tag):
-        tag4 = tag.encode()
-        p = 0
-        while p + 6 <= len(body):
-            s = body[p:p+4]
-            sz = struct.unpack_from('<H', body, p+4)[0]
-            if s == tag4:
-                return body[p+6:p+6+sz]
-            p += 6 + sz
-        return None
+    def scoped(stack) -> bool:
+        """True when this record sits in the worldspace being collected."""
+        if target_wrld_fid is None:
+            return True
+        wrld = stack.worldspace
+        return wrld is not None and g(wrld) == target_wrld_fid
 
-    def scan(start, end, cur_cell_fid, cur_wrld_fid=0):
-        p = start
-        while p < end and p < n:
-            if p + 4 > n:
-                break
-            sig4 = raw[p:p+4]
-            if sig4 == b'GRUP':
-                if p + 24 > n:
-                    break
-                g_size  = struct.unpack_from('<I', raw, p+4)[0]
-                g_type  = struct.unpack_from('<I', raw, p+12)[0]
-                g_label = raw[p+8:p+12]
-                next_cell = cur_cell_fid
-                next_wrld = cur_wrld_fid
-                if g_type == 1:          # world children: label = parent WRLD FormID
-                    next_wrld = g(struct.unpack_from('<I', g_label)[0])
-                    # Everything harvested below a type-1 GRUP (CELL water, LAND,
-                    # and the cell_coords they resolve through) is gated on
-                    # `cur_wrld_fid == target_wrld_fid`, so a FOREIGN worldspace's
-                    # subtree can only ever contribute records that are then
-                    # discarded. Skipping it whole is what stops the scan walking
-                    # all 1.17M records of the plugin to reach 142 LAND records.
-                    # Only valid when the target is known: with target_wrld_fid
-                    # None the unscoped fallback deliberately takes everything.
-                    if (target_wrld_fid is not None
-                            and next_wrld != target_wrld_fid):
-                        p += g_size
-                        continue
-                elif g_type == 6:        # cell children (persistent+temp block): label = parent CELL FormID
-                    next_cell = g(struct.unpack_from('<I', g_label)[0])
-                elif g_type in (8, 9):   # persistent (8) / temporary (9) cell subgroup
-                    # LAND records live in type-9; carry cur_cell_fid through unchanged
-                    pass
-                scan(p+24, p+g_size, next_cell, next_wrld)
-                p += g_size
-            else:
-                rec, np_ = _read_rec(p)
-                if rec is None:
-                    break
-                sig, fid, body = rec
-                if sig == 'CELL':
-                    xclc = _sub(body, 'XCLC')
-                    if xclc and len(xclc) >= 8:
-                        gx = struct.unpack_from('<i', xclc, 0)[0]
-                        gy = struct.unpack_from('<i', xclc, 4)[0]
-                        cell_coords[fid] = (gx, gy)
-                    else:
-                        # An OVERRIDE plugin's CELL carries only the fields its
-                        # author changed, so XCLC is usually absent. Its grid
-                        # coords are the master's, already learned earlier in
-                        # load order. Without this the record would leave
-                        # cur_cell_fid pointing at the PREVIOUS cell and its
-                        # child LAND would be written to the wrong coordinate.
-                        gx, gy = cell_coords.get(fid, (None, None))
-                    cur_cell_fid = fid
-                    if gx is not None:
-                        if target_wrld_fid is None or cur_wrld_fid == target_wrld_fid:
-                            # DATA bit 0x02 = Has Water; XCLW = height override
-                            data = _sub(body, 'DATA')
-                            flags = 0
-                            if data:
-                                flags = data[0] | (data[1] << 8 if len(data) >= 2 else 0)
-                            wh = None
-                            xclw = _sub(body, 'XCLW')
-                            if xclw and len(xclw) >= 4:
-                                v = struct.unpack_from('<f', xclw)[0]
-                                if -1e9 < v < 1e9:   # exclude "default" sentinels
-                                    wh = v
-                            if data is None and (gx, gy) in cell_water:
-                                # Override CELL that says nothing about water:
-                                # keep what the master established rather than
-                                # resetting the cell to "no water".
-                                pass
-                            else:
-                                cell_water[(gx, gy)] = (bool(flags & 0x02), wh)
-                elif sig == 'WRLD':
-                    if target_wrld_fid is not None and fid == target_wrld_fid:
-                        dnam = _sub(body, 'DNAM')
-                        if dnam and len(dnam) >= 8:
-                            wrld_water['default'] = struct.unpack_from('<f', dnam, 4)[0]
-                elif sig == 'LAND':
-                    # Only collect LAND from the target worldspace
-                    if target_wrld_fid is None or cur_wrld_fid == target_wrld_fid:
-                        coords = cell_coords.get(cur_cell_fid)
-                        if coords is not None:
-                            if count_only:
-                                # count_land_records() wants only len(lands);
-                                # the VHGT/VCLR/layer decode is the expensive
-                                # part and its result would be discarded.  The
-                                # VHGT presence check is kept so the count
-                                # matches what a real parse would store.
-                                if _sub(body, 'VHGT') is not None:
-                                    lands[coords] = True
-                            else:
-                                land = _decode_land(body, _sub)
-                                if land is not None:
-                                    lands[coords] = land
-                                elif not allow_unscoped:
-                                    # An OVERLAY's LAND with no VHGT is the
-                                    # author DELETING that cell's terrain --
-                                    # "water only, no landscape" (DATA flags
-                                    # clear bit 0x01; vanilla writes 28).
-                                    # Skipping it left the MASTER's heightmap
-                                    # in the dict, so distant terrain kept
-                                    # rendering ground the plugin removed.
-                                    # Drop the cell so the tile bakes as water.
-                                    # `allow_unscoped` is (_i == 0) in the
-                                    # caller, so this fires for overlays only:
-                                    # the base file has no earlier terrain to
-                                    # erase, and a malformed record there must
-                                    # not silently delete a cell.
-                                    lands.pop(coords, None)
-                p = np_
+    for rec, stack in walk(raw, b'CELL', b'WRLD', b'LAND', prune=prune):
+        fid = g(rec.form_id)
+        if rec.sig == b'CELL':
+            _take_cell(rec, fid, cell_coords,
+                       cell_water if scoped(stack) else None)
+        elif rec.sig == b'WRLD':
+            if target_wrld_fid is not None and fid == target_wrld_fid:
+                dnam = rec.sub(b'DNAM')
+                if dnam and len(dnam) >= 8:
+                    wrld_water['default'] = struct.unpack_from('<f', dnam, 4)[0]
+        elif rec.sig == b'LAND' and scoped(stack):
+            cell = stack.cell
+            coords = cell_coords.get(None if cell is None else g(cell))
+            if coords is not None:
+                _take_land(rec, coords, lands, count_only, allow_unscoped)
 
-    # Skip TES4/TES5 file header
-    hdr_size = struct.unpack_from('<I', raw, 4)[0]
-    scan(24 + hdr_size, n, 0, 0)
+
+def _take_cell(rec, fid: int, cell_coords: dict, cell_water) -> None:
+    """Learn a CELL's grid coords, and its water when `cell_water` is given.
+
+    An OVERRIDE's CELL carries only the fields its author changed, so XCLC is
+    usually absent and its coords are the master's, learned earlier in load
+    order; one saying nothing about water keeps what the master established.
+    `cell_water` is None outside the target worldspace, where the coords are
+    still worth learning.
+    """
+    xclc = rec.sub(b'XCLC')
+    if xclc and len(xclc) >= 8:
+        coords = struct.unpack_from('<2i', xclc)
+        cell_coords[fid] = coords
+    else:
+        coords = cell_coords.get(fid)
+    if coords is None or cell_water is None:
+        return
+    data = rec.sub(b'DATA')
+    if data is None and coords in cell_water:
+        return
+    flags = 0
+    if data:
+        flags = data[0] | (data[1] << 8 if len(data) >= 2 else 0)
+    wh = None
+    xclw = rec.sub(b'XCLW')
+    if xclw and len(xclw) >= 4:
+        v = struct.unpack_from('<f', xclw)[0]
+        if -1e9 < v < 1e9:
+            wh = v
+    cell_water[coords] = (bool(flags & 0x02), wh)
+
+
+def _take_land(rec, coords, lands: dict, count_only: bool,
+               allow_unscoped: bool) -> None:
+    """Decode one LAND into `lands`, or erase the cell it deletes.
+
+    An OVERLAY's LAND with no VHGT is the author DELETING that cell's terrain;
+    skipping it left the MASTER's heightmap in the dict, so distant terrain
+    kept rendering ground the plugin removed.  That fires for overlays only.
+    With `count_only` the VHGT presence check keeps the count matching what a
+    real parse would store.
+    """
+    if count_only:
+        if rec.sub(b'VHGT') is not None:
+            lands[coords] = True
+        return
+    land = _decode_land(rec.body, lambda b, t: rec.sub(t.encode()))
+    if land is not None:
+        lands[coords] = land
+    elif not allow_unscoped:
+        lands.pop(coords, None)
 
 
 def _decode_land(body, _sub):

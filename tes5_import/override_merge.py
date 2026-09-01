@@ -18,7 +18,8 @@ import struct
 import zlib
 from output_layout import paths
 
-_HEADER_SIZE = 24
+from .tes5_reader import REC_HDR as _HEADER_SIZE
+from .tes5_reader import first_sub, masters, walk
 
 
 def _plugin_name(path: str) -> str:
@@ -30,27 +31,14 @@ def _plugin_name(path: str) -> str:
     return os.path.basename(path or '').lower()
 
 
-def _read_masters(data: bytes, hdr_size: int) -> list:
-    """The MAST names in a plugin's TES4 header, in load order.
-
-    Their COUNT is also the index byte this file's own records carry, since a
-    file's records sit immediately after its masters in load order.
-    """
-    names = []
-    i = _HEADER_SIZE
-    end = _HEADER_SIZE + hdr_size
-    while i + 6 <= end and i + 6 <= len(data):
-        sig = data[i:i + 4]
-        size = struct.unpack_from('<H', data, i + 4)[0]
-        if sig == b'MAST':
-            names.append(data[i + 6:i + 6 + size].rstrip(b'\0')
-                         .decode('latin1'))
-        i += 6 + size
-    return names
-
-
 class MasterIndex:
-    """FormID -> converted record body, read from a converted master plugin."""
+    """FormID -> converted record body, read from a converted master plugin.
+
+    `masters` is this file's own master list, LOWERCASED, and `own_index` the
+    index byte its OWN records carry (= that list's length).  Both are needed
+    to translate between this master's id space and a child's, see
+    `ChainedMasterIndex`.
+    """
 
     def __init__(self, path: str):
         self.path = path
@@ -58,9 +46,6 @@ class MasterIndex:
         self._offsets = {}      # formid -> (signature, offset, total_size)
         self._paths = {}        # formid -> ((grup_type, label), ...)
         self._land_by_cell = {}  # cell formid -> LAND formid
-        # This file's own master list, and the index byte its OWN records carry
-        # (= that list's length). Both are needed to translate between this
-        # master's id space and a child's — see ChainedMasterIndex.
         self.masters = []
         self.own_index = 0
         self._load()
@@ -71,38 +56,23 @@ class MasterIndex:
         d = self._data
         if len(d) < 8 or d[:4] != b'TES4':
             raise ValueError(f"Not a plugin file: {self.path}")
-        hdr_size = struct.unpack_from('<I', d, 4)[0]
-        self.masters = _read_masters(d, hdr_size)
+        self.masters = masters(d)
         self.own_index = len(self.masters)
-        start = _HEADER_SIZE + hdr_size
-        self._scan(start, len(d))
+        self._scan()
 
-    def _scan(self, off: int, end: int, path: tuple = ()):
-        d = self._data
-        while off + _HEADER_SIZE <= end:
-            sig = d[off:off + 4]
-            size = struct.unpack_from('<I', d, off + 4)[0]
-            if sig == b'GRUP':
-                # GRUP header: 'GRUP'(4) size(4) label(4) type(4) ...
-                label = d[off + 8:off + 12]
-                gtype = struct.unpack_from('<i', d, off + 12)[0]
-                self._scan(off + _HEADER_SIZE, off + size,
-                           path + ((gtype, label),))
-                off += size
-            else:
-                fid = struct.unpack_from('<I', d, off + 12)[0]
-                self._offsets[fid] = (sig, off, _HEADER_SIZE + size)
-                self._paths[fid] = path
-                if sig == b'LAND':
-                    # A cell has at most one LAND, and the type-6 GRUP label
-                    # names the owning cell. Keyed here because a LAND's own
-                    # FormID is NOT recoverable by arithmetic — see land().
-                    for gtype, label in reversed(path):
-                        if gtype == 6 and len(label) == 4:
-                            self._land_by_cell[
-                                struct.unpack_from('<I', label)[0]] = fid
-                            break
-                off += _HEADER_SIZE + size
+    def _scan(self):
+        """Index every record by FormID: signature, byte extent, GRUP path.
+
+        A LAND is additionally keyed by its owning cell, named by the enclosing
+        type-6 GRUP label -- its own FormID is not recoverable by arithmetic,
+        see `land`.
+        """
+        for rec, stack in walk(self._data, bodies=()):
+            self._offsets[rec.form_id] = (rec.sig, rec.offset,
+                                          _HEADER_SIZE + rec.size)
+            self._paths[rec.form_id] = stack.path()
+            if rec.sig == b'LAND' and stack.cell is not None:
+                self._land_by_cell[stack.cell] = rec.form_id
 
     def group_path(self, formid: int) -> tuple:
         """The GRUP nesting a record sits in, as ((type, label), ...).
@@ -174,10 +144,10 @@ class MasterIndex:
             if struct.unpack_from('<I', self._data, off + 8)[0] & 0x00040000:
                 continue
             body = self._data[off + _HEADER_SIZE:off + size]
-            if len(body) < 6 or body[:4] != b'EDID':
+            if body[:4] != b'EDID':
                 continue
-            ln = struct.unpack_from('<H', body, 4)[0]
-            if body[6:6 + ln].rstrip(b'\0') == want:
+            got = first_sub(body, b'EDID')
+            if got is not None and got.rstrip(b'\0') == want:
                 return fid
         return 0
 

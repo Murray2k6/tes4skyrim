@@ -47,8 +47,11 @@ Connectivity contract (verified against ALL 15,462 Skyrim.esm NVMI entries):
   destination leaves the cell.
 """
 
+import os
 import struct
+import zlib
 
+from .tes5_reader import records
 from .writer import pack_subrecord
 
 _PATHING_CELL_CRC = 0xA5E9A03C
@@ -106,8 +109,6 @@ def read_master_nvpp(data_dir: str) -> bytes:
     state vanilla no matter which override the engine honours.  Returns b''
     when no master can be read (caller falls back to an empty struct).
     """
-    import os
-    import zlib
     best = b''
     for esm in ('Skyrim.esm', 'Update.esm', 'Dawnguard.esm',
                 'HearthFires.esm', 'Dragonborn.esm'):
@@ -124,44 +125,13 @@ def read_master_nvpp(data_dir: str) -> bytes:
 
 
 def _extract_nvpp(path: str) -> bytes:
-    import zlib
+    """The first NAVI record's NVPP payload, or b'' when the file has none."""
     with open(path, 'rb') as f:
         data = f.read()
-    hdr = struct.unpack_from('<I', data, 4)[0]
-    off = 24 + hdr
-    while off + 24 <= len(data):
-        sig = data[off:off + 4]
-        size = struct.unpack_from('<I', data, off + 4)[0]
-        if sig == b'GRUP':
-            if data[off + 8:off + 12] == b'NAVI':
-                o2 = off + 24
-                while o2 + 24 <= off + size:
-                    s2 = data[o2:o2 + 4]
-                    sz2 = struct.unpack_from('<I', data, o2 + 4)[0]
-                    if s2 == b'NAVI':
-                        fl = struct.unpack_from('<I', data, o2 + 8)[0]
-                        body = data[o2 + 24:o2 + 24 + sz2]
-                        if fl & 0x00040000:
-                            body = zlib.decompress(body[4:])
-                        p = 0
-                        override = None
-                        while p + 6 <= len(body):
-                            ss = body[p:p + 4]
-                            s = struct.unpack_from('<H', body, p + 4)[0]
-                            p += 6
-                            if ss == b'XXXX':
-                                override = struct.unpack_from('<I', body, p)[0]
-                                p += s
-                                continue
-                            real = override if override is not None else s
-                            override = None
-                            if ss == b'NVPP':
-                                return body[p:p + real]
-                            p += real
-                    o2 += 24 + sz2
-            off += size
-            continue
-        off += 24 + size
+    for rec in records(data, b'NAVI'):
+        nvpp = rec.sub(b'NVPP')
+        if nvpp:
+            return nvpp
     return b''
 
 

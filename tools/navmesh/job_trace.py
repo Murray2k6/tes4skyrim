@@ -42,6 +42,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 from output_layout import assets_for
+from tes5_import.navmesh import pool as navm_pool
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -58,9 +59,9 @@ def _load(export_dir, offset):
     by_type = group_records_by_type(parse_export_directory(export_dir))
     print(f'  parsed in {time.time() - t0:.1f}s', flush=True)
 
-    door_fids = im._build_door_fid_set(by_type)
-    base_model_by_fid = im._build_base_model_index(by_type)
-    jobs = im._gather_navm_jobs(by_type, door_fids)
+    door_fids = navm_pool.build_door_fid_set(by_type)
+    base_model_by_fid = navm_pool.build_base_model_index(by_type)
+    jobs = navm_pool.gather_navm_jobs(by_type, door_fids)
     # FormIDs are pre-assigned in the parent in the real run; any stable value
     # works here since we are not writing a plugin.
     for i, job in enumerate(jobs):
@@ -111,7 +112,7 @@ def main():
     print(f'  {len(jobs)} navmesh jobs', flush=True)
 
     collision_cache = str(assets_for(export_dir) / 'collision_cache.bin')
-    geom_cache = im._navmesh_geom_cache(collision_cache)
+    geom_cache = navm_pool.navmesh_geom_cache(collision_cache)
     dcc = str(assets_for(export_dir) / 'door_centers_cache.json')
 
     from tes5_import import navm_worker
