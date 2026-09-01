@@ -141,7 +141,7 @@ relative form stands — it is what this pipeline has always written.
 **Extensions must match what the sound stage produces.** Non-voice audio keeps
 its extension; only `.mp3` is transcoded (to PCM `.wav`), because the SSE exe
 has no mp3 support. Keep `_shipped_name` in lockstep with
-`asset_convert.audio_converter.convert_sounds` — an ANAM naming an extension
+`asset_convert.audio.audio_converter.convert_sounds` — an ANAM naming an extension
 the sound stage does not produce is a reference to a file that isn't there, and
 the sound is silently dropped.
 

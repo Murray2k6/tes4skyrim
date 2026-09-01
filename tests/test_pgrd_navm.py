@@ -22,8 +22,8 @@ import pytest
 pytest.importorskip("numpy")
 pytest.importorskip("scipy")
 
-from tes5_import import pgrd_to_navm as p2n  # noqa: E402
-from tes5_import.navi_builder import build_navi_record  # noqa: E402
+from tes5_import import pgrd_to_navm as p2n
+from tes5_import.navi_builder import build_navi_record
 
 
 class FakeWriter:
@@ -200,17 +200,6 @@ def test_navi_record_layout():
 
 # ---------------------------------------------------------------------------
 # Edge Links — cross-cell navmesh stitching
-# ---------------------------------------------------------------------------
-# Without Edge Links every cell navmesh is an ISLAND: an actor paths fine inside
-# its own cell and can never cross a cell boundary, so any AI package with an
-# out-of-cell destination starts (the actor stands up) and never moves.  Vanilla
-# links 12,145 of 14,440 exterior navmeshes (84%), 194,744 links in total.
-#
-# Binary contract (verified against Skyrim.esm, which parses 15,949/15,949 clean):
-#   Edge Link = Type(U32) + Navmesh(FormID U32) + Triangle(S16) = 10 bytes
-#   Triangle flag bits 0/1/2 = 'Edge 0-1 / 1-2 / 2-0 Link'; when set that edge
-#   field is an INDEX into the Edge Links array, not a neighbour triangle.
-#   Type 0 = Portal (the cell-seam link).
 
 _CELL = 4096.0
 
@@ -318,16 +307,6 @@ def test_edge_links_are_deterministic():
 
 # ---------------------------------------------------------------------------
 # NAVI connectivity mirror — the engine's navmesh info map
-# ---------------------------------------------------------------------------
-# The runtime plans cross-navmesh paths on NAVI's NVMI entries, not on the NVNM
-# blobs: an NVMI with empty Edge/Door Link arrays declares its navmesh an
-# unreachable island even when the NVNM carries portal links and door
-# triangles.  Contract verified against all 15,462 Skyrim.esm NVMI entries:
-#   Edge Links == distinct NVNM edge-link neighbours, self excluded;
-#   Door Links == the mesh's own NVNM door-triangle refs, CRC "PathingDoor".
-# And the NAVI record itself must OVERRIDE Skyrim.esm's singleton 0x00012FB4
-# (as all four DLC ESMs do) — under a fresh FormID the engine never consults
-# it and no navmesh is registered at all.
 
 def _parse_nvmi_entries(navi_rec):
     entries = {}

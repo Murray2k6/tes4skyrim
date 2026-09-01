@@ -31,7 +31,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from tools.validate.animcache_validate import (Scanner, read_string_list,  # noqa: E402
+from tools.validate.animcache_validate import (Scanner, read_string_list,
                                 parse_project_block)
 
 

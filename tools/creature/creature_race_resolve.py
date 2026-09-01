@@ -53,7 +53,7 @@ def find_data_dir(explicit=None):
     if explicit:
         return explicit
     try:
-        from asset_convert.skyrim_assets import find_skyrim_data
+        from asset_convert.sources.skyrim_assets import find_skyrim_data
         d = find_skyrim_data()
         if d:
             return str(d)

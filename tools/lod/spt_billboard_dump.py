@@ -74,7 +74,7 @@ def main() -> int:
         dst = a.out / f'{stem}_billboard.png'
         try:
             size = convert(src, dst)
-        except Exception as e:                   # noqa: BLE001
+        except Exception as e:
             print(f'  {stem:28s} FAILED: {e}')
             continue
         print(f'  {stem:28s} {size[0]}x{size[1]} -> {dst}')

@@ -1,7 +1,7 @@
 """Tests for the SpeedTree (.spt) -> Skyrim NIF conversion pipeline.
 
-Covers the parser (asset_convert.spt_parser), the procedural geometry
-generator (asset_convert.spt_generator), and the NIF builder / TREE record
+Covers the parser (asset_convert.speedtree.spt_parser), the procedural geometry
+generator (asset_convert.speedtree.spt_generator), and the NIF builder / TREE record
 importer.  Real .spt inputs are used when the Oblivion export is available;
 structural assertions run unconditionally against synthetic parses.
 """
@@ -12,15 +12,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from asset_convert.spt_parser import parse_spt, SptParseError, BezierSpline
-from asset_convert import spt_generator
+from asset_convert.speedtree.spt_parser import parse_spt, SptParseError, BezierSpline
+from asset_convert.speedtree import spt_generator
 
 _EXPORT = Path('export/Oblivion.esm/trees')
 _HAVE_EXPORT = _EXPORT.is_dir() and any(_EXPORT.glob('*.spt'))
 
 try:
-    from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
-    from pyffi.formats.nif import NifFormat  # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
+    from pyffi.formats.nif import NifFormat
     _HAVE_PYFFI = True
 except (ImportError, AttributeError):
     _HAVE_PYFFI = False
@@ -174,8 +175,8 @@ class TestGenerator:
                     reason='export or pyffi unavailable')
 class TestNifBuilder:
     def _nif(self, stem, tmp_path):
-        from asset_convert.spt_converter import convert_one, _tex_index
-        tex = _tex_index(Path('export/Oblivion.esm/textures/trees'))
+        from asset_convert.speedtree.spt_converter import convert_one, tex_index
+        tex = tex_index(Path('export/Oblivion.esm/textures/trees'))
         out = tmp_path / f'{stem}.nif'
         assert convert_one(_EXPORT / f'{stem}.spt', out, tex_idx=tex, name=stem)
         data = NifFormat.Data()
@@ -276,7 +277,7 @@ class TestTreeRecordImport:
 # ---------------------------------------------------------------------------
 
 def _read_manifest():
-    from asset_convert.spt_converter import load_tree_manifest
+    from asset_convert.speedtree.spt_converter import load_tree_manifest
     man = load_tree_manifest(Path('export/Oblivion.esm'))
     # {stem: [(editorid, seed, billboard_h)]}
     out = {}
@@ -300,21 +301,16 @@ def _read_manifest():
 
 
 # ---------------------------------------------------------------------------
-# Engine-branch alternate path (asset_convert/spt_engine_geom.py)
-#
-# The engine path is OPT-IN and needs a configured Oblivion.exe plus the built
-# native/dist harness.  What must hold unconditionally is the CONTRACT:
-# when the engine is unavailable, conversion falls back to the untouched
-# Python generator and produces byte-identical output to the default path.
+# Engine-branch alternate path (asset_convert/speedtree/spt_engine_geom.py)
 # ---------------------------------------------------------------------------
 
 class TestEngineBranchPath:
 
     def _fixture(self):
-        from asset_convert.spt_converter import (_tex_index, load_tree_manifest)
+        from asset_convert.speedtree.spt_converter import (tex_index, load_tree_manifest)
         from output_layout import assets_for
         export_dir = Path('export/Oblivion.esm')
-        tex = _tex_index(assets_for(export_dir) / 'textures' / 'trees')
+        tex = tex_index(assets_for(export_dir) / 'textures' / 'trees')
         man = load_tree_manifest(export_dir)
         recs = man.get('treeginkgo')
         if not recs:
@@ -331,8 +327,8 @@ class TestEngineBranchPath:
         dump-cache MISS, so a stale cached .bin made an unavailable engine look
         available and the fallback never fired.
         """
-        from asset_convert import spt_engine_geom as eg
-        from asset_convert.spt_converter import convert_one
+        from asset_convert.speedtree import spt_engine_geom as eg
+        from asset_convert.speedtree.spt_converter import convert_one
         src, tex, eid, icon, seed = self._fixture()
 
         default = tmp_path / 'default.nif'
@@ -353,8 +349,8 @@ class TestEngineBranchPath:
                         reason='needs the Oblivion export and pyffi')
     def test_missing_exe_falls_back(self, tmp_path):
         """No configured Oblivion.exe must fall back, not raise."""
-        from asset_convert import spt_engine_geom as eg
-        from asset_convert.spt_converter import convert_one
+        from asset_convert.speedtree import spt_engine_geom as eg
+        from asset_convert.speedtree.spt_converter import convert_one
         src, tex, eid, icon, seed = self._fixture()
 
         orig = eg.find_oblivion_exe
@@ -376,7 +372,7 @@ class TestEngineBranchPath:
         on the reimplementation.
         """
         import inspect
-        from asset_convert.spt_converter import convert_one, convert_spt_directory
+        from asset_convert.speedtree.spt_converter import convert_one, convert_spt_directory
         from asset_convert.asset_pipeline import convert_speedtrees
         assert (inspect.signature(convert_one)
                 .parameters['use_engine'].default is True)
@@ -388,7 +384,7 @@ class TestEngineBranchPath:
     @pytest.mark.skipif(not _HAVE_EXPORT, reason='needs the Oblivion export')
     def test_strip_expansion_drops_degenerates(self):
         """Strip stitching repeats an index; those joins are not triangles."""
-        from asset_convert.spt_engine_geom import strips_to_triangles
+        from asset_convert.speedtree.spt_engine_geom import strips_to_triangles
         strip = np.array([0, 1, 2, 2, 2, 3, 4, 5], np.int64)
         tris = strips_to_triangles([strip])
         assert len(tris) == 3                     # 6 windows, 3 degenerate
@@ -398,7 +394,7 @@ class TestEngineBranchPath:
     @pytest.mark.skipif(not _HAVE_EXPORT, reason='needs the Oblivion export')
     def test_strip_expansion_alternates_winding(self):
         """A triangle strip flips winding on every other triangle."""
-        from asset_convert.spt_engine_geom import strips_to_triangles
+        from asset_convert.speedtree.spt_engine_geom import strips_to_triangles
         tris = strips_to_triangles([np.array([0, 1, 2, 3], np.int64)])
         assert tris.tolist() == [[0, 1, 2], [1, 3, 2]]
 
@@ -415,8 +411,8 @@ class TestEngineBranchPath:
         Ground truth is the engine's own per-vertex normals: a correctly wound
         face normal points the same way they do.
         """
-        from asset_convert.spt_engine_geom import (read_dump, run_dump,
-                                                   _orphan_ring_triangles,
+        from asset_convert.speedtree.spt_engine_geom import (read_dump, run_dump,
+                                                   orphan_ring_triangles,
                                                    engine_available)
         if not engine_available():
             pytest.skip('engine path unavailable')
@@ -427,7 +423,7 @@ class TestEngineBranchPath:
         with tempfile.TemporaryDirectory() as td:
             dump = run_dump(src, Path(td) / 'cw.bin', seed=301409)
             co, no, uv, strips = read_dump(dump)
-        orphan = _orphan_ring_triangles(co, strips)
+        orphan = orphan_ring_triangles(co, strips)
         if not len(orphan):
             pytest.skip('no orphan blocks for this tree')
 
@@ -451,8 +447,8 @@ class TestEngineBranchPath:
         inference attempts).  Whatever the inference does, nothing long may
         survive.
         """
-        from asset_convert.spt_engine_geom import (read_dump, run_dump,
-                                                   _orphan_ring_triangles,
+        from asset_convert.speedtree.spt_engine_geom import (read_dump, run_dump,
+                                                   orphan_ring_triangles,
                                                    engine_available)
         if not engine_available():
             pytest.skip('engine path unavailable')
@@ -467,7 +463,7 @@ class TestEngineBranchPath:
         with tempfile.TemporaryDirectory() as td:
             dump = run_dump(src, Path(td) / 'cw.bin', seed=301409)
             co, no, uv, strips = read_dump(dump)
-        orphan = _orphan_ring_triangles(co, strips)
+        orphan = orphan_ring_triangles(co, strips)
         if not len(orphan):
             pytest.skip('no orphan blocks for this tree')
         a, b, c = co[orphan[:, 0]], co[orphan[:, 1]], co[orphan[:, 2]]
@@ -494,7 +490,7 @@ class TestEngineBranchPath:
         never matched.  They floated up to 36% of the tree diagonal off the
         model, wearing a mania leaf atlas on a dementia tree.
         """
-        from asset_convert.spt_engine_geom import (read_leaf_centres, run_dump,
+        from asset_convert.speedtree.spt_engine_geom import (read_leaf_centres, run_dump,
                                                    build_tree_engine,
                                                    engine_available)
         if not engine_available():

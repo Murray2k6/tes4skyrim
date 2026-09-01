@@ -20,9 +20,9 @@ import pytest
 pytest.importorskip("numpy")
 pytest.importorskip("shapely")
 
-from tes5_import.navmesh import corridor_clean as cc  # noqa: E402
-from tes5_import.navmesh import corridor_union as cu  # noqa: E402
-from tes5_import.navmesh import params  # noqa: E402
+from tes5_import.navmesh import corridor_clean as cc
+from tes5_import.navmesh import corridor_union as cu
+from tes5_import.navmesh import params
 
 
 def _components(tris):
@@ -199,10 +199,6 @@ def test_edge_ratio_contract_is_two():
 
 # ---------------------------------------------------------------------------
 # METRIC regression tests.  These guard the DIAGNOSTICS, not the generator:
-# a hole straight through a doorway once shipped because the sweep reported it
-# as "miss=1" — one uncovered sample, indistinguishable from fringe noise.  A
-# contiguous gap ON a walked line, and especially one inside a doorway, must
-# always surface as its own number.
 # ---------------------------------------------------------------------------
 
 class _FakeCell(object):

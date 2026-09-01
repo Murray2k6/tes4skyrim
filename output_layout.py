@@ -48,22 +48,11 @@ def finished_dir(out_root) -> Path:
 
 # --- Shared-folder resolution ----------------------------------------------
 # Plugins imported together from one mod archive share ONE asset payload but
-# keep their own records, so a plugin name maps to a folder in three different
-# ways. All three live here, in the one module that already exists to spell a
-# path convention exactly once, and that any tool can import without dragging
-# in the pipeline.
-#
-# The registry import is optional ON PURPOSE -- output_layout must stay usable
-# from standalone tools -- but ONLY ImportError is caught. An exception raised
-# INSIDE the resolver is a real bug, and swallowing it would silently hand back
-# the pre-group path: meshes read from a folder that no longer exists, no error
-# anywhere. That is the failure mode this project keeps getting bitten by, so
-# it is deliberately allowed to raise.
 
 def _registry():
     """`source_registry`, or None when it cannot be imported at all."""
     try:
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
     except ImportError:
         return None
     return source_registry
@@ -125,22 +114,6 @@ def master_record_dir(export_dir, master: str) -> Path:
 
 # ---------------------------------------------------------------------------
 #  One handle per plugin
-#
-#  The functions above each answer ONE question and each need the roots passed
-#  in, so every module ended up re-deriving paths itself -- and every module
-#  that got it wrong did so silently. `PluginPaths` bundles the whole answer
-#  for one plugin behind a single call, so a caller asks once and reads
-#  attributes:
-#
-#      pp = paths('TamRes.esm')
-#      pp.records            export/<Mod>/TamRes.esm/
-#      pp.assets             export/<Mod>/            (shared by the mod)
-#      pp.out                output/<Mod>/
-#      pp.esm                output/<Mod>/TamRes.esm
-#      pp.master('Oblivion.esm').records
-#
-#  The roots default to the repo's own export/ and output/, which is what every
-#  pipeline caller wants; a test or tool passes its own.
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent

@@ -1747,7 +1747,7 @@ def gui_main():
                     f"No .esm/.esp plugins found in:\n\n{path}\n\n"
                     "Add it anyway?", yes="Add", no="Cancel"):
                 return
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
         source_registry.add_directory(EXPORT_DIR, path)
         _refresh_scopes(select=f"dir:{os.path.normcase(os.path.normpath(path))}")
         _apply_scope()
@@ -1770,7 +1770,7 @@ def gui_main():
                         "Nothing on disk is deleted.",
                         yes="Remove", no="Cancel"):
             return
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
         source_registry.remove_directory(EXPORT_DIR, row["path"])
         _refresh_scopes()
         _apply_scope()
@@ -1804,7 +1804,7 @@ def gui_main():
     def _all_sources():
         """Every source: registered folders + the configured one + mods."""
         try:
-            from asset_convert import source_registry
+            from asset_convert.sources import source_registry
             return source_registry.all_sources(
                 EXPORT_DIR, extra_dirs=[tes4_var.get()])
         except Exception:
@@ -1890,7 +1890,7 @@ def gui_main():
         instead of whatever folder happens to be selected.
         """
         try:
-            from asset_convert import source_registry
+            from asset_convert.sources import source_registry
             entry = source_registry.get(EXPORT_DIR, name)
         except Exception:
             entry = None
@@ -1920,7 +1920,8 @@ def gui_main():
         Only an imported mod has a measured content list.
         """
         try:
-            from asset_convert import mod_ingest, source_registry
+            from asset_convert.sources import mod_ingest
+            from asset_convert.sources import source_registry
             from output_layout import asset_root
             name = file_var.get()
             entry = source_registry.get(EXPORT_DIR, name)
@@ -1957,7 +1958,7 @@ def gui_main():
             return
 
         try:
-            from asset_convert import mod_ingest
+            from asset_convert.sources import mod_ingest
             usable = mod_ingest.available_steps(caps)
         except Exception:
             return
@@ -1978,7 +1979,7 @@ def gui_main():
         """Why a step is greyed, in the user's terms rather than 'disabled'."""
         if key == "extract":
             return "already extracted on import"
-        from asset_convert import mod_ingest
+        from asset_convert.sources import mod_ingest
         needs = mod_ingest.STEP_REQUIREMENTS.get(key, ())
         if needs == ("plugin",):
             return "needs a plugin"
@@ -2564,7 +2565,7 @@ def gui_main():
     def _lod_out_root() -> Path:
         return Path(output_var.get().strip() or str(SCRIPT_DIR / "output"))
 
-    def _plugin_masters(name: str) -> list[str]:
+    def plugin_masters(name: str) -> list[str]:
         """The MAST list of a converted plugin, or [] if it cannot be read."""
         try:
             sys.path.insert(0, str(SCRIPT_DIR))
@@ -2583,11 +2584,11 @@ def gui_main():
         is also the order the user must install them in.
         """
         try:
-            from asset_convert.sibling_lod import converted_plugins
+            from asset_convert.lod.sibling_lod import converted_plugins
             names = sorted(converted_plugins(_lod_out_root()))
         except Exception:
             return []
-        deps = {n: [m for m in _plugin_masters(n) if m in set(names)]
+        deps = {n: [m for m in plugin_masters(n) if m in set(names)]
                 for n in names}
         ordered, seen = [], set()
 
@@ -2611,7 +2612,7 @@ def gui_main():
         order the run does not apply and misreport which plugin wins a tile.
         """
         try:
-            from asset_convert.sibling_lod import (converted_plugins,
+            from asset_convert.lod.sibling_lod import (converted_plugins,
                                                    create_lod_order)
         except Exception:
             return []
@@ -2621,7 +2622,7 @@ def gui_main():
     def _default_lod_worldspaces(names: list[str]) -> list[str]:
         """Every worldspace the selected plugins would generate LOD for."""
         try:
-            from asset_convert.sibling_lod import lod_worldspaces as _lw
+            from asset_convert.lod.sibling_lod import lod_worldspaces as _lw
         except Exception:
             return []
         return _lw(names, SCRIPT_DIR / "export", _lod_out_root())
@@ -2639,7 +2640,7 @@ def gui_main():
         editor of the saved selection.
         """
         all_names = _default_master_plugins()
-        deps = {n: [m for m in _plugin_masters(n) if m in set(all_names)]
+        deps = {n: [m for m in plugin_masters(n) if m in set(all_names)]
                 for n in all_names}
 
         try:
@@ -2987,7 +2988,7 @@ def gui_main():
         # tick is a dict lookup rather than a rescan.
         _ws_why: dict = {}
         try:
-            from asset_convert.sibling_lod import (
+            from asset_convert.lod.sibling_lod import (
                 dependents_of, worldspaces_by_plugin_diagnosed,
                 merge_worldspaces)
             _deps = dependents_of(all_names, SCRIPT_DIR / "export")
@@ -4002,7 +4003,7 @@ def gui_main():
 
         def _work():
             try:
-                from asset_convert import mod_ingest
+                from asset_convert.sources import mod_ingest
                 man = mod_ingest.inspect(path)
                 result["manifest"] = man
                 # The master scan stages every plugin out of the archive,
@@ -4277,7 +4278,7 @@ def gui_main():
         try:
             import tempfile
 
-            from asset_convert import archive as _archive
+            from asset_convert.sources import archive as _archive
             from convert import get_masters_from_binary
         except Exception:
             return {}
@@ -4343,7 +4344,7 @@ def gui_main():
 
         def _work():
             try:
-                from asset_convert import mod_ingest
+                from asset_convert.sources import mod_ingest
                 outcome["results"] = mod_ingest.ingest(
                     path, EXPORT_DIR, plugin_members=chosen,
                     keep_archive=keep_archive, manifest=manifest,
@@ -4371,7 +4372,7 @@ def gui_main():
             # Switch the plugin selector to the mod just imported -- that is
             # what the user wants to convert next.
             try:
-                from asset_convert import source_registry
+                from asset_convert.sources import source_registry
                 entry = source_registry.get(EXPORT_DIR, names[0]) if names else None
                 # Source ids are prefixed ("mod:<group_id>"); passing the bare
                 # group_id silently fails to match and leaves the old source
@@ -4392,7 +4393,7 @@ def gui_main():
     def _manage_mods():
         """List imported mods, with a Remove action for each."""
         try:
-            from asset_convert import source_registry
+            from asset_convert.sources import source_registry
             groups = source_registry.groups(EXPORT_DIR)
         except Exception as exc:
             _info("Imported Mods", f"Could not read the mod registry:\n\n{exc}")
@@ -4430,7 +4431,7 @@ def gui_main():
                       "archive on disk is not touched.",
                     yes="Remove", no="Cancel"):
                 return
-            from asset_convert import mod_ingest
+            from asset_convert.sources import mod_ingest
             for name in plug_names:
                 try:
                     mod_ingest.remove(name, EXPORT_DIR)
@@ -4672,7 +4673,7 @@ def gui_main():
         if key == "modify_body_meshes":
             return finished / "Slot44 Patch.esp"
         if key == "pack_lod":
-            from asset_convert.sibling_lod import LOD_DIR_NAME
+            from asset_convert.lod.sibling_lod import LOD_DIR_NAME
             return finished / f"{LOD_DIR_NAME}.zip"
         # make_master produces no file — it flips a bit inside plugins that
         # already exist. Its stamp reads the flags directly instead.
@@ -4721,8 +4722,8 @@ def gui_main():
             # stamp runs before the window first paints.
             from tools.misc.convert_ui import (MESSAGE_BOX_SWF, CURSOR_SWF,
                                                find_data_dirs)
-            from asset_convert import ui_menus as _ui
-            from asset_convert import ui_cursor as _cur
+            from asset_convert.ui import ui_menus as _ui
+            from asset_convert.ui import ui_cursor as _cur
             ob_dir, sk_dir = find_data_dirs()
             wanted = [(ob_dir, _ui.MESSAGE_MENU_XML),
                       (ob_dir, _ui.GENERIC_BACKGROUND_XML),
@@ -4766,7 +4767,7 @@ def gui_main():
             #
             # Size+mtime per file, not content: the folder is thousands of
             # tiles and hashing them would cost more than the zip itself.
-            from asset_convert.sibling_lod import LOD_DIR_NAME
+            from asset_convert.lod.sibling_lod import LOD_DIR_NAME
             lod_dir = Path(out_dir) / LOD_DIR_NAME
             try:
                 src = sorted(
@@ -4797,7 +4798,7 @@ def gui_main():
 
         parts = []
         try:
-            from asset_convert.sibling_lod import converted_plugins
+            from asset_convert.lod.sibling_lod import converted_plugins
             parts += sorted(converted_plugins(Path(out_dir)))
         except Exception:
             pass
@@ -5220,7 +5221,7 @@ def gui_main():
                 return
             # A folder is a valid mod source; any other non-archive is not.
             if not os.path.isdir(path):
-                from asset_convert import archive as _archive
+                from asset_convert.sources import archive as _archive
                 if not _archive.is_archive(path):
                     _info("Import Mod",
                           f"{os.path.basename(path)} is not a mod archive.\n\n"
@@ -5258,7 +5259,7 @@ def gui_main():
     # ran from), so someone with two installs sees both immediately rather
     # than having to re-add the second by hand.
     try:
-        from asset_convert import source_registry as _sr
+        from asset_convert.sources import source_registry as _sr
         _sr.migrate_known_directories(EXPORT_DIR, extra_dirs=[tes4_var.get()])
     except Exception:
         pass

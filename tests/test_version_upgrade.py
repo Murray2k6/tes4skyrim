@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import version as v  # noqa: E402
+import version as v
 
 
 # ── Tag numbering: two schemes on one scale ───────────────────────────────

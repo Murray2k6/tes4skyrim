@@ -36,7 +36,7 @@ RUNTIME_ACTOR_BASES = {'LVLC'}
 _PROP_RE = re.compile(r'^Actor Property (\w+) Auto', re.M)
 
 
-def _iter_records(path):
+def iter_records(path):
     """Yield each record in an export .txt as a dict of its scalar fields."""
     cur = {}
     with open(path, encoding='utf-8', errors='replace') as fh:
@@ -60,7 +60,7 @@ def build_ref_map(export_dir):
         path = os.path.join(export_dir, f'{sig}.txt')
         if not os.path.exists(path):
             continue
-        for rec in _iter_records(path):
+        for rec in iter_records(path):
             if 'EditorID' in rec and 'NAME' in rec:
                 edid_to_base[rec['EditorID'].lower()] = rec['NAME']
 
@@ -70,7 +70,7 @@ def build_ref_map(export_dir):
         if sig in ('REFR', 'ACHR', 'ACRE', 'CELL', 'LAND',
                    'INFO', 'DIAL', 'SCPT', 'QUST'):
             continue
-        for rec in _iter_records(path):
+        for rec in iter_records(path):
             fid = rec.get('FormID')
             if fid:
                 base_type[fid] = sig

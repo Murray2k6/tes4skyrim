@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.live.quest_labtest import _vm_new_lines, _VM_GAP_MARKER  # noqa: E402
+from tools.live.quest_labtest import _vm_new_lines, _VM_GAP_MARKER
 
 
 def test_first_poll_returns_everything():

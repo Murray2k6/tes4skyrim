@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from tools.script.papyrus_tail import log_dir, DEFAULT_LOG  # noqa: E402
+from tools.script.papyrus_tail import log_dir, DEFAULT_LOG
 
 _LINE = re.compile(
     r'TES4Say (?P<kind>request|began|dropped|LineBegan|LineEnded) actor '

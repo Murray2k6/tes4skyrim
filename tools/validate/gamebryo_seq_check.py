@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 def _nif_sequences(nif_path):
     """(declared sequence names, [(seq name, empty text key count), ...])."""
-    from asset_convert import sse_nif
+    from asset_convert.nif import sse_nif
     from pyffi.formats.nif import NifFormat
     try:
         data = sse_nif.read_nif(nif_path)

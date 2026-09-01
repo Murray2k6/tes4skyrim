@@ -290,7 +290,7 @@ def test_straddling_refs_are_not_force_persisted(placements):
 ])
 def test_ck_load_gate(esm, tool, args):
     r = subprocess.run(
-        [sys.executable, str(ROOT / 'tools' / tool), str(esm), *args],
+        [sys.executable, str(ROOT / 'tools' / 'validate' / tool), str(esm), *args],
         capture_output=True, text=True, timeout=300,
         encoding='utf-8', errors='replace')
     assert r.returncode == 0, (
@@ -309,7 +309,7 @@ def test_render_audit_matches_authored_export(esm):
     if not (export / 'REFR.txt').is_file():
         pytest.skip(f'no export dump at {export}')
     r = subprocess.run(
-        [sys.executable, str(ROOT / 'tools' / 'refr_render_audit.py'),
+        [sys.executable, str(ROOT / 'tools' / 'validate' / 'refr_render_audit.py'),
          '--plugin', PLUGIN, '--export-dir', str(export)],
         capture_output=True, text=True, timeout=600,
         encoding='utf-8', errors='replace')

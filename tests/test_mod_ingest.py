@@ -13,7 +13,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import archive, bsa_extract, mod_ingest, source_registry  # noqa: E402
+from asset_convert.sources import archive
+from asset_convert.sources import bsa_extract
+from asset_convert.sources import mod_ingest
+from asset_convert.sources import source_registry
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +754,7 @@ def test_converted_plugins_finds_plugins_inside_a_group_folder(tmp_path):
     Both scanners key off `<plugin>.manifest.json` instead. Getting this wrong
     drops the plugin out of load-order resolution silently.
     """
-    from asset_convert.sibling_lod import converted_plugins
+    from asset_convert.lod.sibling_lod import converted_plugins
 
     out = tmp_path / 'output'
     # A single-plugin conversion: folder named for the plugin.

@@ -190,7 +190,7 @@ def read_artifact(path, plugin_hint=None):
     return data
 
 
-def _master_names(export_dir):
+def master_names(export_dir):
     """This plugin's TES4 master names, in load order, from its export header."""
     header = os.path.join(export_dir, '_HEADER.txt')
     if not os.path.isfile(header):
@@ -227,7 +227,7 @@ def preflight_artifacts(export_dir):
     roots = [(export_dir, own)]
     try:
         root = _export_root(export_dir)
-        for name in _master_names(export_dir):
+        for name in master_names(export_dir):
             roots.append((_master_export_dir(root, name), name))
     except Exception:
         # A layout we cannot resolve just means fewer preflight checks; the

@@ -20,7 +20,8 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from asset_convert import pyffi_monkey_patch  # noqa: F401
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
 from pyffi.formats.nif import NifFormat
 
 
@@ -142,7 +143,7 @@ def main():
               for yaw in yaws]
 
     if args.far:
-        from asset_convert import lod_far_gen
+        from asset_convert.lod import lod_far_gen
         kw = {}
         if args.ratio is not None:
             kw['decimate_ratio'] = args.ratio

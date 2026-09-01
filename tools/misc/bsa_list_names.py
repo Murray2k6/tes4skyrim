@@ -1,6 +1,6 @@
 """List all file paths inside a BSA (v103/104/105) — names only, no data.
 
-Reuses the same layout facts as asset_convert.bsa_extract.read_bsa_files.
+Reuses the same layout facts as asset_convert.sources.bsa_extract.read_bsa_files.
 Usage: python temp/bsa_list_names.py <bsa> [substring-filter]
 """
 import struct

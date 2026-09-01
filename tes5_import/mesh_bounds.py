@@ -5,7 +5,7 @@ Used by the import pipeline to set accurate OBND values on records instead of
 type-based defaults.
 
 This module is the READER half only.  The cache is produced by
-`asset_convert.collision_extract.scan_mesh_data`, which computes bounds and
+`asset_convert.collision.collision_extract.scan_mesh_data`, which computes bounds and
 collision from a SINGLE NIF parse — parsing dominates both analyses, so the
 bounds scan used to re-read every mesh the collision scan had just read.  See
 that function for the details.
@@ -30,7 +30,7 @@ OBNDTuple = Tuple[int, int, int, int, int, int]
 # Module-level caches populated by load_mesh_bounds().
 _MESH_BOUNDS: Dict[str, OBNDTuple] = {}
 # Optional 7th element of a cache entry: physics flags from
-# asset_convert.collision_extract.physics_flags_from_data (bit 0 =
+# asset_convert.collision.collision_extract.physics_flags_from_data (bit 0 =
 # constrained dynamic island -> the record must be MSTT, not STAT).
 _MESH_PHYSICS: Dict[str, int] = {}
 

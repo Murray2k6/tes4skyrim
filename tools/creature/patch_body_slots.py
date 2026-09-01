@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a patch plugin making a Skyrim plugin's body items compatible
 with the TES4 conversion's biped slot 44 (Lower Body) and the split body
-meshes produced by asset_convert/modify_body_meshes.py.
+meshes produced by asset_convert/character/modify_body_meshes.py.
 
 Why this is needed
 ------------------
@@ -105,7 +105,7 @@ FLAG_ESM       = 0x00000001
 FLAG_LOCALIZED = 0x00000080
 FLAG_ESL       = 0x00000200
 
-# Exact worn-model basenames modified by asset_convert/modify_body_meshes.py.
+# Exact worn-model basenames modified by asset_convert/character/modify_body_meshes.py.
 # Only skin ARMAs pointing at these get the three-way split; skins with their
 # own body meshes (e.g. werewolf, child) keep vanilla behavior.
 _SPLIT_BODY_BASENAMES = ('malebody_1.nif', 'femalebody_1.nif')
@@ -177,7 +177,7 @@ def _load_string_tables(plugin_path: str, language: str) -> dict:
     missing = [ext for ext in ('strings', 'dlstrings') if ext not in raws]
     if missing:
         try:
-            from asset_convert.bsa_extract import read_bsa_files
+            from asset_convert.sources.bsa_extract import read_bsa_files
         except ImportError:
             read_bsa_files = None
         if read_bsa_files is not None:
@@ -316,12 +316,6 @@ def _pack_header(masters: list, num_records: int, next_object_id: int,
 
 # ---------------------------------------------------------------------------
 # FormID field tables, used both for Clean Masters usage-scanning (in
-# patch_plugins, before any FormID is packed) and for remapping already-
-# packed record bytes below. Scoped to the exact FormID-typed subrecords
-# ARMO/ARMA can carry, per the xEdit TES5 definitions
-# (references/xEdit/Core/wbDefinitionsTES5.pas, wbRecord(ARMO ...)/
-# wbRecord(ARMA ...)): a signature list rather than a blind byte scan, since
-# this tool only ever emits these two record types.
 # ---------------------------------------------------------------------------
 
 # Single 4-byte FormID subrecords, by owning record type.

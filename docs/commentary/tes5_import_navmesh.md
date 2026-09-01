@@ -1,6 +1,6 @@
 # tes5_import/navmesh/ - PGRD to NAVM, LAND and worldspace
 
-**Code:** `tes5_import/import_main.py`, `asset_convert/collision_extract.py`, `asset_convert/worldmap_clouds.py`, `tes4_export/record_types/world.py`
+**Code:** `tes5_import/import_main.py`, `asset_convert/collision/collision_extract.py`, `asset_convert/lod/worldmap_clouds.py`, `tes4_export/record_types/world.py`
 
 ## Contents
 
@@ -230,7 +230,7 @@ reorders triangles, so indices captured before it stay valid.
 
 Which local axis a door's threshold runs along decides the whole quad's
 orientation. It is read from the door's **collision panel** — the body the
-engine collides with — in `asset_convert.collision_extract.door_panel_axis_from_data`,
+engine collides with — in `asset_convert.collision.collision_extract.door_panel_axis_from_data`,
 cached to `door_panel_axis_cache.json` by `tools/generators/build_door_axis_cache.py`:
 
 > A door panel is thin THROUGH the opening and wide ACROSS it. The panel's thin
@@ -266,7 +266,7 @@ assassins never got a valid package at all.
 Three traps, all of which silently dropped real doors:
 * **CMS must be unwrapped.** Converted doors ship `bhkMoppBvTreeShape` →
   `bhkCompressedMeshShape`; 85 vanilla models (every Cheydinhal/Bravil/Leyawiin
-  and castle-tower door) arrive that way. Decode with `asset_convert.cms.decode_cms`.
+  and castle-tower door) arrive that way. Decode with `asset_convert.collision.cms.decode_cms`.
 * **A zero-thickness collision sheet is legal.** `cathedraldoor02`,
   `priorydoor01`, `weynondoor01`, `skdoormiddle01`, `icwalldoor01` ship a flat
   plane where the ZERO axis *is* the swing direction. Rejecting `min(ex,ey)==0`
@@ -509,7 +509,7 @@ function of the door, computed in `corridor_doors` and passed through
   `(lx·c + ly·s, −lx·s + ly·c)`; threshold `(sin rz, cos rz)`; facing
   `(cos rz, −sin rz)`.
 * **The door cache measures the ORIGINAL NIF at the CLOSED pose**
-  (`asset_convert.collision_extract.door_closed_geometry`, built by
+  (`asset_convert.collision.collision_extract.door_closed_geometry`, built by
   `tools/generators/build_door_axis_cache.py` from `export/<plugin>/meshes`; the
   converted-mesh scan no longer writes it).  The 'Close' controller
   sequence's FINAL key values override the animated nodes, and the union
@@ -780,7 +780,7 @@ uncovered** (was 2.5% uncovered / 2452 broken pathgrid edges with contours).
   are walked over, tables/barrels are routed around, with NO size gate or rug
   list. Collision meshes are ORIGIN-CENTERED, so any per-mesh height rule is
   meaningless (a table's local extent says nothing about how high it stands).
-- **Collision cache**: `asset_convert/collision_extract.py` reads the CONVERTED
+- **Collision cache**: `asset_convert/collision/collision_extract.py` reads the CONVERTED
   `output/.../meshes/tes4/**.nif` (collision is root-mounted there; the CMS is a
   flat triangle soup — no NiNode-transform walk needed). `scan_collision` →
   `export/<plugin>/collision_cache.bin` (binary, ~15MB, ~2 min one-time).
@@ -1481,7 +1481,7 @@ DNAM and MNAM), else a HARDCODED `Meshes\Sky\SkyrimWorldMapCloudBank.nif`.
 Oblivion has no world-map cloud layer and vanilla Skyrim authors no MODL
 either (0 of 35 uncompressed Skyrim.esm WRLDs carry one), so without this every
 converted worldspace inherits a bank sized for Skyrim's Tamriel.
-`asset_convert/worldmap_clouds.py` emits one per worldspace and points MODL at
+`asset_convert/lod/worldmap_clouds.py` emits one per worldspace and points MODL at
 `meshes\tes4\worldmapclouds\<edid>.nif` (under `tes4\`, never `sky\`, so a
 generated bank can never shadow the vanilla file the weather system loads by
 name).

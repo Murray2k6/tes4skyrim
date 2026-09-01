@@ -26,7 +26,7 @@ _CHILD = r'''
 import sys, hashlib, json
 sys.path.insert(0, r"{root}")
 from pathlib import Path
-from asset_convert import nif_converter as nc
+from asset_convert.nif import nif_converter as nc
 src = Path(r"{src}")
 nc._pyffi_capture_init()
 out = {{}}
@@ -62,7 +62,7 @@ def main():
         print(f"no mesh tree at {src}", file=sys.stderr)
         return 2
 
-    from asset_convert import nif_converter as nc
+    from asset_convert.nif import nif_converter as nc
     nifs = []
     for p in src.rglob('*.nif'):
         rel = [x.lower() for x in p.relative_to(src).parts]

@@ -27,7 +27,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from tools.disasm.skyrim_disasm import LiveBinary  # noqa: E402
+from tools.disasm.skyrim_disasm import LiveBinary
 
 _LEA = re.compile(rb'[\x48\x4c]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]')
 

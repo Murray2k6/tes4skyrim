@@ -23,7 +23,7 @@ from pyffi.formats.nif import NifFormat
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-from asset_convert.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
+from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
 
 
 def _m33_to_np(r):
@@ -522,62 +522,6 @@ def _mat3_to_quat_rv(R):
 
 # ---------------------------------------------------------------------------
 # BRAINSTORM: Better use of the animation corpus in the cache builder
-# ---------------------------------------------------------------------------
-#
-# Current approach: greedy per-chain argmin — for each chain (arm/leg), scan
-# every keyframe in every .kf, evaluate the chain's total bone-position error,
-# keep the frame with the lowest cost. This gives one delta matrix per bone.
-#
-# Why this leaves 10% on the table:
-#   1. Greedy chain-by-chain: spine is never optimised, so all downstream
-#      bones (arm, shoulder) start from a sub-optimal root world transform.
-#   2. Best-frame selection discards all pose variation — hundreds of frames
-#      collapse to one. The optimal delta for a bone may not exist in any
-#      single frame; it lives in the convex hull of all frames.
-#   3. The delta is applied as LBS; see skin_retarget.py brainstorm for why
-#      LBS causes joint collapse compared to DQS.
-#
-# Better approaches to implement here:
-#
-# APPROACH A — Least-squares optimal delta (replaces argmin frame search)
-#   For each bone b, collect all N frames: pairs (R_ob_i, t_ob_i) and target
-#   (R_sk, t_sk) in world space. The delta D = inv(world_ob_rest) @ world_ob_anim
-#   only changes per frame; the target is constant (SK rest pose).
-#   Frame selection is equivalent to picking the D_i that minimises
-#       || W_sk - W_ob_rest @ D_i ||_F
-#   Rather than argmin over discrete frames, compute the least-squares D*
-#   across ALL frames (or a weighted average favoring frames that have low
-#   cost for ALL bones in the chain simultaneously). This gives a delta that
-#   is not constrained to a single keyframe and may be significantly better.
-#   Implementation: compute D_weighted = Σ alpha_i * D_i where alpha_i is
-#   softmax(-cost_i / temperature). Recover the nearest rotation via SVD.
-#
-# APPROACH B — Full-body joint-angle optimisation (IK over the corpus)
-#   Treat the Skyrim rest pose as a target configuration. Use the animation
-#   corpus to define the feasible joint-angle space (convex hull or Gaussian
-#   model per joint). Run L-BFGS-B minimising total bone-position error with
-#   joint angles as the free variables, constrained to the feasible space.
-#   The result is a physically plausible pose that gets as close as possible
-#   to the Skyrim rest pose within Oblivion's skeletal degrees of freedom.
-#   compute_fk_world_positions() is the forward pass; gradients can be
-#   approximated by finite differences since the skeleton is small (~50 bones).
-#
-# APPROACH C — Per-bone transform distribution → confidence-weighted blend
-#   Instead of a single best delta, store the mean and variance of all deltas
-#   observed for each bone across the corpus. Bones with low variance (e.g.
-#   foot — always near the same pose) get their mean delta used with high
-#   confidence. Bones with high variance (e.g. arm — many different poses)
-#   get their delta blended toward the target-minimising direction. This
-#   naturally handles the fact that some bones are over-determined by
-#   animation data while others are under-determined.
-#
-# APPROACH D — Body chain optimisation (currently excluded, see comment below)
-#   The spine chain is excluded because it's asymmetric across L/R. This
-#   causes the entire upper body to inherit a sub-optimal root transform.
-#   Fix: include the spine in optimisation but use a bilateral symmetry
-#   constraint — force L and R deltas to be mirror images of each other.
-#   This is implementable as a joint optimisation over the spine + both arms
-#   simultaneously with a symmetry regularisation term.
 
 def _parse_kf_safe(kf_path):
     """Thread/process-safe wrapper around parse_kf_file."""

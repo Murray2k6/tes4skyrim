@@ -89,7 +89,7 @@ _DOWNFACE_EPS = 1e-6
 # Record walking (shared shape with tools/navmesh/dump.py)
 # ---------------------------------------------------------------------------
 
-def _iter_records(data, start, end, path=()):
+def iter_records(data, start, end, path=()):
     """Yield (sig, formid, body, grup_path) recursing into GRUPs."""
     off = start
     while off + 24 <= end:
@@ -99,7 +99,7 @@ def _iter_records(data, start, end, path=()):
             label = struct.unpack_from('<I', data, off + 8)[0]
             gtype = struct.unpack_from('<i', data, off + 12)[0]
             grp_end = off + size
-            yield from _iter_records(data, off + 24, min(grp_end, end),
+            yield from iter_records(data, off + 24, min(grp_end, end),
                                      path + ((gtype, label),))
             off = grp_end
             continue
@@ -561,7 +561,7 @@ def scan(path, want_doors=True):
     # A NAVM lives in a CELL's temporary child group (type 9); the enclosing
     # type-6 group's label is the CELL FormID, so the parent cell is readable
     # from the GRUP path without a second pass.
-    for sig, fid, body, gpath in _iter_records(data, start, len(data)):
+    for sig, fid, body, gpath in iter_records(data, start, len(data)):
         if sig == 'NAVM':
             for ssig, sdata in _iter_subrecords(body):
                 if ssig == 'NVNM':

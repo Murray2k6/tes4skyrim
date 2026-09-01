@@ -205,7 +205,7 @@ def test_beast_fields_move_head_gear_off_the_beast_skull():
     pytest.importorskip('scipy')
     from scipy.spatial import cKDTree
 
-    from asset_convert import head_fit
+    from asset_convert.character import head_fit
 
     if not head_fit.fit_available(False):
         pytest.skip('head-fit data not built')

@@ -36,13 +36,13 @@ import numpy as np
 # ESM walking
 # ---------------------------------------------------------------------------
 
-def _iter_records(data, start, end, want):
+def iter_records(data, start, end, want):
     off = start
     while off + 24 <= end:
         sig = data[off:off + 4]
         size = struct.unpack_from('<I', data, off + 4)[0]
         if sig == b'GRUP':
-            yield from _iter_records(data, off + 24, min(off + size, end), want)
+            yield from iter_records(data, off + 24, min(off + size, end), want)
             off += size
             continue
         flags = struct.unpack_from('<I', data, off + 8)[0]

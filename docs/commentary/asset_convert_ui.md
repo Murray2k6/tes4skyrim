@@ -1,6 +1,6 @@
-# asset_convert/ui_menus.py - Oblivion UI in Skyrim
+# asset_convert/ui/ui_menus.py - Oblivion UI in Skyrim
 
-**Code:** `asset_convert/swf.py`, `asset_convert/ui_cursor.py`, `asset_convert/ui_menus.py`, `tests/test_ui_convert.py`
+**Code:** `asset_convert/ui/swf.py`, `asset_convert/ui/ui_cursor.py`, `asset_convert/ui/ui_menus.py`, `tests/test_ui_convert.py`
 
 ## Contents
 
@@ -15,8 +15,8 @@
 - [Why only the message box](#why-only-message-box)
 
 What is implemented, what the two engines actually do, and what cannot be
-ported. Code: `asset_convert/swf.py`, `asset_convert/ui_menus.py`,
-`asset_convert/ui_cursor.py`, `tools/misc/convert_ui.py`. Tests:
+ported. Code: `asset_convert/ui/swf.py`, `asset_convert/ui/ui_menus.py`,
+`asset_convert/ui/ui_cursor.py`, `tools/misc/convert_ui.py`. Tests:
 `tests/test_ui_convert.py`, `tests/test_ui_cursor.py`.
 
 **Implemented: the message box and the menu cursor.** The HUD stat bars were
@@ -61,7 +61,7 @@ is not in any ESM, so no part of the export/import pipeline applies.
 replaces **character definitions only**. Every AS2 class, every
 `GameDelegate` callback and the whole timeline are copied through untouched.
 
-That is the entire safety argument. `asset_convert/swf.py` round-trips an
+That is the entire safety argument. `asset_convert/ui/swf.py` round-trips an
 unmodified movie **byte-identically** (including Bethesda's use of the 6-byte
 tag header for short tags — `Tag.force_long`), so any difference in the output
 is a change the patch made deliberately, and the test asserts exactly which

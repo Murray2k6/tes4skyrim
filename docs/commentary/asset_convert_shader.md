@@ -1,6 +1,6 @@
-# asset_convert/nif_converter.py - shader values
+# asset_convert/nif/nif_converter.py - shader values
 
-**Code:** `asset_convert/nif_converter.py`, `asset_convert/spec_mask.py`, `asset_convert/luminance_textures.py`
+**Code:** `asset_convert/nif/nif_converter.py`, `asset_convert/texture/spec_mask.py`, `asset_convert/texture/luminance_textures.py`
 
 ## Contents
 
@@ -12,6 +12,9 @@
 - [What the source does NOT carry](#what-source-does-not-carry)
 - [Known gaps](#known-gaps)
 - [Prior art: the guards PGPatcher applies (read 2026-08-20, not adopted)](#prior-art-guards-pgpatcher-applies)
+- [The default specular mask value (64/255)](#default-mask-alpha)
+- [The Oblivion property enums the converter keys off](#ob-enums)
+- [Animated texture transforms: the NiTextureTransformController map](#texture-transform-controller-map)
 
 Measured 2026-08-19/20 with `tools/shader_value_census.py`,
 `tools/mesh_identity_census.py` and `tools/bc4_preview.py`. Every number here
@@ -80,7 +83,7 @@ the colour on the other 95.8% was never used.
 ## The rule: slot 1's alpha decides
 <a id="rule-slot-1s-alpha-decides"></a>
 
-`asset_convert/spec_mask.py`. Both engines read the normal map's alpha as the
+`asset_convert/texture/spec_mask.py`. Both engines read the normal map's alpha as the
 specular mask — Arcane University's slot table says so for Skyrim ("Black is
 zero reflection, white full") and `landscape_normals.py` already relies on it
 for terrain. It is the one piece of Oblivion's material authoring that
@@ -224,4 +227,92 @@ EXACTLY the `specular_strength` the mesh stage used to write for a maskless
 shape, so moving the value out of the mesh and into the texture is visually
 neutral -- and from then on a modder who ships a real mask simply overrides
 it, instead of having to discover and undo a shader parameter baked into
-thousands of NIFs.  See docs/commentary/asset_convert_shader.md.
+thousands of NIFs.
+
+## The Oblivion property enums the converter keys off
+<a id="ob-enums"></a>
+
+Seven `NiTexturingProperty` / `NiVertexColorProperty` / `NiAlphaProperty`
+values decide which Skyrim shader a shape gets and which channels survive.
+They are declared as constants in `nif_converter.py`; the semantics are here.
+
+### `_APPLY_HILIGHT2 = 4` — Oblivion's parallax switch
+
+`NiTexturingProperty.apply_mode = APPLY_HILIGHT2` means the diffuse's alpha
+channel holds a **height field**, not transparency and not a blend weight.
+Both engines' mechanism is written up in
+[asset_convert_texture.md](asset_convert_texture.md). Skyrim reads that same
+channel as plain opacity, so the alpha property must be dropped either way
+(the alpha handling in `process_geometry`); with `--parallax` the height is
+additionally carried across into a slot-3 map.
+
+### `_LIGHTING_EMISSIVE_ONLY = 0` — the unlit-FX declaration
+
+`NiVertexColorProperty.lighting_mode`: `LIGHTING_E` (0) = "emissive only", the
+surface ignores scene lighting entirely. That is Oblivion's declaration of an
+UNLIT FX surface and maps onto Skyrim's `BSEffectShaderProperty`.
+`LIGHTING_E_A_D` (1) — ordinary lit geometry — maps onto
+`BSLightingShaderProperty`. This is the shader choice in `process_geometry`.
+
+### `_MATERIAL_COLOR_EMISSIVE = 3`
+
+`NiMaterialColorController.target_color`: which material channel the curve
+drives. 3 = `TC_SELF_ILLUM` (emissive) — the only one with a Skyrim analogue.
+
+### `_SHADER_COLOR_EMISSIVE = (1, 0)` — (Lighting, Effect)
+
+`BS*ShaderPropertyColorController.type_of_controlled_color`; the two shaders
+number this differently. Vanilla census of 361 meshes carrying a shader
+ColorController: Lighting uses 1 for emissive (124 blocks, vs 5 at 0 which is
+Specular); Effect uses 0 (46 blocks).
+
+### `_SHADER_ALPHA_VAR = (12, 5)` — (Lighting, Effect)
+
+`BS*ShaderPropertyFloatController` variable for opacity. Per
+`references/nif 0.10.0.0.xml`: Lighting 12 = "Alpha", Effect 5 = "Alpha
+Transparency"; both appear in the vanilla float-controller census.
+
+### `_ALPHA_BLEND_ENABLED = 0x0001`
+
+`NiAlphaProperty.flags` bit 0 = alpha blending enabled. The FX path keys off
+"does this surface alpha-blend", which is the discriminator vanilla itself
+uses for the soft-particle depth fade (`_apply_fx_soft_effect`).
+
+### `_DEFAULT_DIFFUSE_TEXTURE = Textures\white.dds`
+
+Diffuse for a shape whose Oblivion source carries no `NiTexturingProperty`.
+Skyrim's lighting shader dereferences the diffuse **without a null check**, so
+"no texture" is not representable. `white.dds` is vanilla Skyrim's own neutral
+texture (shipped in the SSE BSAs), so the material color we carry across shows
+through unmodified.
+
+## Animated texture transforms: the NiTextureTransformController map
+<a id="texture-transform-controller-map"></a>
+
+Oblivion animates UVs with `NiTextureTransformController`, one controller per
+operation, hung on the `NiTexturingProperty`. Skyrim has no such block: the
+equivalent is a `BSLightingShaderPropertyFloatController` /
+`BSEffectShaderPropertyFloatController` driving a named shader variable. The
+constant table maps each Oblivion transform operation onto the
+`(Lighting, Effect)` variable pair that reproduces it:
+
+| Operation | Lighting var | Effect var |
+|---|---:|---:|
+| `TRANSLATE_U` | 20 (U Offset) | 6 |
+| `TRANSLATE_V` | 22 (V Offset) | 8 |
+| `SCALE_U` | 21 (U Scale) | 7 |
+| `SCALE_V` | 23 (V Scale) | 9 |
+
+Vanilla `FXWaterfallThin512x128` chains U Scale + V Offset + U Offset exactly
+this way. **`TT_ROTATE` has no Skyrim equivalent** — neither shader exposes a
+UV rotation float — so it is dropped, not faked.
+
+### `NiFlipController` — dead in Skyrim, rebuilt as an atlas
+
+Fire and effect quads in Oblivion animate through multiple discrete textures
+using `NiFlipController` on the `NiTexturingProperty`. That block is **dead in
+Skyrim: 0 of 17,216 vanilla meshes use it.** The Skyrim equivalent is a
+frame-strip atlas texture plus a `BSEffectShaderPropertyFloatController` on
+"U Offset" (var 6) with stepped (CONST) keys. The converter composes the
+source frames into a horizontal-strip DDS and emits that controller; see
+`asset_convert/nif/flipbook.py`.

@@ -1,4 +1,4 @@
-"""Tests for asset_convert.inv_marker — inventory display orientation.
+"""Tests for asset_convert.nif.inv_marker — inventory display orientation.
 
 Convention (derived empirically from vanilla meshes, see
 tools/inv_marker_survey.py, removed 2026-08-25): the game composes the stored ushort
@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from pyffi.formats.nif import NifFormat
 
-from asset_convert.inv_marker import compute_inv_rotation, rotation_for_view
+from asset_convert.nif.inv_marker import compute_inv_rotation, rotation_for_view
 
 
 def _angles_close(stored, expected, tol=80):
@@ -89,15 +89,15 @@ def _make_plate_nif(normal):
 def _face_toward_camera(root, rot):
     """Fraction of the mesh's max single-axis visible area that the game's
     camera (+Y) sees under marker rotation ``rot``."""
-    from asset_convert.inv_marker import _gather_area_normals, _visible_area
-    tri_n, tri_a, _c = _gather_area_normals(root)
+    from asset_convert.nif.inv_marker import gather_area_normals, visible_area
+    tri_n, tri_a, _c = gather_area_normals(root)
     m = _game_matrix(*rot)
     rn = tri_n @ m.T
     axes = [np.array(a, dtype=float) for a in
             [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0),
              (0, 0, 1), (0, 0, -1)]]
-    best = max(_visible_area(rn, tri_a, d) for d in axes)
-    return _visible_area(rn, tri_a, np.array([0.0, 1.0, 0.0])) / best
+    best = max(visible_area(rn, tri_a, d) for d in axes)
+    return visible_area(rn, tri_a, np.array([0.0, 1.0, 0.0])) / best
 
 
 class TestRotationForView:

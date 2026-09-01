@@ -26,8 +26,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.navmesh import metrics  # noqa: E402
-from tools.navmesh.index import NavIndex, DEFAULT_EXPORT  # noqa: E402
+from tools.navmesh import metrics
+from tools.navmesh.index import NavIndex, DEFAULT_EXPORT
 
 # The cells every navmesh change is judged against.  Each earned its place by
 # exposing a distinct failure: stacked storeys, cave ledges, multi-storey

@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import preflight  # noqa: E402
+import preflight
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -200,7 +200,7 @@ def test_convert_prints_the_version_warning_without_aborting():
 
 def test_audio_probes_use_the_phases_own_lookup(monkeypatch):
     """If these drifted, a check could pass while the Sounds phase then fails."""
-    import asset_convert.audio_converter as ac
+    import asset_convert.audio.audio_converter as ac
     for finder, expect in (('find_ffmpeg', 'ffmpeg'),
                            ('find_xwmaencode', 'xWMAEncode.exe'),
                            ('find_lipgenerator', 'LipGenerator.exe')):

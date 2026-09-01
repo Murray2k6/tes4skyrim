@@ -206,7 +206,7 @@ first-run file is still self-describing — they are inert to every reader.
 ([gui.py:329](../../gui.py#L329)); `preflight._load_config()` is
 best-effort-empty-dict ([preflight.py:249](../../preflight.py#L249));
 `skyrim_assets` catches `FileNotFoundError`
-([asset_convert/skyrim_assets.py:59](../../asset_convert/skyrim_assets.py#L59));
+([asset_convert/sources/skyrim_assets.py:59](../../asset_convert/sources/skyrim_assets.py#L59));
 and each key read has an inline fallback — `cfg.get("tes4DataPath", "") or
 _find_game_path("oblivion")` ([gui.py:725](../../gui.py#L725)),
 `cfg.get("navmeshCacheDownload") is not False` ([gui.py:742](../../gui.py#L742)),

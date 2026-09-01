@@ -44,13 +44,6 @@ DEFAULT_RACE = 0x00013746  # Nord
 
 # ---------------------------------------------------------------------------
 # Creature race map: EditorID/name keyword → Skyrim race FormID
-#
-# Priority order for source selection:
-#   1. Skyrim.esm  2. Dawnguard.esm  3. Dragonborn.esm
-#   4. CC ESLs (ccbgssse025, ccbgssse040, ccbgssse003)
-#   5. BSAssets.esm  6. BSHeartland.esm
-#
-# Each entry is a tuple: (race_formid, source_note, alternate_note)
 # ---------------------------------------------------------------------------
 
 # Named creature FormIDs from all analyzed sources:
@@ -214,7 +207,6 @@ def resolve_creature_race(edid: str, full_name: str) -> tuple:
 
 # ---------------------------------------------------------------------------
 # TES4 race FormID → EditorID mapping (from Oblivion.esm RACE export)
-# Used to resolve NPC race references to EditorIDs for RACE_MAP lookup.
 # ---------------------------------------------------------------------------
 
 TES4_RACE_FID_TO_EDID = {
@@ -238,9 +230,6 @@ TES4_RACE_FID_TO_EDID = {
 
 # ---------------------------------------------------------------------------
 # NPC preset templates (Skywind/Skyblivion approach):
-# Copy visual data (head parts, face morphs, tints) from preset NPCs.
-# Key: (race_editorid, gender) → Skyrim preset NPC FormID
-# These are actual NPC_ records in Skyrim.esm whose face data we reference.
 # ---------------------------------------------------------------------------
 DEFAULT_PRESET_FEMALE = 0x00079F66  # ImperialFemalePreset01
 DEFAULT_PRESET_MALE = 0x00026921    # ImperialMalePreset01
@@ -248,9 +237,6 @@ DEFAULT_PRESET_MALE = 0x00026921    # ImperialMalePreset01
 
 # ---------------------------------------------------------------------------
 # Voice types: Race + Gender → custom VTYP FormID
-# Starts empty; fully populated at import time by _create_vtyp_records() in
-# import_main.py before any NPC_ conversion runs.  All voice type records are
-# created in the output plugin — we never reference Skyrim.esm VTYPs.
 # ---------------------------------------------------------------------------
 
 VOICE_TYPE_MAP: dict = {}  # (race_edid, gender) -> FormID; populated at runtime
@@ -310,7 +296,6 @@ def set_voice_type(race_edid: str, gender: str, fid: int):
 
 # ---------------------------------------------------------------------------
 # Eye mapping: Oblivion eye FormID → Skyrim HDPT eye FormID
-# Full per-race, per-gender, per-color mapping from Skyrim.esm HDPT records.
 # ---------------------------------------------------------------------------
 
 # Default eyes per race (race-specific eye geometry — must match skeleton)
@@ -431,18 +416,11 @@ def resolve_eye_by_fid(tes4_fid: int, gender: str) -> int:
 
 # ---------------------------------------------------------------------------
 # TES4 HAIR FormID → Skyrim HDPT hair FormID mapping
-# All 57 Oblivion HAIR records mapped to the best-matching Skyrim HDPT.
-# Race groupings: Human = Nord/Imperial/Breton/Redguard (shared assets)
-#                 Elf = HighElf/DarkElf/WoodElf (shared elf hair)
-#                 Orc, Khajiit, Argonian each have dedicated sets.
-# When multiple Skyrim styles are equally good, we use the TES4 FormID
-# as an index to cycle through them for variety.
 # ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
 # Hair color mapping: Oblivion HCLR (R,G,B) → Skyrim CLFM FormID
-# All 15 Skyrim hair colors from Skyrim.esm (verified FormIDs & RGB values).
 # ---------------------------------------------------------------------------
 
 # Skyrim hair color CLFM FormIDs (from Skyrim.esm, HairColor group)
@@ -482,8 +460,6 @@ def map_hair_color(r: int, g: int, b: int) -> int:
 
 # ---------------------------------------------------------------------------
 # TES4 MGEF 4-char code → Skyrim MGEF FormID mapping
-# Maps Oblivion magic effect codes to their Skyrim equivalents.
-# Effects with no clean equivalent get 0 (null).
 # ---------------------------------------------------------------------------
 
 MGEF_CODE_TO_SKYRIM = {
@@ -580,11 +556,6 @@ MGEF_CODE_TO_SKYRIM = {
 
 # ---------------------------------------------------------------------------
 # Attribute/skill-targeted TES4 effects → Skyrim MGEF, keyed by the effect's
-# ActorValue (EFIT byte 20). TES4 attributes: 0=Strength 1=Intelligence
-# 2=Willpower 3=Agility 4=Speed 5=Endurance 6=Personality 7=Luck.
-# Skills use absolute AV indices 12-32 (Armorer..Speechcraft).
-# Falls back to MGEF_CODE_TO_SKYRIM when the AV is missing from the table.
-# All FormIDs verified against references/Skyrim.esm/MGEF.txt.
 # ---------------------------------------------------------------------------
 
 _DAMAGE_ATTR = {
@@ -698,23 +669,6 @@ TES4_SKILL_TO_TES5_INDEX = {
 
 # ---------------------------------------------------------------------------
 # Invisible marker base-object substitution:
-# Oblivion FormID (low 24-bit, no load-order byte) → Skyrim.esm FormID
-#
-# Oblivion has several invisible STAT "marker" objects used for scripting,
-# fast travel, door destinations, orientation, etc. In Skyrim the same
-# conceptual markers exist in Skyrim.esm at (mostly) the same low-byte
-# FormIDs. Because our FormID remapping shifts every Oblivion record from
-# index 0 (0x00…) to index 1 (0x01…), any REFR whose NAME points at one
-# of these markers would be redirected into our converted file rather than
-# into Skyrim.esm — and would reference a STAT record whose mesh is an
-# Oblivion .nif that no longer exists.
-#
-# The substitution below maps the TES4 raw FormID (before offset) to the
-# Skyrim.esm FormID that should be used instead. The Skyrim.esm markers
-# listed here are documented in xEdit / USSEP and are stable engine records.
-#
-# Key:   raw TES4 FormID integer (as stored in the export, no remapping)
-# Value: Skyrim.esm FormID (index 0 = Skyrim.esm, already correct)
 # ---------------------------------------------------------------------------
 
 TES4_MARKER_FORMID_TO_SKYRIM = {
@@ -736,31 +690,12 @@ TES4_MARKER_FORMID_TO_SKYRIM = {
 
 # ---------------------------------------------------------------------------
 # Engine-hardcoded ITEM substitutions: raw TES4 FormID -> Skyrim.esm FormID.
-#
-# Same idea as the marker table, but for base objects the ENGINE looks up by a
-# fixed id rather than ones whose Oblivion asset is missing.
-#
-# Gold001 sits at 0x0000000F in BOTH masters (verified in the
-# references/Skyrim.esm dump: MISC / EditorID=Gold001). Remapped normally it
-# becomes 0x0100000F — a perfectly valid converted MISC also called "Gold",
-# which is why nothing errors. But Skyrim hardcodes 0x0F as CURRENCY: barter,
-# Actor.GetGoldAmount(), and every vendor transaction resolve that id. The
-# converted copy is therefore inert money — it stacks in the inventory as a
-# junk item that cannot be spent, and ~1,150 loot/vendor entries across the two
-# plugins handed it out.
-#
-# Substituted at REFERENCE sites only (inventories, leveled lists, script
-# refs). Oblivion's own Gold001 record keeps being written at 0x0100000F,
-# exactly as the marker bases do — it is simply never pointed at. Adding 0x0F
-# to _ENGINE_FIXED_FORMIDS instead would try to write that record AT 0x0F and
-# collide with Skyrim's.
 TES4_ITEM_FORMID_TO_SKYRIM = {
     0x0000000F: 0x0000000F,  # Gold001 → Skyrim.esm Gold001 (currency)
 }
 
 # ---------------------------------------------------------------------------
 # Weapon equipment type (EQUP) FormIDs — Skyrim.esm
-# ETYP subrecord on WEAP records must reference one of these.
 # ---------------------------------------------------------------------------
 EQUP_RIGHT_HAND  = 0x00013F42  # RightHand  — all 1-handed melee
 EQUP_BOTH_HANDS  = 0x00013F45  # BothHands  — 2-handed melee + bows
@@ -785,8 +720,6 @@ WEAPON_ANIM_CROSSBOW = 7
 
 # ---------------------------------------------------------------------------
 # Per-anim-type weapon defaults — sourced from vanilla Skyrim iron/steel weapons
-# ---------------------------------------------------------------------------
-# INAM — Impact Data Set FormIDs (what sound/particle plays when weapon hits)
 WEAPON_ANIM_INAM: dict[int, int] = {
     1: 0x00013CAC,   # Sword   → WPNzBlade1HandImpactSet
     2: 0x00013CAC,   # Dagger  → WPNzBlade1HandImpactSet
@@ -917,18 +850,6 @@ SHIELD_EQUIP_TYPE = 0x000141E8
 
 # ---------------------------------------------------------------------------
 # Spell equip types (ETYP subrecord on SPEL)
-#
-# ETYP tells the magic menu which slot a spell equips to.  A spell WITHOUT it
-# cannot be filed into a hand and never appears in the menu at all — the
-# converted Bound Dagger/Mace spells were addable by console but invisible and
-# uncastable (user-confirmed).  The same trap is already documented for SCRL,
-# where the converter has always written ETYP.
-#
-# Census of references/Skyrim.esm: 827/827 spells carry ETYP, with NO
-# exceptions in any spell type — the strongest possible evidence it is
-# mandatory.  The values below are vanilla's own majority choice per type:
-# EitherHand for ordinary castable spells and abilities (292/407 Type 0,
-# 242/250 Type 4), Voice for powers cast from the shout key (24/28 Type 2).
 SPELL_EQUIP_EITHER_HAND = 0x00013F44    # EitherHand
 SPELL_EQUIP_VOICE = 0x00025BEE          # Voice (powers / lesser powers)
 
@@ -979,7 +900,7 @@ ARMA_ADDITIONAL_RACES = [
 # through BoneCrown, Blades, Orcish, Dragonscale, Draugr, Dragonplate, Falmer,
 # ThalmorHood and every Circlet.
 #
-# We mirror it: asset_convert.nif_converter writes <name>_khajiit.nif /
+# We mirror it: asset_convert.nif.nif_converter writes <name>_khajiit.nif /
 # <name>_argonian.nif beside the base mesh and equipment._build_arma emits the
 # ARMA naming each.  Khajiit and Argonian stay SEPARATE (never one shared
 # "beast" mesh) because the two skulls differ from each other as much as

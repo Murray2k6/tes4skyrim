@@ -108,7 +108,7 @@ from .tes4_reader import (
 )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from worker_budget import worker_count  # noqa: E402
+from worker_budget import worker_count
 
 EXPORT_DISPATCH = {
     # Items / Objects
@@ -291,12 +291,7 @@ def _export_per_type_serial(by_type: dict, output_dir: str,
 
 
 # --- Parallel formatting -----------------------------------------------------
-#
 # Formatting is pure-Python CPU work that holds the GIL, so threads pin one
-# core; a *process* pool gives real scaling. To avoid pickling every Record
-# (with all its subrecord bytes) across the process boundary, workers re-read
-# records straight from their own mmap of the source file: a job is just a
-# list of (offset, hierarchy) tuples.
 
 # Target uncompressed bytes of source data per format job. Small enough that
 # LAND/REFR spread over every core, big enough to amortise IPC.

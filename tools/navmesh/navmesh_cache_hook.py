@@ -58,7 +58,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.navmesh import navmesh_cache as nc  # noqa: E402
+from tools.navmesh import navmesh_cache as nc
 
 # Sources whose bytes feed the cache tag.  Keep in step with
 # import_main._navmesh_geom_cache -- a test asserts they agree.
@@ -91,7 +91,7 @@ NAVMESH_FUNCS = {
         '_gather_navm_jobs',      # decides which cells are built, and with what
         '_precompute_navmeshes',  # wires the cache into the pool
     }),
-    'asset_convert/collision_extract.py': frozenset({
+    'asset_convert/collision/collision_extract.py': frozenset({
         'collision_digest',       # the per-mesh digest every cell hash consumes
         'collision_content_hash',
         '_serialize', '_deserialize',   # change the bytes a digest is taken over

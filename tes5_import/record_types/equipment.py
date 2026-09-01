@@ -50,7 +50,7 @@ from .common import (
 )
 
 
-from output_layout import assets_for  # noqa: E402
+from output_layout import assets_for
 
 def _resolve_mgef(code: str, actor_value: int = -1, script_fid: str = '',
                   effect_type: str = '') -> int:
@@ -223,7 +223,7 @@ def _pack_effects(rec: dict, count_key: str = 'EffectCount', pad_to: int = 0,
 def _book_source_mesh_missing(writer, model: str) -> bool:
     """True when the plugin's BOOK MODL has no source mesh in the export.
 
-    asset_convert/book_inam.py skips those models ("source mesh missing"), so
+    asset_convert/ui/book_inam.py skips those models ("source mesh missing"), so
     the INAM STAT must not point at a mesh that will never be generated.
     Cached per writer; unknown export dir → assume present (old behaviour).
     """
@@ -276,7 +276,7 @@ def _weapon_anim_type(rec: dict, tes4_type: int, model: str) -> int:
     Skyrim's behaviour graph drives equip/draw from the animation type, and it
     must agree with the NIF's Prn node or the weapon is invisible when drawn:
     Mace looks at WeaponMace, WarAxe at WeaponAxe, Dagger at WeaponDagger. The
-    mesh-name tests here mirror _remap_prn() in asset_convert/nif_converter.py.
+    mesh-name tests here mirror _remap_prn() in asset_convert/nif/nif_converter.py.
 
     See: docs/commentary/tes4_export_falloutnv.md#weapons-guns-become-crossbows
     """
@@ -859,7 +859,7 @@ def convert_BOOK(rec: dict, writer=None) -> bytes:
     # point at one of the rigged Skyrim reading meshes: the open animation and
     # page text come from the template's behavior graph + skinned page bones +
     # PageText quad, so a static mesh here opens invisible with no text.
-    # asset_convert/book_inam.py bakes each distinct TES4 book model's cover
+    # asset_convert/ui/book_inam.py bakes each distinct TES4 book model's cover
     # textures onto the vanilla book/note rig and writes it to
     # meshes\tes4\clutter\books\inv\<inv_basename(model)>.nif; one STAT per
     # model is synthesised here (cached on the writer — BOOKs convert
@@ -871,7 +871,7 @@ def convert_BOOK(rec: dict, writer=None) -> bytes:
         # asset side does: two BOOK models can share a leaf filename across
         # different directories, and only the map knows which one keeps the
         # bare name.  Built once per writer (BOOKs convert serially).
-        from asset_convert.book_inam import inv_basename, inv_basename_map
+        from asset_convert.ui.book_inam import inv_basename, inv_basename_map
         bmap = getattr(writer, '_book_inam_names', None)
         if bmap is None:
             models = sorted(getattr(writer, 'book_models', None) or [],

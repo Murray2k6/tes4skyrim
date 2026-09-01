@@ -1,6 +1,6 @@
 """Offline preview renderer for SPT->geometry conversion.
 
-Renders generated tree geometry (asset_convert.spt_generator) to PNG with
+Renders generated tree geometry (asset_convert.speedtree.spt_generator) to PNG with
 real leaf textures (DDS-decoded, composite-map UV quads honored), painter's-
 algorithm depth sorting, and simple headlight shading.  Used to iterate on
 generator semantics without launching the game.
@@ -24,9 +24,9 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from asset_convert.spt_parser import parse_spt          # noqa: E402
-from asset_convert.spt_generator import build_tree      # noqa: E402
-from asset_convert.flipbook import decode_dds           # noqa: E402
+from asset_convert.speedtree.spt_parser import parse_spt
+from asset_convert.speedtree.spt_generator import build_tree
+from asset_convert.nif.flipbook import decode_dds
 
 _TEX_CACHE = {}
 
@@ -107,9 +107,9 @@ def _load_alt_builder(path: str):
 
     Used by --compare-rev to render a previous revision's geometry beside the
     current one (extract it with e.g.
-    `git show HEAD:asset_convert/spt_generator.py > /tmp/old/asset_convert/spt_generator.py`).
+    `git show HEAD:asset_convert/speedtree/spt_generator.py > /tmp/old/asset_convert/speedtree/spt_generator.py`).
     The alt module is loaded under its own name so it does not clobber the
-    live asset_convert.spt_generator already imported above.
+    live asset_convert.speedtree.spt_generator already imported above.
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location('_spt_gen_alt', path)
@@ -119,7 +119,7 @@ def _load_alt_builder(path: str):
     pkg = types.ModuleType('_spt_alt_pkg')
     pkg.__path__ = [str(Path(path).parent)]
     sys.modules['_spt_alt_pkg'] = pkg
-    import asset_convert.spt_parser as _sp
+    import asset_convert.speedtree.spt_parser as _sp
     sys.modules['_spt_alt_pkg.spt_parser'] = _sp
     mod.__package__ = '_spt_alt_pkg'
     sys.modules['_spt_gen_alt'] = mod

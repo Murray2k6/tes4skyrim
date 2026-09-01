@@ -7,7 +7,7 @@ single bad reference costs every object LOD in it.
 
 The two poisons fail through DIFFERENT parser errors, and FLT_MAX is finite,
 so an isfinite() check alone is not enough. Both clamps are covered here:
-get_float() on the import side and _finite() on the LODGen side (a MASTER's
+get_float() on the import side and finite() on the LODGen side (a MASTER's
 record reaches the LODGen parser without passing through get_float).
 """
 
@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert.lod_gen import _finite
+from asset_convert.lod.lod_gen import finite
 from tes5_import.text_reader import get_float
 
 # The exact bit patterns found in the shipped plugin.
@@ -66,11 +66,11 @@ class TestFiniteClamp:
         NAN_BITS, NEG_FLT_MAX_BITS, POS_FLT_MAX_BITS, INF_BITS,
     ])
     def test_poison_bits_clamped(self, bits):
-        assert _finite(_f(bits)) == 0.0
+        assert finite(_f(bits)) == 0.0
 
     def test_scale_clamps_to_one(self):
-        assert _finite(_f(NAN_BITS), 1.0) == 1.0
-        assert _finite(_f(NEG_FLT_MAX_BITS), 1.0) == 1.0
+        assert finite(_f(NAN_BITS), 1.0) == 1.0
+        assert finite(_f(NEG_FLT_MAX_BITS), 1.0) == 1.0
 
     @pytest.mark.parametrize('bits', [
         0x40B99E75,   # 5.80059  -- a real rotation
@@ -78,7 +78,7 @@ class TestFiniteClamp:
     ])
     def test_real_bits_pass_through(self, bits):
         v = _f(bits)
-        assert _finite(v) == v
+        assert finite(v) == v
 
 
 class TestFormattedOutput:
@@ -86,7 +86,7 @@ class TestFormattedOutput:
 
     @pytest.mark.parametrize('bits', [NAN_BITS, NEG_FLT_MAX_BITS])
     def test_clamped_value_formats_as_parseable_single(self, bits):
-        rendered = f'{_finite(_f(bits)):.4f}'
+        rendered = f'{finite(_f(bits)):.4f}'
         assert rendered == '0.0000'
         # Must round-trip through Single's range, which is what the C#
         # parser rejected the unclamped literal for.

@@ -270,7 +270,7 @@ real data, or a failing-then-passing test.
   | `tes4_export/` | `python convert.py -f <plugin> --export-only` |
   | `tes5_import/` (records, navmesh, packages, dialogue) | `--import-only` |
   | `script_convert/` | `--scripts-only` (compiles .psc → .pex) |
-  | `asset_convert/nif_converter.py`, collision, skin | `--meshes-only` |
+  | `asset_convert/nif/nif_converter.py`, collision, skin | `--meshes-only` |
   | `spt_*` | `--speedtrees-only` |
   | sound conversion | `--sounds-only` |
   | LOD | `--lod-only` |
@@ -319,7 +319,7 @@ real data, or a failing-then-passing test.
 
 - **`references/` is for comparison/analysis ONLY — the pipeline must NEVER
   resolve runtime assets through it.** Vanilla Skyrim files are fetched via
-  `asset_convert/skyrim_assets.py` (cache in `export/skyrim_assets/`, else
+  `asset_convert/sources/skyrim_assets.py` (cache in `export/skyrim_assets/`, else
   auto-extracted from the SSE BSAs via registry-detected install).
 - `references/` subfolders (`NIFConverter/`, `xEdit/`, `UESP/`, `nifskope`) are
   other projects — reference only. Note that these are not the ONLY references in that folder. Check before guessing
@@ -327,7 +327,7 @@ real data, or a failing-then-passing test.
   Grep it before describing one — never invent semantics.** Oblivion:
   `references/cs_wiki/` (.txt).
 - **LE assets are SSE-compatible.** Never dig through SSE-format assets/BSAs.
-  BSA meshes are SSE-format; read them with `asset_convert/sse_nif.py`
+  BSA meshes are SSE-format; read them with `asset_convert/nif/sse_nif.py`
   (`read_nif` converts BSTriShape graphs to LE NiTriShape graphs in-memory;
   pyffi Patch 8 supplies the SSE read layouts). Output is always written LE
   (uv2=83), which SSE loads natively.

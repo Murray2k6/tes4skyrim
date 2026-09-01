@@ -11,9 +11,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from asset_convert import pyffi_monkey_patch  # noqa: F401,E402  (installs)
-from asset_convert import nif_geom_array as GA  # noqa: E402
-from pyffi.formats.nif import NifFormat  # noqa: E402
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from asset_convert.nif import nif_geom_array as GA
+from pyffi.formats.nif import NifFormat
 
 pytestmark = pytest.mark.skipif(not GA._INSTALLED,
                                 reason='numpy-backed arrays not installed')
@@ -154,7 +155,7 @@ def test_clone_does_not_alias_the_source():
     If the clone aliases the source array those += land on the ORIGINAL
     vertices and accumulate across morph targets.
     """
-    from asset_convert import nif_converter as nc
+    from asset_convert.nif import nif_converter as nc
     src = _shape(n=5)
     dst = src.__class__()
     nc._copy_block_fields(src, dst)

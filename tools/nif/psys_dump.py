@@ -19,7 +19,8 @@ if not hasattr(time, 'clock'):
     time.clock = time.perf_counter
 
 sys.path.insert(0, '.')
-import asset_convert.pyffi_monkey_patch  # noqa: F401
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
 from pyffi.formats.nif import NifFormat
 
 
@@ -230,7 +231,7 @@ def main():
             data.inspect(f)
             data.read(f)
         if convert:
-            import asset_convert.nif_converter as nc
+            import asset_convert.nif.nif_converter as nc
             nc._convert_nif(data, fix_textures=True, src_path=path)
         for root in data.roots:
             dump_tree(root)

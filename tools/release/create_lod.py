@@ -66,18 +66,18 @@ def main() -> int:
                     help="Print the plan and generate nothing")
     args = ap.parse_args()
 
-    from asset_convert.lod_gen import (generate_lod,
-                                       _textures_root as _lod_textures_root)
-    from asset_convert.terrain_lod import generate_terrain_lod
-    from asset_convert.sibling_lod import (_out_root, _record_dir,
+    from asset_convert.lod.lod_gen import (generate_lod,
+                                       textures_root as _lod_textures_root)
+    from asset_convert.lod.terrain_lod import generate_terrain_lod
+    from asset_convert.lod.sibling_lod import (_out_root, record_dir,
                                            converted_plugins, create_lod_order,
                                            lod_worldspaces, owner_map,
-                                           merge_cloud_bank, _master_chain,
+                                           merge_cloud_bank, master_chain,
                                            touched_worldspace_fids,
                                            drop_staged_meshes,
                                            LOD_DIR_NAME)
-    from asset_convert.terrain_lod import _find_worldspace_fid
-    from asset_convert.lod_gen import _formid_remap_table
+    from asset_convert.lod.terrain_lod import find_worldspace_fid
+    from asset_convert.lod.lod_gen import formid_remap_table
 
     out_root = (Path(args.output_dir) if args.output_dir
                 else SCRIPT_DIR / "output")
@@ -143,7 +143,7 @@ def main() -> int:
         # NORMALISED, because it is compared against ids from OTHER plugins
         # (`touched_worldspace_fids`), and a raw id is only meaningful inside
         # the file it came from.
-        gmap = _formid_remap_table(esm)
+        gmap = formid_remap_table(esm)
         raw = esm.read_bytes()
         try:
             # Resolve every worldspace this owner is responsible for while its
@@ -151,7 +151,7 @@ def main() -> int:
             for w in wanted:
                 k = (str(esm).lower(), w.lower())
                 if k not in _fid_cache:
-                    f = _find_worldspace_fid(raw, len(raw), w)
+                    f = find_worldspace_fid(raw, len(raw), w)
                     _fid_cache[k] = (None if f is None
                                      else gmap[f >> 24] | (f & 0x00FFFFFF))
         finally:
@@ -198,7 +198,7 @@ def main() -> int:
         # own worldspace, and stacking it onto Oblivion's TES4Tamriel would
         # pull its FormIDs into Cyrodiil's tiles.
         contributors = [n for n in plugins if n != owner
-                        and owner in _master_chain(n, export_root, plugins)]
+                        and owner in master_chain(n, export_root, plugins)]
 
         # ...and of those, only the ones that actually have records in THIS
         # worldspace. The dependency gate above is about what a plugin is
@@ -277,9 +277,9 @@ def main() -> int:
         # diffuse manifest (build bookkeeping, so export/ not output/).
         # The overlay manifest sits beside the SHARED meshes it describes,
         # which for an imported mod is one level above the record dir.
-        overlay_dirs = [assets_for(_record_dir(export_root, n))
+        overlay_dirs = [assets_for(record_dir(export_root, n))
                         for n in [owner] + contributors
-                        if _record_dir(export_root, n).is_dir()]
+                        if record_dir(export_root, n).is_dir()]
 
         cloud_rel = merge_cloud_bank(out_root, lod_dir, edid, owner,
                                      contributors, export_root)

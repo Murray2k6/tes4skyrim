@@ -27,7 +27,7 @@ import sys
 import zlib
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from output_layout import paths  # noqa: E402
+from output_layout import paths
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, SCRIPT_DIR)

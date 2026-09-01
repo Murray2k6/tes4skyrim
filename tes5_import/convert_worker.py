@@ -77,6 +77,6 @@ def convert_chunk(chunk: list) -> list:
         key = (kind, get_formid(rec, 'FormID'))
         try:
             out.append((key, True, dispatch[kind](rec)))
-        except Exception as e:  # noqa: BLE001 — mirrors builders' broad catch
+        except Exception as e:
             out.append((key, False, f'{type(e).__name__}: {e}'))
     return out

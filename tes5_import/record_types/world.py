@@ -125,7 +125,7 @@ def set_cloud_bank_output(out_root):
 
     Skyrim's map draws a cloud bank over the terrain.  With no WRLD MODL the
     engine falls back to a HARDCODED mesh sized for Skyrim's Tamriel (verified
-    in SkyrimSE.exe at RVA 0x2c7e00 — see asset_convert/worldmap_clouds.py),
+    in SkyrimSE.exe at RVA 0x2c7e00 — see asset_convert/lod/worldmap_clouds.py),
     which on a small converted worldspace covers many times its landmass.
     When this is set, convert_WRLD emits a bank scaled to each worldspace's own
     NAM0/NAM9 rectangle and points MODL at it.  Left None (the default, e.g.
@@ -487,7 +487,7 @@ def build_wrld_cloud_modl(rec: dict, edid: str = None):
             edid = 'TES4Tamriel'      # matches convert_WRLD's rename
     if not edid or not get_str(rec, 'NAM0.MinX'):
         return None
-    from asset_convert.worldmap_clouds import (generate_cloud_bank,
+    from asset_convert.lod.worldmap_clouds import (generate_cloud_bank,
                                                compute_center, framed_rect)
 
     # Size and place against the worldspace's REAL LAND -- the exterior cell
@@ -1026,7 +1026,7 @@ def convert_REFR(rec: dict) -> bytes:
     # to the floor (+shift inside the NIF), so their placed references drop
     # by the same amount along the model's local Z — world visuals stay
     # identical while the REFR z lands at the floor, where the engine
-    # anchors seated actors.  See asset_convert/furniture_markers.py.
+    # anchors seated actors.  See asset_convert/nif/furniture_markers.py.
     shift = get_base_origin_shift(rec.get('NAME', '') or '')
     if shift:
         s = scale if scale and scale != 1.0 else 1.0
@@ -1258,23 +1258,6 @@ def _cell_water_and_music(rec: dict) -> bytes:
 
 # ---------------------------------------------------------------------------
 # Effect shader texture substitution
-# ---------------------------------------------------------------------------
-# Oblivion's renderer synthesises a membrane from the DATA color fields alone,
-# so a texture-less EFSH is ordinary there: 42 of Oblivion.esm's 102 records
-# name neither a fill (ICON) nor a particle (ICO2) texture.  Skyrim's samples a
-# fill texture and modulates it through a gradient palette (NAM8/NAM9) — a
-# concept TES4 has no field for — so the same record ported faithfully has
-# nothing to sample and composites as opaque black over the actor.  Vanilla
-# Skyrim leaves only 4 of its 169 shaders fully texture-less.
-#
-# Fix: when the source names no texture, borrow the texture set from the
-# vanilla shader built for the same job.  The TES4 EditorID is the authored
-# indicator — `effectEnchant<School>` and `effect<Element>Shield` say exactly
-# which vanilla family the record belongs to — so the match keys off the name,
-# never off a color heuristic.  The source's own colors still drive the DATA
-# fields; only the texture paths come from vanilla.
-#
-# (fill ICON, particle ICO2, membrane palette NAM8, particle palette NAM9)
 _TX_ENCH_ARMOR = ('Effects\\VaporTile01.dds', 'Effects\\FXFireAtlas02.dds',
                   'Effects\\Gradients\\GradShockEnchArmor.dds',
                   'Effects\\Gradients\\GradFireExplosion.dds')

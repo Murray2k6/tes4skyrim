@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import nif_converter as nc                    # noqa: E402
+from asset_convert.nif import nif_converter as nc
 
 
 def _tree(root, name, textures=(), header_masters=None, base=None):
@@ -72,7 +72,7 @@ class TestResolutionThroughTheFallback:
         base = _tree(tmp_path, 'Base.esm', textures=['rock/stone.dds'])
         mod = _tree(tmp_path, 'Mod.esp', textures=['rock/stone.dds'],
                     header_masters=['Base.esm'])
-        got = nc._resolve_source_texture(
+        got = nc.resolve_source_texture(
             'textures\\tes4\\rock\\stone.dds', str(mod / 'meshes' / 'a.nif'),
             nc.master_texture_roots(mod / 'meshes'))
         assert got is not None
@@ -84,16 +84,16 @@ class TestResolutionThroughTheFallback:
         mod = _tree(tmp_path, 'Mod.esp', header_masters=['Base.esm'])
         args = ('textures\\tes4\\rock\\stone.dds',
                 str(mod / 'meshes' / 'a.nif'))
-        assert nc._resolve_source_texture(*args) is None, \
+        assert nc.resolve_source_texture(*args) is None, \
             'no fallback should still miss it'
-        got = nc._resolve_source_texture(
+        got = nc.resolve_source_texture(
             *args, nc.master_texture_roots(mod / 'meshes'))
         assert got is not None and str(base) in got
 
     def test_a_texture_nobody_has_is_still_unresolved(self, tmp_path):
         _tree(tmp_path, 'Base.esm')
         mod = _tree(tmp_path, 'Mod.esp', header_masters=['Base.esm'])
-        assert nc._resolve_source_texture(
+        assert nc.resolve_source_texture(
             'textures\\tes4\\rock\\absent.dds',
             str(mod / 'meshes' / 'a.nif'),
             nc.master_texture_roots(mod / 'meshes')) is None
@@ -116,7 +116,7 @@ class TestWearablePlanThroughTheBase:
         (d / 'ARMO.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
     def test_a_merge_inherits_the_bases_plan(self, tmp_path):
-        from asset_convert import wearable_plan as wp
+        from asset_convert.character import wearable_plan as wp
         base = _tree(tmp_path, 'Base.esm')
         self._armo(base, 'armor\iron\cuirass.nif')
         assert wp.build_plan(base), 'base plan should not be empty'
@@ -125,14 +125,14 @@ class TestWearablePlanThroughTheBase:
         assert wp.build_plan(mod) == wp.build_plan(base)
 
     def test_without_a_base_it_stays_empty(self, tmp_path):
-        from asset_convert import wearable_plan as wp
+        from asset_convert.character import wearable_plan as wp
         base = _tree(tmp_path, 'Base.esm')
         self._armo(base, 'armor\iron\cuirass.nif')
         mod = _tree(tmp_path, 'Lonely')
         assert not any(v for v in wp.build_plan(mod).values())
 
     def test_the_trees_own_records_win(self, tmp_path):
-        from asset_convert import wearable_plan as wp
+        from asset_convert.character import wearable_plan as wp
         base = _tree(tmp_path, 'Base.esm')
         self._armo(base, 'armor\iron\cuirass.nif')
         mod = _tree(tmp_path, 'Merge', base=['Base.esm'])

@@ -16,7 +16,7 @@ none can be omitted, so the whole set would have to ship).
 ## What it can do
 
 The Sounds phase runs exactly one ffmpeg command
-(`asset_convert/audio_converter.py`, `convert_file_to_xwm`):
+(`asset_convert/audio/audio_converter.py`, `convert_file_to_xwm`):
 
 ```
 ffmpeg -y -i <src> -ac 1 -ar 44100 -c:a pcm_s16le <dst.wav>

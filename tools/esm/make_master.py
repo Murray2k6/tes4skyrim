@@ -42,7 +42,7 @@ import os
 import struct
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from output_layout import paths  # noqa: E402
+from output_layout import paths
 
 FLAG_ESM = 0x00000001
 FLAG_ESL = 0x00000200

@@ -50,7 +50,8 @@ import io
 import math
 import os
 
-from . import pyffi_monkey_patch as _patch  # noqa: F401  (time.clock, nif.xml)
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
 from pyffi.formats.nif import NifFormat
 
 # Skyrim NIF stream: version 20.2.0.7, user 12, user2 83 (LE).  The pipeline

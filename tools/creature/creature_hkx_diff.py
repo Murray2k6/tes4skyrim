@@ -30,8 +30,8 @@ import tempfile
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from asset_convert.hkx_xml import _to_hkxcmd_path  # noqa: E402
-from subprocess_flags import windows_cmd  # noqa: E402
+from asset_convert.havok.hkx_xml import to_hkxcmd_path
+from subprocess_flags import windows_cmd
 
 HKXCMD = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'external', 'hkxcmd',
                       'hkxcmd.exe')
@@ -54,12 +54,12 @@ REF_RE = re.compile(r'^(#\d+|null)(\s+#\d+)*$')
 
 def decompile(src, dst):
     # hkxcmd wants native backslash paths; forward slashes fail silently
-    # (off Windows, under Wine: _to_hkxcmd_path prefixes the Z: drive so the
+    # (off Windows, under Wine: to_hkxcmd_path prefixes the Z: drive so the
     # backslash form still resolves to the same file — see hkx_xml.py).
     src = os.path.abspath(os.path.normpath(src))
     dst = os.path.abspath(os.path.normpath(dst))
     cmd = [os.path.abspath(HKXCMD), 'convert', '-v:xml',
-           _to_hkxcmd_path(src), _to_hkxcmd_path(dst)]
+           to_hkxcmd_path(src), to_hkxcmd_path(dst)]
     r = subprocess.run(windows_cmd(cmd), capture_output=True, text=True)
     if not os.path.isfile(dst):
         raise RuntimeError(f'hkxcmd failed on {src}: {r.stdout} {r.stderr}')

@@ -16,7 +16,7 @@ import struct
 import zlib
 
 
-def _iter_records(data, start, end):
+def iter_records(data, start, end):
     """Yield (sig, formid, flags, body_bytes) for records under [start,end),
     recursing into GRUP groups. Decompresses compressed records."""
     off = start
@@ -25,7 +25,7 @@ def _iter_records(data, start, end):
         size = struct.unpack_from('<I', data, off + 4)[0]
         if sig == b'GRUP':
             grp_end = off + size
-            yield from _iter_records(data, off + 24, min(grp_end, end))
+            yield from iter_records(data, off + 24, min(grp_end, end))
             off = grp_end
             continue
         flags = struct.unpack_from('<I', data, off + 8)[0]
@@ -143,7 +143,7 @@ def main():
         want.add('NAVM')
 
     count = {s: 0 for s in want}
-    for sig, formid, flags, body in _iter_records(data, start, len(data)):
+    for sig, formid, flags, body in iter_records(data, start, len(data)):
         if sig not in want:
             continue
         if count[sig] >= args.max:

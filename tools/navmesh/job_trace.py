@@ -41,7 +41,7 @@ import time
 import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
-from output_layout import assets_for  # noqa: E402
+from output_layout import assets_for
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 

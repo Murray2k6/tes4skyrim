@@ -29,7 +29,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert.terrain_lod import (_pack_lands, _SharedLands, VERTS_SIDE)
+from asset_convert.lod.terrain_lod import (pack_lands, SharedLands, VERTS_SIDE)
 
 QUAD_VERTS = 17
 
@@ -64,8 +64,8 @@ def lands():
 
 
 def _shared(lands):
-    buf, index = _pack_lands(lands)
-    return _SharedLands(memoryview(bytes(buf)), index), buf
+    buf, index = pack_lands(lands)
+    return SharedLands(memoryview(bytes(buf)), index), buf
 
 
 def test_every_array_survives_bit_for_bit(lands):
@@ -139,17 +139,17 @@ def test_packing_is_far_smaller_than_a_per_worker_copy(lands):
 def test_direct_write_matches_the_reference_packer(lands):
     """The pool fills shared memory directly; it must agree byte-for-byte.
 
-    `_pack_lands` builds a bytearray first, which would hold a SECOND full copy
+    `pack_lands` builds a bytearray first, which would hold a SECOND full copy
     in the parent (1.2 GB on Tamriel-with-overlays) exactly while the workers
-    spawn. The pool therefore sizes the block with `_lands_layout` and fills it
+    spawn. The pool therefore sizes the block with `lands_layout` and fills it
     in place — a separate code path, so it is pinned to the reference here.
     """
-    from asset_convert.terrain_lod import (_pack_lands, _lands_layout,
-                                           _write_lands)
-    ref_buf, ref_index = _pack_lands(lands)
-    size, plan = _lands_layout(lands)
+    from asset_convert.lod.terrain_lod import (pack_lands, lands_layout,
+                                           write_lands)
+    ref_buf, ref_index = pack_lands(lands)
+    size, plan = lands_layout(lands)
     mv = memoryview(bytearray(size))
-    index = _write_lands(lands, plan, mv)
+    index = write_lands(lands, plan, mv)
 
     assert size == len(ref_buf)
     assert bytes(mv) == bytes(ref_buf)

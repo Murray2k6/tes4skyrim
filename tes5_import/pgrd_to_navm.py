@@ -247,7 +247,7 @@ def _build_navmesh_grid(verts, tris, min_x, min_y, max_x, max_y, divisor):
 # model_key -> (cx, cy) local-space XY midpoint of the door PANEL (largest mesh
 # shape), relative to the model origin (the REFR pivot).  Loaded from the
 # door-centres cache built in the SAME pass as collision + mesh bounds
-# (asset_convert.collision_extract.scan_mesh_data).  The REFR pivot sits on the
+# (asset_convert.collision.collision_extract.scan_mesh_data).  The REFR pivot sits on the
 # HINGE, not the opening; the panel midpoint is the point an actor walks
 # through, and where the Door Triangle belongs.
 _DOOR_CENTROIDS = {}
@@ -322,7 +322,7 @@ def load_door_centroids(cache_path, quiet: bool = False) -> int:
                 print(f"  Door centres: could not load cache ({exc})")
     # Which LOCAL axis the threshold runs along, its width, and (4-element
     # entries) the exact panel centre, all read from the door's COLLISION
-    # PANEL (asset_convert.collision_extract).  The whole-NIF bounding box
+    # PANEL (asset_convert.collision.collision_extract).  The whole-NIF bounding box
     # cannot answer the axis: it includes the door FRAME/arch, which dwarfs
     # the panel and inverts the result -- AnvilDoorMC01's bbox is 98 x 150
     # ("Y wider" -> threshold Y) while its panel is 97.9 x 4.5 -> threshold X.
@@ -789,30 +789,11 @@ def pack_navm_record(form_id: int, subrecords: bytes) -> bytes:
 
 # ---------------------------------------------------------------------------
 # Geometry cache
-# ---------------------------------------------------------------------------
-#
-# Building a cell's navmesh geometry (ribbons -> union -> triangulate -> clean)
-# costs seconds; packing it into an NVNM costs milliseconds.  The geometry
-# depends ONLY on inputs that rarely change between imports — the pathgrid,
-# the placed REFRs, the LAND heights, the collision of the meshes the cell
-# places, and the generator code itself — so (verts, tris) is cached to disk
-# keyed by a hash of exactly those inputs.  Any edit to the navmesh sources,
-# params included, changes the tag and self-invalidates every entry; there is
-# no version constant to forget to bump.  FormID-dependent work (NVNM parent,
-# door links, ONAM, water flags) is recomputed every run, so load-order changes
-# cannot be baked in.
-#
-# Collision enters PER MESH, not as one whole-file hash (see _geom_hash v4).
-# The coarse version made every entry share one fate: replacing a single mesh
-# invalidated all ~8,200 Oblivion entries.  Per-mesh digests confine the miss to
-# the cells that actually place the changed mesh, which is what makes a
-# downloaded cache (tools/navmesh_cache.py) still mostly useful to a user who
-# has swapped in a few meshes of their own.
 
 def _geom_hash(tag, points, edges, refr_recs, base_model_by_fid, doors,
                land_rec, origin_x, origin_y):
     """Hash of everything the geometry build consumes."""
-    from asset_convert.collision_extract import collision_digest
+    from asset_convert.collision.collision_extract import collision_digest
     h = hashlib.sha1()
     # Bump when the CACHED PAYLOAD's shape changes, not just its inputs: the
     # entry now carries ledge links too, and an older entry would silently
@@ -1215,7 +1196,7 @@ def convert_PGRD(rec: dict, writer=None,
 
     if verts3d is None:
         from .navmesh import build as navmesh_build
-        from asset_convert.collision_extract import get_collision
+        from asset_convert.collision.collision_extract import get_collision
 
         ledges = []
         verts3d, tris = navmesh_build.build_navmesh(

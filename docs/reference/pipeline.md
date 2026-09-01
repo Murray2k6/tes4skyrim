@@ -79,10 +79,10 @@ offset. Two copies existed:
 | Scanner | Fix | Result |
 |---|---|---|
 | `refs_from_records` (export text) | `'.dds' not in body` substring reject — `LAND.txt` is 1.47 GB with zero `.dds` | minutes → 4.2 s |
-| `refs_from_assets` + `nif_converter._harvest_texture_bytes` (binary) | `_texture_refs_in`: `bytes.find` each `.dds`, walk back over legal bytes | 13.8x, `build_refs` 87.6 s → 11.5 s |
+| `refs_from_assets` + `nif_converter._harvest_texture_bytes` (binary) | `texture_refs_in`: `bytes.find` each `.dds`, walk back over legal bytes | 13.8x, `build_refs` 87.6 s → 11.5 s |
 
 The binary case could not use a substring reject — every `.bto` really does
-contain `.dds`. Watch the bound when touching `_texture_refs_in`: the old
+contain `.dds`. Watch the bound when touching `texture_refs_in`: the old
 `{3,200}` counted the run *before* `.dds`, so a whole match reaches **204**
 bytes; capping the match at 200 silently truncates the longest paths.
 Equivalence with the original regex is pinned by `TestBinaryTextureScan`.
@@ -155,7 +155,7 @@ either way.
    mapping needed for any of them, with ONE exception -- `hkxcmd.exe` parses
    its own argv and treats a leading `/` as a switch prefix, silently
    swallowing an absolute POSIX path as an unrecognised flag. Every call site
-   already routes through `asset_convert/hkx_xml.py`'s `_to_hkxcmd_path()`,
+   already routes through `asset_convert/havok/hkx_xml.py`'s `to_hkxcmd_path()`,
    which prefixes Wine's `Z:` drive and swaps in backslashes for that one tool
    only — nothing else needs it, and this is transparent to callers.
 
@@ -174,7 +174,7 @@ either way.
    `conversion_config.json`'s `tes4DataPath` / `tes5DataPath` are the
    equivalent everywhere else: set them to Oblivion's and Skyrim SE's `Data`
    folders and every phase that would otherwise consult the registry
-   (script compilation's header lookup, `asset_convert/skyrim_assets.py`'s
+   (script compilation's header lookup, `asset_convert/sources/skyrim_assets.py`'s
    vanilla-asset lookup, `preflight.py`'s checks, …) picks it up. This is
    checked FIRST everywhere, so it also works as a registry override on
    Windows if the registry ever points at the wrong install; left blank (the
@@ -284,7 +284,7 @@ If you see that class of symptom now, it is NOT id drift; look elsewhere.
 `phase_extract` branches on `export/sources.json`:
 
 - a plugin **imported from a mod archive** re-runs its ingest
-  (`asset_convert/mod_ingest.py::reingest`), unpacking from the archive copy
+  (`asset_convert/sources/mod_ingest.py::reingest`), unpacking from the archive copy
   retained under `export/<plugin>/_source/`;
 - **everything else** extracts the BSAs beside it in the Oblivion Data
   directory, exactly as before.

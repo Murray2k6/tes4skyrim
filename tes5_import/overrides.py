@@ -334,7 +334,7 @@ class OverrideContext:
         # `_export_root`, never the plain parent: `export_dir` is THIS
         # plugin's RECORD folder, and an imported mod nests that one level
         # inside the mod's shared folder. Rooting the manifest loader at the
-        # parent pointed every master lookup inside the mod, `_master_names`
+        # parent pointed every master lookup inside the mod, `master_names`
         # answered nothing for all of them, and `_index_map` built a map that
         # silently dropped 5,160 of TWMP_HighRock's manifest entries -- 229 of
         # them carrying companions, which have no arithmetic fallback and so

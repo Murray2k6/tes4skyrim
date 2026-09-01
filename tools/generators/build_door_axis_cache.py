@@ -5,7 +5,7 @@ per model, the threshold axis, the doorway width, the doorway CENTRE relative
 to the REFR pivot, and the closed slab's base height — all measured from the
 export (original Oblivion) NIF with the 'Close' controller sequence's final
 key values applied to the animated nodes (see
-asset_convert.collision_extract.door_closed_geometry).
+asset_convert.collision.collision_extract.door_closed_geometry).
 
 The closed pose is the only correct source: several doors are STORED mid-open
 (idgate01's leaves rest 60+ units from the doorway and swing 90 degrees shut),
@@ -51,7 +51,7 @@ def door_models(door_txt):
 
 def _classify(args):
     path, key = args
-    from asset_convert.collision_extract import (door_closed_geometry,
+    from asset_convert.collision.collision_extract import (door_closed_geometry,
                                                  read_nif_data)
     try:
         return key, door_closed_geometry(read_nif_data(path))

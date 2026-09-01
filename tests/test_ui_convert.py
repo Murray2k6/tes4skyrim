@@ -1,4 +1,4 @@
-"""Tests for the UI conversion (asset_convert/swf.py + ui_menus.py).
+"""Tests for the UI conversion (asset_convert/ui/swf.py + ui_menus.py).
 
 Hermetic: every fixture is synthesised here, so nothing needs Oblivion or
 Skyrim installed. The synthetic movie mirrors the SHAPE of vanilla
@@ -17,8 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from asset_convert import swf
-from asset_convert import ui_menus
+from asset_convert.ui import swf
+from asset_convert.ui import ui_menus
 
 
 # ---------------------------------------------------------------------------
@@ -1055,7 +1055,7 @@ def _sprite_children(movie, sprite_id, named_only=True, with_translate=False):
     placement's translation in pixels, and `named_only=False` returns an
     ordered list including unnamed children.
     """
-    from asset_convert.swf import TAG_PLACE_OBJECT_2
+    from asset_convert.ui.swf import TAG_PLACE_OBJECT_2
     tag = movie.tags[movie.index_of_character(sprite_id)]
     out = {} if named_only else []
     for code, offset, length in _iter_sprite_tags(tag.data):

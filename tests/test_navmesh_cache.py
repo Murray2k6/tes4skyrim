@@ -20,11 +20,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import asset_convert.collision_extract as ce  # noqa: E402
-from tes5_import import import_main as im  # noqa: E402
-from tes5_import.pgrd_to_navm import _geom_hash  # noqa: E402
-from tools.navmesh import navmesh_cache as nc  # noqa: E402
-from tools.navmesh import navmesh_cache_hook as hook  # noqa: E402
+import asset_convert.collision.collision_extract as ce
+from tes5_import import import_main as im
+from tes5_import.pgrd_to_navm import _geom_hash
+from tools.navmesh import navmesh_cache as nc
+from tools.navmesh import navmesh_cache_hook as hook
 from tools.navmesh import navmesh_adopt as adopt
 from tes5_import import navm_verify
 from tes5_import.pgrd_to_navm import geom_equal, geom_quantize
@@ -194,7 +194,7 @@ def test_gate_covers_cache_defining_modules():
     assert '_navmesh_geom_cache' in hook.NAVMESH_FUNCS['tes5_import/import_main.py']
     assert '_gather_navm_jobs' in hook.NAVMESH_FUNCS['tes5_import/import_main.py']
     assert 'collision_digest' in \
-        hook.NAVMESH_FUNCS['asset_convert/collision_extract.py']
+        hook.NAVMESH_FUNCS['asset_convert/collision/collision_extract.py']
 
 
 def test_gate_ignores_post_cache_stitching():

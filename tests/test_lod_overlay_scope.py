@@ -25,8 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert.sibling_lod import touched_worldspace_fids
-from asset_convert.lod_gen import _formid_remap_table, _plugin_masters
+from asset_convert.lod.sibling_lod import touched_worldspace_fids
+from asset_convert.lod.lod_gen import formid_remap_table, plugin_masters
 
 
 def _rec(sig: bytes, fid: int, body: bytes = b'') -> bytes:
@@ -60,17 +60,17 @@ def _plugin(tmp_path: Path, name: str, payload: bytes,
 
 def _norm(fid: int, masters=('Skyrim.esm', 'Oblivion.esm')) -> int:
     """The load-order-wide id these tests' MASTER-owned raw ids normalise to."""
-    from asset_convert.lod_gen import _global_file_index
+    from asset_convert.lod.lod_gen import global_file_index
     top = fid >> 24
     owner = masters[top] if top < len(masters) else None
     assert owner is not None, 'use _self() for ids the plugin owns'
-    return _global_file_index(owner.lower()) << 24 | (fid & 0x00FFFFFF)
+    return global_file_index(owner.lower()) << 24 | (fid & 0x00FFFFFF)
 
 
 def _self(esm: Path, fid: int) -> int:
     """Same, for an id whose index byte is past the master list (self-owned)."""
-    from asset_convert.lod_gen import _global_file_index
-    return _global_file_index(esm.name.lower()) << 24 | (fid & 0x00FFFFFF)
+    from asset_convert.lod.lod_gen import global_file_index
+    return global_file_index(esm.name.lower()) << 24 | (fid & 0x00FFFFFF)
 
 
 def test_records_under_a_worldspace_grup_are_detected(tmp_path):
@@ -147,7 +147,7 @@ def test_scope_is_per_file_not_shared(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _remap(esm: Path, fid: int) -> int:
-    t = _formid_remap_table(esm)
+    t = formid_remap_table(esm)
     return t[fid >> 24] | (fid & 0x00FFFFFF)
 
 
@@ -187,7 +187,7 @@ def test_a_master_at_different_slots_still_resolves_to_one_id(tmp_path):
     ve = _plugin(tmp_path, 'TWMP_Valenwood_Elsweyr.esp', b'',
                  masters=('Skyrim.esm', 'Oblivion.esm', 'Tamriel.esp',
                           'ElsweyrAnequina.esp'))
-    assert _plugin_masters(ve)[3] == 'elsweyranequina.esp'
+    assert plugin_masters(ve)[3] == 'elsweyranequina.esp'
     # ANQ's own 02xxxxxx == the child's 03xxxxxx, and neither equals the
     # child's 02xxxxxx (which is Tamriel.esp).
     assert _remap(anq, 0x02014FE0) == _remap(ve, 0x03014FE0)

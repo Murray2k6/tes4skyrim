@@ -4,7 +4,7 @@ Three authored carriers the converter does not consult when choosing material
 values:
 
   * the Havok MATERIAL on the collision body -- stone, wood, metal, glass,
-    cloth, skin.  `asset_convert/collision.py` already translates these to
+    cloth, skin.  `asset_convert/collision/collision.py` already translates these to
     Skyrim, but only for physics; nothing asks what the surface is MADE of.
   * the ROOT NODE type -- static body, skinned mesh, or plant.
   * BSXFlags -- the mesh declaring its own capabilities (havok, ragdoll,
@@ -29,7 +29,7 @@ from multiprocessing import Pool, cpu_count
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
-# asset_convert/collision.py carries the same table for the physics side.
+# asset_convert/collision/collision.py carries the same table for the physics side.
 MATS = {0: 'Stone', 1: 'Cloth', 2: 'Dirt', 3: 'Glass', 4: 'Grass',
         5: 'Metal', 6: 'Organic', 7: 'Skin', 8: 'Water', 9: 'Wood',
         10: 'HeavyStone', 11: 'HeavyMetal', 12: 'HeavyWood', 13: 'Chain',
@@ -43,7 +43,8 @@ BSX = {0: 'animated', 1: 'havok', 2: 'ragdoll', 3: 'complex', 4: 'addon',
 
 
 def scan(path):
-    from asset_convert import pyffi_monkey_patch      # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     mats, roots, bsx = Counter(), Counter(), Counter()
     try:

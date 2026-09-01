@@ -46,7 +46,7 @@ def test_record_dir_does_not_move_when_a_sibling_is_imported(tmp_path):
     record directory. Its already-exported .txt dump was left behind, and
     every later stage then reported "No export directory" and skipped.
     """
-    from asset_convert import source_registry
+    from asset_convert.sources import source_registry
 
     full = _fake_group(tmp_path / 'full', ['A.esp', 'B.esp'])
     # The same archive with only A.esp registered so far. `group_plugins`
@@ -62,7 +62,7 @@ def test_record_dir_does_not_move_when_a_sibling_is_imported(tmp_path):
 
 def test_a_one_plugin_mod_keeps_its_records_in_the_group_root(tmp_path):
     """Nesting a lone plugin would move every single-plugin mod on disk."""
-    from asset_convert import source_registry
+    from asset_convert.sources import source_registry
     exp = _fake_group(tmp_path, ['Solo.esp'], label='Black Marsh')
     assert source_registry.record_dir(exp, 'Solo.esp').name == 'Black Marsh'
 
@@ -79,7 +79,7 @@ def test_asset_only_mod_is_not_reimported_every_run(tmp_path):
     there could never be satisfied and every run re-unpacked the archive.
     """
     import zipfile
-    from asset_convert import mod_ingest
+    from asset_convert.sources import mod_ingest
 
     arc = tmp_path / 'MyAssetPack.zip'
     with zipfile.ZipFile(arc, 'w') as z:
@@ -96,7 +96,7 @@ def test_adding_a_plugin_member_still_reimports(tmp_path):
     """Caching must not swallow a run that would ADD a plugin to the group."""
     import struct
     import zipfile
-    from asset_convert import mod_ingest
+    from asset_convert.sources import mod_ingest
 
     def _esp():
         return b'TES4' + struct.pack('<IIIII', 0, 0, 0, 0, 0) + b'\x00' * 4
@@ -130,7 +130,7 @@ def test_pack_bsas_resolves_the_output_folder_from_the_export_root(tmp_path):
     and abort the pack with "output directory not found" for every plugin of
     a multi-plugin mod -- the very failure the resolver was added to prevent.
     """
-    from asset_convert.bsa_pack import _out_root
+    from asset_convert.sources.bsa_pack import _out_root
 
     exp = _fake_group(tmp_path, ['A.esm', 'B.esp'])
     out = tmp_path / 'output'
@@ -152,14 +152,14 @@ def test_book_ownership_is_decided_on_the_asset_root(tmp_path):
     compared). Every book a grouped mod ships was deferred to a master that
     never bakes it, reported only as "N model(s) left to the master".
     """
-    from asset_convert.book_inam import _split_master_owned
+    from asset_convert.ui.book_inam import split_master_owned
 
     mod = tmp_path / 'export' / 'My Pack'
     (mod / 'meshes' / 'clutter' / 'books').mkdir(parents=True)
     (mod / 'meshes' / 'clutter' / 'books' / 'mine.nif').write_bytes(b'x')
     mine = BS.join(['clutter', 'books', 'mine.nif'])
 
-    own, deferred = _split_master_owned([mine], str(mod), [str(mod)])
+    own, deferred = split_master_owned([mine], str(mod), [str(mod)])
     assert deferred == 0 and len(own) == 1
 
     # A master's book is still correctly deferred to that master.
@@ -167,7 +167,7 @@ def test_book_ownership_is_decided_on_the_asset_root(tmp_path):
     (master / 'meshes' / 'clutter' / 'books').mkdir(parents=True)
     (master / 'meshes' / 'clutter' / 'books' / 'theirs.nif').write_bytes(b'x')
     theirs = BS.join(['clutter', 'books', 'theirs.nif'])
-    own2, deferred2 = _split_master_owned([theirs], str(mod),
+    own2, deferred2 = split_master_owned([theirs], str(mod),
                                           [str(mod), str(master)])
     assert deferred2 == 1 and own2 == []
 
@@ -283,11 +283,6 @@ def test_creature_projects_are_inherited_from_a_master(tmp_path):
 
 # ---------------------------------------------------------------------------
 #  CALL SITES, not just helpers
-#
-#  Every fix above is a helper doing the right thing. Three of these bugs
-#  were a correct helper handed the wrong argument, so a test that exercises
-#  only the helper passes in both directions and pins nothing. These read the
-#  call site itself.
 # ---------------------------------------------------------------------------
 
 def test_pack_bsas_is_called_with_the_export_root_not_a_record_dir():
@@ -307,10 +302,10 @@ def test_pack_bsas_is_called_with_the_export_root_not_a_record_dir():
 def test_book_inam_passes_the_asset_root_to_the_ownership_split():
     """`generate_book_inams` holds both; ownership needs the ASSET root."""
     import inspect
-    from asset_convert import book_inam
+    from asset_convert.ui import book_inam
 
     src = inspect.getsource(book_inam.generate_book_inams)
-    assert '_split_master_owned(models, asset_subdir' in src, (
+    assert 'split_master_owned(models, asset_subdir' in src, (
         'book ownership is being decided on the record dir again -- it '
         'holds no meshes, so every book defers to a master that never '
         'bakes it')

@@ -6,7 +6,7 @@ skeletons pulled from the SSE BSAs (which hkxcmd cannot read at all).
 
 Why this exists: Oblivion authors ragdoll body masses on its own scale and
 `hkx_ragdoll.extract_ragdoll` used to carry them through verbatim while
-scaling every LENGTH by `_OB_TO_GAME`.  Vanilla Skyrim creature bodies are
+scaling every LENGTH by `OB_TO_GAME`.  Vanilla Skyrim creature bodies are
 2-8 units each (dog total 74); unconverted Oblivion sets reach 200 per body
 and 11,320 total, which the ragdoll solver cannot hold — the corpse stays
 rigid and tunnels through the floor.  This tool is how that was measured and
@@ -172,7 +172,7 @@ def main(argv=None):
     for p in paths:
         try:
             report(p, a.summary)
-        except Exception as e:                       # noqa: BLE001
+        except Exception as e:
             print(f'=== {p}: ERROR {type(e).__name__}: {e}')
         sys.stdout.flush()
     return 0

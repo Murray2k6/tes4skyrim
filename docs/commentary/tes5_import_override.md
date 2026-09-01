@@ -244,7 +244,7 @@ from comparing two conversion runs.
   The fix is not "return nothing when the WRLD is absent", which would throw
   away the edits that must survive: DLCBattlehornCastle regrades 10 Tamriel
   cells while shipping no WRLD either, and its records sit under a type-1 GRUP
-  labelled with the MASTER's WRLD FormID. So `_parse_land_records` resolves the
+  labelled with the MASTER's WRLD FormID. So `parse_land_records` resolves the
   FormID once from the file that DEFINES the worldspace and passes it to every
   overlay as `known_wrld_fid`; only the base file keeps `allow_unscoped=True`.
   The object-LOD path (`lod_gen`) was never affected — it resolves `wrld_fid`
@@ -259,7 +259,7 @@ from comparing two conversion runs.
   This is the same defect the importer fixed in four places (see the
   master-index routing entry above), and it was still live in the LOD stage.
   `generate_lod` merges overlays into one reference pool keyed by FormID, and
-  `_scan_land_file`/`_scan_cell_coords` accumulate several files into one
+  `scan_land_file`/`_scan_cell_coords` accumulate several files into one
   cell table — all on the RAW id. But the index byte is an offset into the
   file's OWN `MAST` list, so the same integer names different records in
   different plugins, and one record has different integers in different
@@ -294,12 +294,12 @@ from comparing two conversion runs.
   included). Synthetic test plugins must declare a `MAST` list or every id
   resolves to the file itself.
 - <a id="create-lod-order"></a>**`create_lod_order` deliberately differs from
-  `_load_order`, and the difference is CONSENT.** LOD is generated for the
+  `load_order`, and the difference is CONSENT.** LOD is generated for the
   whole load order in one pass (`tools/release/create_lod.py`, the GUI's *Create LOD*
   button) and that dialog SHOWS the order, lets the user drag it, and does
   nothing until they press Generate. So the rule is the one the user asked
   for: everything `plugins.txt` lists comes FIRST in its own order, and
-  everything else is appended at the BOTTOM. `_load_order`'s
+  everything else is appended at the BOTTOM. `load_order`'s
   unlisted-plugins-first rule is right for a merge nobody looked at — an
   unpositioned plugin must not silently outrank a positioned one — but wrong
   once the list is on screen and confirmed.

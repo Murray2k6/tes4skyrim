@@ -758,7 +758,7 @@ def _group_siblings(plugin: str | None) -> list:
     if not plugin:
         return []
     try:
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
     except ImportError:
         return []
     try:
@@ -779,7 +779,7 @@ def _group_key(plugin: str | None) -> str | None:
     if not plugin:
         return None
     try:
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
     except ImportError:
         return None
     try:

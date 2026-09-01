@@ -16,7 +16,7 @@ Attack events are NOT routed here: the combat controller sends the RACE's
 ATKE strings directly — but only after the draw handshake (ActionDraw →
 combatStanceStart in, graph replies weaponDraw out via the root-level
 StartCombat/StopCombat expression-modifier pair in
-asset_convert/hkx_behavior.py) and only while the graph's IsAttackReady /
+asset_convert/havok/hkx_behavior.py) and only while the graph's IsAttackReady /
 bEquipOK variables read 1 (vanilla initial values).  Death routes through
 the DeathWait tree (DeathAnimation conditioned / Ragdoll fall-through,
 vanilla dog layout) into the graph's ragdoll wrapper states.

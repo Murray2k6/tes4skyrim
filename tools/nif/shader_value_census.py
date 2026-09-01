@@ -27,7 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 def scan(path):
     """-> (rel_top_folder, [(glossiness, spec_rgb, strength, emissive), ...])"""
-    from asset_convert import pyffi_monkey_patch      # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     out = []
     try:
@@ -175,10 +176,6 @@ def main():
 
 # ---------------------------------------------------------------------------
 # --source-signal: what does the TES4 side actually CARRY?
-#
-# The conversion can only map signal that exists.  Before designing a shader
-# mapping, count what the source meshes really hold -- which properties, which
-# texture slots, which modes -- rather than what the format permits.
 # ---------------------------------------------------------------------------
 
 _TEX_SLOTS = ('base', 'dark', 'detail', 'gloss', 'glow', 'bump_map',
@@ -186,7 +183,8 @@ _TEX_SLOTS = ('base', 'dark', 'detail', 'gloss', 'glow', 'bump_map',
 
 
 def scan_source_signal(path):
-    from asset_convert import pyffi_monkey_patch      # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     props, slots, modes, misc = Counter(), Counter(), Counter(), Counter()
     try:
@@ -265,12 +263,6 @@ def source_signal(root, sample, workers, seed):
 
 # ---------------------------------------------------------------------------
 # --texture-signal: what the TEXTURE SET knows that the mesh does not.
-#
-# Both engines read the NORMAL MAP's alpha as the specular mask, so a `_n.dds`
-# shipped as DXT5 with a non-flat alpha IS an authored specular map -- and the
-# suffix convention (`_g` glow, `_hl` etc.) carries more of the same.  The mesh
-# property census says only 4.2% of shapes enable specular; this measures
-# whether the textures disagree.
 # ---------------------------------------------------------------------------
 
 _SUFFIXES = ('_n', '_g', '_hl', '_e', '_em', '_m', '_s', '_sk', '_b', '_d',
@@ -279,7 +271,7 @@ _SUFFIXES = ('_n', '_g', '_hl', '_e', '_em', '_m', '_s', '_sk', '_b', '_d',
 
 def _fourcc_and_alpha(path):
     """(fourcc, alpha_kind) without decoding more than the first mip."""
-    from asset_convert import parallax as px
+    from asset_convert.texture import parallax as px
     try:
         with open(path, 'rb') as f:
             blob = f.read()

@@ -1,6 +1,6 @@
-# asset_convert/facegen_tri.py - faces, skin tone and tints
+# asset_convert/character/facegen_tri.py - faces, skin tone and tints
 
-**Code:** `asset_convert/facegen_egt.py`, `tes5_import/npc_face_mapper.py`, `tests/test_import.py`
+**Code:** `asset_convert/character/facegen_egt.py`, `tes5_import/npc_face_mapper.py`, `tests/test_import.py`
 
 ## Contents
 
@@ -18,7 +18,7 @@
 How a converted NPC gets its skin color, why the old approach was wrong, and
 the measurements that settle it. Implemented in
 `tes5_import/npc_face_mapper.py` (`load_race_skin_tones`, `_pick_skin_tone`)
-and `asset_convert/facegen_egt.py`.
+and `asset_convert/character/facegen_egt.py`.
 
 ## The symptom
 <a id="symptom"></a>
@@ -231,7 +231,7 @@ paths) and carries its own FGTS vector.  A race either ships its own
 textures with FGTS all-zero, or shares another race's textures and recolors
 them with a non-zero FGTS -- which is exactly how High Elf reads gold,
 Redguard brown and Nord pale while all three point at
-Characters\Imperial\HeadHuman.dds.  See asset_convert/facegen_egt.py for the
+Characters\Imperial\HeadHuman.dds.  See asset_convert/character/facegen_egt.py for the
 reconstruction and docs/commentary/asset_convert_facegen.md for the measurements.
 
 Per-NPC FGTS is deliberately NOT used: measured across all 2482 Oblivion

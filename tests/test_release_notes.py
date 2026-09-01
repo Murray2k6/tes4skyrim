@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tools.release.release_notes as rn  # noqa: E402
+import tools.release.release_notes as rn
 
 
 def steps(path):
@@ -43,10 +43,10 @@ def test_phase_map_targets_are_known_steps():
 @pytest.mark.parametrize("path,expected", [
     ("tes5_import/record_types/actors.py", "6. Import"),
     ("script_convert/converter.py",        "8. Scripts"),
-    ("asset_convert/nif_converter.py",     "3. Meshes"),
-    ("asset_convert/audio_converter.py",   "7. Sounds"),
-    ("asset_convert/lod_gen.py",           "Create LOD"),
-    ("asset_convert/bsa_extract.py",       "2. Extract"),
+    ("asset_convert/nif/nif_converter.py",     "3. Meshes"),
+    ("asset_convert/audio/audio_converter.py",   "7. Sounds"),
+    ("asset_convert/lod/lod_gen.py",           "Create LOD"),
+    ("asset_convert/sources/bsa_extract.py",       "2. Extract"),
     ("asset_convert/spt_reader.py",        "4. SpeedTrees"),
     ("asset_convert/hkx_convert.py",       "5. Creatures"),
 ])
@@ -91,7 +91,7 @@ def test_packaging_follows_a_producing_step():
 
 def test_patch_skyrim_alone_does_not_drag_in_packaging():
     """Patch Skyrim writes a standalone ARMA patch that BSA/zip never read."""
-    assert steps("asset_convert/modify_body_meshes.py") == ["Patch Skyrim"]
+    assert steps("asset_convert/character/modify_body_meshes.py") == ["Patch Skyrim"]
 
 
 @pytest.mark.parametrize("path", [
@@ -140,7 +140,7 @@ def test_unmapped_path_selects_no_steps():
 
 def test_unmapped_path_does_not_widen_a_known_change():
     ordered, unmatched, _ = rn.steps_for_paths(
-        ["asset_convert/lod_gen.py", "brand_new_package/thing.py"])
+        ["asset_convert/lod/lod_gen.py", "brand_new_package/thing.py"])
     assert unmatched == ["brand_new_package/thing.py"]
     assert "Create LOD" in ordered
     assert "1. Export" not in ordered
@@ -229,5 +229,5 @@ def test_convert_py_uses_supplied_attribution():
 
 def test_steps_are_emitted_in_gui_order():
     ordered, _, _ = rn.steps_for_paths(
-        ["asset_convert/lod_gen.py", "tes4_export/x.py", "script_convert/y.py"])
+        ["asset_convert/lod/lod_gen.py", "tes4_export/x.py", "script_convert/y.py"])
     assert ordered == [s for s in rn.STEP_ORDER if s in ordered]

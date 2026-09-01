@@ -12,9 +12,9 @@ import struct
 
 import pytest
 
-from asset_convert.facegen_tri import (MAGIC, SKYRIM_HAIR_MORPH, TriError,
+from asset_convert.character.facegen_tri import (MAGIC, SKYRIM_HAIR_MORPH, TriError,
                                        TriFile, build_skyrim_hair_tri)
-from asset_convert.hair_pipeline import (LENGTH_BUCKETS, bucket_weight,
+from asset_convert.character.hair_pipeline import (LENGTH_BUCKETS, bucket_weight,
                                          collect_hair_usage, output_model_path,
                                          output_tri_path, quantize_length,
                                          variant_edid, variant_stem)
@@ -214,8 +214,9 @@ def test_converted_hair_uses_the_hair_tint_shader():
     at type 0 (Default) renders its raw grey source texture no matter what the
     wearer's HCLF says — which is exactly how it shipped before this.
     """
-    from asset_convert import hair_pipeline
-    from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
+    from asset_convert.character import hair_pipeline
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
 
     built = os.path.join('output', 'Oblivion.esm', 'meshes', 'tes4',
@@ -242,9 +243,10 @@ def test_converted_hair_uses_the_hair_tint_shader():
 
 
 def test_apply_hair_shader_sets_the_vanilla_shape():
-    from asset_convert.hair_pipeline import (SHADER_TYPE_HAIR_TINT,
+    from asset_convert.character.hair_pipeline import (SHADER_TYPE_HAIR_TINT,
                                              apply_hair_shader)
-    from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
 
     shader = NifFormat.BSLightingShaderProperty()
@@ -360,7 +362,8 @@ _BS = chr(92)
 
 def _mesh_bounds(path):
     """(min, max) per axis over every vertex in a NIF."""
-    from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     data = NifFormat.Data()
     with open(path, 'rb') as fh:
@@ -398,7 +401,7 @@ def test_head_fit_preserves_authored_clearance():
     pytest.importorskip('scipy')
     import numpy as np
     from scipy.spatial import cKDTree
-    from asset_convert import head_fit
+    from asset_convert.character import head_fit
 
     if not head_fit.fit_available(False):
         pytest.skip('head-fit data not built')
@@ -465,7 +468,8 @@ def test_head_fit_preserves_authored_clearance():
 def _load_nif_shapes(path):
     """[(verts, tris)] for every trishape in a NIF (authored coords)."""
     import numpy as np
-    from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     data = NifFormat.Data()
     with open(path, 'rb') as fh:
@@ -500,8 +504,8 @@ def test_generic_hair_is_baked_per_race_group():
     pytest.importorskip('scipy')
     import numpy as np
     from scipy.spatial import cKDTree
-    from asset_convert import head_fit
-    from asset_convert.skyrim_assets import get_asset_bytes
+    from asset_convert.character import head_fit
+    from asset_convert.sources.skyrim_assets import get_asset_bytes
 
     if not head_fit.fit_available(False):
         pytest.skip('head-fit data not built')
@@ -615,7 +619,7 @@ def test_gendered_naming_and_paths():
 
 
 def test_hair_genders_honour_the_authored_restriction():
-    from asset_convert.hair_pipeline import hair_genders
+    from asset_convert.character.hair_pipeline import hair_genders
     assert hair_genders(0x00) == (False, True)      # unisex
     assert hair_genders(0x01) == (False, True)      # playable-only bit
     assert hair_genders(0x02) == (True,)            # NotMale -> female only
@@ -657,7 +661,7 @@ def test_race_hair_is_fitted_to_its_own_heads():
     """
     pytest.importorskip('scipy')
     import numpy as np
-    from asset_convert import head_fit
+    from asset_convert.character import head_fit
 
     if not head_fit.fit_available(False):
         pytest.skip('head-fit data not built')
@@ -724,7 +728,7 @@ def test_head_fit_keeps_the_mesh_intact_and_unsized():
     """
     pytest.importorskip('scipy')
     import numpy as np
-    from asset_convert import head_fit
+    from asset_convert.character import head_fit
 
     if not head_fit.fit_available(False):
         pytest.skip('head-fit data not built')
@@ -787,9 +791,9 @@ def test_converted_helmet_is_fitted_not_scaled():
     import numpy as np
     import tempfile
     import shutil
-    from asset_convert import head_fit
-    from asset_convert.nif_converter import convert_nif
-    from asset_convert import wearable_plan as wp
+    from asset_convert.character import head_fit
+    from asset_convert.nif.nif_converter import convert_nif
+    from asset_convert.character import wearable_plan as wp
 
     src = os.path.join('export', 'Oblivion.esm', 'meshes', 'armor', 'iron',
                        'm', 'helmet.nif')
@@ -835,7 +839,7 @@ def test_hanging_hair_keeps_its_authored_length():
     """
     pytest.importorskip('scipy')
     import numpy as np
-    from asset_convert import head_fit
+    from asset_convert.character import head_fit
 
     if not head_fit.fit_available(False):
         pytest.skip('head-fit data not built')
@@ -903,7 +907,7 @@ def test_hair_alpha_tests_rather_than_blends():
     camera rotates.  All 211 vanilla Skyrim hair meshes alpha-test (threshold
     128 x92, 100 x57, and a scatter of others).
     """
-    from asset_convert.hair_pipeline import (HAIR_ALPHA_FLAGS,
+    from asset_convert.character.hair_pipeline import (HAIR_ALPHA_FLAGS,
                                              HAIR_ALPHA_THRESHOLD)
     assert HAIR_ALPHA_THRESHOLD > 0
     # bit 0 = alpha blend, bit 9 = alpha test.  Vanilla hair: test on, blend off.
@@ -913,7 +917,8 @@ def test_hair_alpha_tests_rather_than_blends():
     if not os.path.isdir(_BUILT):
         pytest.skip('converted hair not built')
 
-    from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
 
     checked = 0
@@ -939,7 +944,7 @@ def test_tint_compensates_for_a_biased_texture():
     orange on a Khajiit mane and neutral on grey.dds unless the bias is divided
     back out.
     """
-    from asset_convert import hair_pipeline
+    from asset_convert.character import hair_pipeline
 
     neutral = hair_pipeline._VANILLA_HAIR_TINT
     original = hair_pipeline._texture_bias
@@ -970,21 +975,21 @@ def test_broken_source_texture_paths_are_repaired():
     and 5 meshes name a bare Grey.dds with no folder, which lands outside the
     hair directory.  Both render untextured if passed through.
     """
-    from asset_convert.hair_pipeline import _resolve_hair_texture
+    from asset_convert.character.hair_pipeline import resolve_hair_texture
 
     tex_root = os.path.join('export', 'Oblivion.esm', 'textures')
     if not os.path.isdir(tex_root):
         pytest.skip('Oblivion textures not extracted')
 
-    fixed = _resolve_hair_texture(
+    fixed = resolve_hair_texture(
         _BS.join(['textures', 'characters', 'hair', 'Grey_Mane.dds']), tex_root)
     assert fixed and fixed.lower().endswith('mane.dds')
 
-    fixed = _resolve_hair_texture('Grey.dds', tex_root)
+    fixed = resolve_hair_texture('Grey.dds', tex_root)
     assert fixed and 'hair' in fixed.lower()
 
     # A path that already resolves must be left alone.
-    assert _resolve_hair_texture(
+    assert resolve_hair_texture(
         _BS.join(['characters', 'hair', 'Grey.dds']), tex_root) is None
 
 
@@ -1059,18 +1064,18 @@ def test_head_fit_reaches_the_skyrim_crown():
     if head is None:
         pytest.skip('head component not identifiable')
 
-    from asset_convert.body_wrap import (_head_uv_geometry, _SK_HEAD_SETS)
-    from asset_convert.skyrim_assets import get_body_nif_bytes
-    raw = get_body_nif_bytes(_SK_HEAD_SETS['male'])
+    from asset_convert.character.body_wrap import (head_uv_geometry, SK_HEAD_SETS)
+    from asset_convert.sources.skyrim_assets import get_body_nif_bytes
+    raw = get_body_nif_bytes(SK_HEAD_SETS['male'])
     if raw is None:
         pytest.skip('vanilla malehead.nif unavailable')
-    skv = _head_uv_geometry(raw)[0]
+    skv = head_uv_geometry(raw)[0]
 
     # the EAR region is deliberately not covered (ears are flattened out of
     # the correspondence — gear ignores them, like vanilla SK hair does)
-    from asset_convert.head_fit import _SK_EAR_BOXES
+    from asset_convert.character.head_fit import SK_EAR_BOXES
     o_sk = np.array([0.0, -1.548, 120.344])
-    xmin, ymin, ymax, zmin, zmax = _SK_EAR_BOXES['human']
+    xmin, ymin, ymax, zmin, zmax = SK_EAR_BOXES['human']
     lc = skv - o_sk
     ear = ((np.abs(lc[:, 0]) > xmin) & (lc[:, 1] > ymin) & (lc[:, 1] < ymax)
            & (lc[:, 2] > zmin) & (lc[:, 2] < zmax))
@@ -1094,7 +1099,7 @@ def test_uv_head_seed_is_not_applied_to_geometry():
     on converted hair: 34% of edges distorted >15%).  Guard the seam: no
     runtime head-map API may exist for callers to reach for.
     """
-    import asset_convert.body_wrap as bw
+    import asset_convert.character.body_wrap as bw
     assert not hasattr(bw, 'HeadMap')
     assert not hasattr(bw, 'get_head_map')
     assert not hasattr(bw, 'head_map_available')
@@ -1105,12 +1110,12 @@ def test_dynamic_trishape_uvs_come_from_the_skin_partition():
     partition.  Returning the inline buffer's None dropped the head's UVs
     and normals entirely, which is what starved the head fit."""
     pytest.importorskip('scipy')
-    from asset_convert.body_wrap import _head_uv_geometry, _SK_HEAD_SETS
-    from asset_convert.skyrim_assets import get_body_nif_bytes
-    raw = get_body_nif_bytes(_SK_HEAD_SETS['male'])
+    from asset_convert.character.body_wrap import head_uv_geometry, SK_HEAD_SETS
+    from asset_convert.sources.skyrim_assets import get_body_nif_bytes
+    raw = get_body_nif_bytes(SK_HEAD_SETS['male'])
     if raw is None:
         pytest.skip('vanilla malehead.nif unavailable')
-    got = _head_uv_geometry(raw)
+    got = head_uv_geometry(raw)
     assert got is not None, 'head yielded no UV geometry'
     verts, tris, uvs = got
     assert len(uvs) == len(verts) and len(uvs) > 0
@@ -1120,6 +1125,6 @@ def test_dynamic_trishape_uvs_come_from_the_skin_partition():
 def test_head_bones_cover_both_naming_conventions():
     """Converted hair ships skinned to the RENAMED Skyrim head bone, so
     matching only 'Bip01 Head' classified every hair mesh as non-head."""
-    from asset_convert.body_wrap import HEAD_BONES
+    from asset_convert.character.body_wrap import HEAD_BONES
     assert 'Bip01 Head' in HEAD_BONES
     assert 'NPC Head [Head]' in HEAD_BONES

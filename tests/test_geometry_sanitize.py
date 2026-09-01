@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 def nif():
     if not hasattr(time, 'clock'):
         time.clock = time.perf_counter
-    from asset_convert import pyffi_monkey_patch            # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     return NifFormat
 
@@ -80,14 +81,14 @@ class TestVertexlessShapeIsCleared:
             'triangles must index vertices that are not there'
 
     def test_it_is_cleared_to_an_empty_shape(self, nif):
-        from asset_convert.nif_converter import _sanitize_geometry_data
+        from asset_convert.nif.nif_converter import sanitize_geometry_data
 
         shape, data = _shape_with_no_vertex_array(nif)
 
         class _Doc:
             blocks = [data]
 
-        assert _sanitize_geometry_data(_Doc()) >= 1
+        assert sanitize_geometry_data(_Doc()) >= 1
         assert data.num_vertices == 0
         assert len(data.get_triangles()) == 0, \
             'triangles left pointing at vertices that do not exist'
@@ -102,7 +103,7 @@ class TestVertexlessShapeIsCleared:
         untouched, the strips-to-triangles conversion downstream rebuilt them,
         and the shape shipped with 0 vertices and 6 faces indexing vertex 15.
         """
-        from asset_convert.nif_converter import _sanitize_geometry_data
+        from asset_convert.nif.nif_converter import sanitize_geometry_data
 
         data = nif.NiTriStripsData()
         data.has_vertices = False
@@ -125,7 +126,7 @@ class TestVertexlessShapeIsCleared:
         class _Doc:
             blocks = [data]
 
-        assert _sanitize_geometry_data(_Doc()) >= 1
+        assert sanitize_geometry_data(_Doc()) >= 1
         assert data.num_vertices == 0
         assert len(data.get_triangles()) == 0, 'strips survived the clear'
         assert data.num_strips == 0
@@ -133,7 +134,7 @@ class TestVertexlessShapeIsCleared:
     def test_a_healthy_shape_is_untouched(self, nif):
         """The sanitiser must not reach a normal mesh — it runs on every
         converted NIF."""
-        from asset_convert.nif_converter import _sanitize_geometry_data
+        from asset_convert.nif.nif_converter import sanitize_geometry_data
 
         shape = nif.NiTriShape()
         data = nif.NiTriShapeData()
@@ -153,6 +154,6 @@ class TestVertexlessShapeIsCleared:
         class _Doc:
             blocks = [data]
 
-        assert _sanitize_geometry_data(_Doc()) == 0
+        assert sanitize_geometry_data(_Doc()) == 0
         assert data.num_vertices == 3
         assert len(data.get_triangles()) == 1

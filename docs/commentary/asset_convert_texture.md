@@ -1,13 +1,13 @@
-# asset_convert/parallax.py — textures, shaders and parallax
+# asset_convert/texture/parallax.py — textures, shaders and parallax
 
-**Code:** `asset_convert/parallax.py`, `asset_convert/luminance_textures.py`, `asset_convert/spec_mask.py`, `asset_convert/texture_prune.py`, `asset_convert/landscape_normals.py`
+**Code:** `asset_convert/texture/parallax.py`, `asset_convert/texture/luminance_textures.py`, `asset_convert/texture/spec_mask.py`, `asset_convert/texture/texture_prune.py`, `asset_convert/texture/landscape_normals.py`
 
 ## Contents
 
-- [Oblivion parallax → Skyrim height maps (asset_convert/parallax.py, opt-in, 2026-08-15)](#oblivion-parallax-skyrim-height-maps)
+- [Oblivion parallax → Skyrim height maps (asset_convert/texture/parallax.py, opt-in, 2026-08-15)](#oblivion-parallax-skyrim-height-maps)
 - [Landscape normal maps: DXT1 = shiny ground (2026-07-09)](#landscape-normal-maps-dxt1-shiny)
 
-## Oblivion parallax → Skyrim height maps (`asset_convert/parallax.py`, opt-in, 2026-08-15)
+## Oblivion parallax → Skyrim height maps (`asset_convert/texture/parallax.py`, opt-in, 2026-08-15)
 <a id="oblivion-parallax-skyrim-height-maps"></a>
 
 `NiTexturingProperty.apply_mode == APPLY_HILIGHT2 (4)` is **Oblivion's parallax
@@ -458,7 +458,7 @@ no plumbing is needed and a non-parallax build is a no-op by construction.
 
 But a texture-level classification is not the whole answer. If some *other*
 shape reads that diffuse's alpha as opacity, that is evidence the channel is
-not a height field there, whatever the classifier said. `_process_geometry`
+not a height field there, whatever the classifier said. `process_geometry`
 records those diffuses in `alpha_opacity_diffuse` (a set, carried separately
 from the `parallax` Counter) and the strip skips them.
 
@@ -576,5 +576,5 @@ being mesh products.
 ## Landscape normal maps: DXT1 = shiny ground (2026-07-09)
 <a id="landscape-normal-maps-dxt1-shiny"></a>
 - Skyrim's landscape shader reads the normal map ALPHA channel as the specular mask. Oblivion's terrain shader never used it, so most Oblivion landscape `*_n.dds` are DXT1 (no alpha) → sampled alpha = 1.0 → full-strength specular over the whole terrain (user-visible "very shiny ground"). Oblivion normals that are already DXT5 carry a real mask (avg ~77/255) and are correct as-is.
-- Fix: `asset_convert/landscape_normals.py` (pipeline step after the texture copy, so re-copies can't resurrect DXT1) re-containers DXT1 → DXT5 with constant dark alpha 32/255. DXT1 and DXT5 share the 8-byte color block format, so RGB is preserved losslessly; DXT1 3-color blocks (c0<=c1, ~0.05%) get endpoints swapped + indices 0↔1 remapped since DXT5 color blocks are always 4-color mode.
+- Fix: `asset_convert/texture/landscape_normals.py` (pipeline step after the texture copy, so re-copies can't resurrect DXT1) re-containers DXT1 → DXT5 with constant dark alpha 32/255. DXT1 and DXT5 share the 8-byte color block format, so RGB is preserved losslessly; DXT1 3-color blocks (c0<=c1, ~0.05%) get endpoints swapped + indices 0↔1 remapped since DXT5 color blocks are always 4-color mode.
 - Related: LTEX SNAM is a Phong exponent (never write 0 — see convert_LTEX comment); the alpha mask is what actually controls specular *amount*.

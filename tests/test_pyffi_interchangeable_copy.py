@@ -14,8 +14,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from asset_convert import pyffi_monkey_patch  # noqa: F401,E402  (installs)
-from pyffi.formats.nif import NifFormat  # noqa: E402
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from pyffi.formats.nif import NifFormat
 
 
 def _build(cls, datacls, nverts=6, colors=True, uvsets=1, normals=True):

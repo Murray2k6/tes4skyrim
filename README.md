@@ -256,10 +256,10 @@ python convert.py -f Oblivion.esm --mesh-bounds-only   # Rescan mesh bounds → 
 
 ```bash
 # Mesh conversion only
-python -m asset_convert.nif_converter path/to/meshes/ path/to/output/
+python -m asset_convert.nif.nif_converter path/to/meshes/ path/to/output/
 
 # BSA extraction only
-python -m asset_convert.bsa_extract Oblivion.esm --data-path "C:/path/to/Oblivion/Data"
+python -m asset_convert.sources.bsa_extract Oblivion.esm --data-path "C:/path/to/Oblivion/Data"
 
 # Tests
 python -m pytest tests/ -v
@@ -370,7 +370,7 @@ covered by this project's MIT license.
 | Oblivion banner font ([dafont](https://www.dafont.com/oblivion.font)) | Project banner | *Free for personal use only*, based on Bethesda's trademarked logo. **Not** bundled in this repo; the banner ships as pre-rendered vector outlines. |
 
 > **Note on GPL-3.0:** `external/pynifly_hkx/` is GPL-3.0. It is used by the creature
-> animation conversion path (`asset_convert/hkx_anim.py`). If you redistribute a build
+> animation conversion path (`asset_convert/havok/hkx_anim.py`). If you redistribute a build
 > that includes it, the GPL's terms apply to that distribution.
 
 > **Note on LGPL (FFmpeg):** `external/ffmpeg/ffmpeg.exe` is built from **unmodified**

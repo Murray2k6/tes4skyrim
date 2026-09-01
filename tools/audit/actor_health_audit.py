@@ -20,7 +20,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from tools.esm.tes5_esm_reader import read_tes5_file, _get  # noqa: E402
+from tools.esm.tes5_esm_reader import read_tes5_file, _get
 
 HEALTH_LEVEL_BONUS = 5.0
 DEFAULT_RACE_BASE = 50.0

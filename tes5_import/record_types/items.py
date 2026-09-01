@@ -116,7 +116,7 @@ def load_door_model_sounds(meshes_dir, by_type) -> int:
     Oblivion doors take their audio from the record's SNAM/ANAM OR from
     `sound: <SOUN EditorID>` keys on the model's Open/Close sequences; Skyrim
     has only the record channel, so the mesh-authored names have to be lifted
-    onto it or those doors convert silent (see asset_convert.door_sounds).
+    onto it or those doors convert silent (see asset_convert.audio.door_sounds).
 
     The EditorID is resolved against this plugin's own SOUN records, so an
     unknown name simply yields no sound rather than a dangling reference.
@@ -128,7 +128,7 @@ def load_door_model_sounds(meshes_dir, by_type) -> int:
     if not doors:
         return 0
     try:
-        from asset_convert.door_sounds import scan_door_models
+        from asset_convert.audio.door_sounds import scan_door_models
     except ImportError as exc:
         print(f"  Door sounds: asset_convert unavailable ({exc}), skipping")
         return 0
@@ -349,22 +349,7 @@ def convert_FLOR(rec: dict) -> bytes:
 
 
 # --- FURN marker data -------------------------------------------------------
-#
 # TES5 FURN MNAM bits 0-23 enable NIF marker POSITION 0-23 (xEdit "Sit 0..23").
-# The converted NIF's positions are the clustered SEATS produced by
-# asset_convert/furniture_markers.py, NOT the original Oblivion entry markers,
-# so the TES4 MNAM bitmask (which indexed the Oblivion NIF's entry list)
-# CANNOT be passed through: dangling bits make the engine index past the
-# NIF's position list and seat NPCs at garbage positions far from the mesh.
-#
-# The seat list is computed here with the SAME shared code the NIF converter
-# uses (same clustering, same order), from the source NIF in the export dir.
-# Populated once by load_furniture_seats() (called from import_main Phase 0).
-#
-# High MNAM flags: TES4 and TES5 share bit 30 (sit-type furniture) and
-# bit 31 (bed-type) — verified against vanilla Skyrim (chairs/benches
-# 0x40000001, beds 0x88000001).  Vanilla beds additionally set bit 27
-# (0x08000000 "Must Exit to Talk").
 _FURN_SEATS: dict = {}  # normalised MODL path -> seat list (see cluster_seats)
 # Original TES4 base FormID (uppercase 8-hex string) -> origin shift for its
 # model.  The NIF converter re-origins marker-bearing models to the vanilla
@@ -400,7 +385,7 @@ def load_furniture_models(meshes_dir, by_type) -> int:
     _FURN_SEATS.clear()
     _BASE_ORIGIN_SHIFT.clear()
     try:
-        from asset_convert.furniture_markers import (furniture_model_info_job,
+        from asset_convert.nif.furniture_markers import (furniture_model_info_job,
                                                      scan_marker_nifs)
     except ImportError as exc:
         print(f"  Furniture seats: asset_convert unavailable ({exc}), using fallback")
@@ -526,7 +511,7 @@ def convert_GRAS(rec: dict) -> bytes:
     Grass is engine-instanced from LAND texture layers, not placed, so it
     skips the normal object treatment.
     """
-    from asset_convert.grass_profile import grass_model_dest
+    from asset_convert.lod.grass_profile import grass_model_dest
     subs = b''
     edid = get_str(rec, 'EditorID')
     if edid:

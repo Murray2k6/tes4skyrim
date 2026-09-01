@@ -12,8 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import sibling_lod
-from asset_convert.sibling_lod import _load_order
+from asset_convert.lod import sibling_lod
+from asset_convert.lod.sibling_lod import load_order
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ class TestExplicitOrder:
 
     def test_user_choice_wins_over_unseen_plugin(self, no_plugins_txt):
         names = ['Tamriel.esp', 'ElsweyrAnequina.esp', 'AAANewMod.esp']
-        order = _load_order(names, Path('.'),
+        order = load_order(names, Path('.'),
                             explicit=['Tamriel.esp', 'ElsweyrAnequina.esp'])
         assert order[-1] == 'ElsweyrAnequina.esp', (
             'the last plugin the user arranged must win contested tiles')
@@ -35,7 +35,7 @@ class TestExplicitOrder:
 
     def test_explicit_relative_order_preserved(self, no_plugins_txt):
         names = ['Tamriel.esp', 'ElsweyrAnequina.esp']
-        order = _load_order(names, Path('.'),
+        order = load_order(names, Path('.'),
                             explicit=['Tamriel.esp', 'ElsweyrAnequina.esp'])
         assert order == ['Tamriel.esp', 'ElsweyrAnequina.esp']
 
@@ -51,7 +51,7 @@ class TestPluginsTxtOrder:
                                      'ElsweyrAnequina.esp'])
         names = ['Tamriel.esp', 'ElsweyrAnequina.esp',
                  'DLCBattlehornCastle.esp']
-        order = _load_order(names, Path('.'))
+        order = load_order(names, Path('.'))
         assert order[-1] == 'ElsweyrAnequina.esp', (
             'plugins.txt puts ElsweyrAnequina.esp last, so it wins tiles')
         assert order.index('DLCBattlehornCastle.esp') == 0, (
@@ -60,7 +60,7 @@ class TestPluginsTxtOrder:
     def test_listed_order_follows_plugins_txt(self, monkeypatch):
         monkeypatch.setattr(sibling_lod, 'plugins_txt_order',
                             lambda: ['ElsweyrAnequina.esp', 'Tamriel.esp'])
-        order = _load_order(['Tamriel.esp', 'ElsweyrAnequina.esp'], Path('.'))
+        order = load_order(['Tamriel.esp', 'ElsweyrAnequina.esp'], Path('.'))
         assert order == ['ElsweyrAnequina.esp', 'Tamriel.esp'], (
             'the ranked order must mirror plugins.txt, not the alphabet')
 
@@ -69,7 +69,7 @@ class TestPluginsTxtOrder:
         monkeypatch.setattr(sibling_lod, 'plugins_txt_order',
                             lambda: ['Skyrim.esm', 'Unrelated.esp'])
         names = ['B.esp', 'A.esp']
-        order = _load_order(names, Path('.'))
+        order = load_order(names, Path('.'))
         assert sorted(order) == sorted(names)
 
 

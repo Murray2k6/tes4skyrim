@@ -30,9 +30,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tes5_import.navmesh import (build, corridor, corridor_clean,   # noqa: E402
+from tes5_import.navmesh import (build, corridor, corridor_clean,
                                  corridor_grow, params, world)
-from tools.navmesh.probe import load_cell                           # noqa: E402
+from tools.navmesh.probe import load_cell
 
 
 def _centroid(v, t):
@@ -101,7 +101,7 @@ def _nearest_edge_point(nodes, edges, node_z, x, y, z):
 def check(export_dir, cell, use_grow=True, dump=None):
     ctx = load_cell(export_dir, cell)
     ox, oy = ctx['grid_x'] * 4096.0, ctx['grid_y'] * 4096.0
-    from asset_convert.collision_extract import get_collision
+    from asset_convert.collision.collision_extract import get_collision
 
     walk, block, land = world.gather_cell_geometry(
         ctx['refrs'], ctx['base_model'], get_collision,

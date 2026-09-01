@@ -122,7 +122,7 @@ def source_tag(plugin: str) -> str | None:
 
 def collision_hash(plugin: str) -> str | None:
     """Content hash of the plugin's collision cache, or None if absent."""
-    import asset_convert.collision_extract as ce
+    import asset_convert.collision.collision_extract as ce
     path = collision_path(plugin)
     if not os.path.exists(path):
         return None

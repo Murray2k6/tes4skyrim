@@ -26,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import lod_gen                                  # noqa: E402
+from asset_convert.lod import lod_gen
 
 
 @pytest.fixture

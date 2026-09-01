@@ -17,8 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import sibling_lod
-from asset_convert.sibling_lod import create_lod_order
+from asset_convert.lod import sibling_lod
+from asset_convert.lod.sibling_lod import create_lod_order
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def masters(monkeypatch):
     def _fake(export_dir):
         return table.get(Path(export_dir).name, [])
 
-    monkeypatch.setattr(sibling_lod, '_master_names', _fake)
+    monkeypatch.setattr(sibling_lod, 'master_names', _fake)
     return table
 
 

@@ -1119,13 +1119,6 @@ def get_merchant_faction_fid() -> int:
 
 # ---------------------------------------------------------------------------
 #   Trainer System
-# ---------------------------------------------------------------------------
-# Skyrim's training menu reads the trainer's skill and level cap from the
-# NPC's CLASS (CLAS DATA Teaches/MaxTrainingLevel), but Oblivion stores them
-# per-NPC in AIDT (the class fields are just CS defaults — 92 of 114 vanilla
-# trainers disagree with their class). So each trainer NPC gets a clone of its
-# own class with Teaches/MaxTraining replaced, plus membership in a synthetic
-# trainer faction that gates the generated Training dialogue topic.
 
 _trainer_faction_fid = 0
 _trainer_class_by_npc: dict[int, int] = {}   # remapped NPC fid -> CLAS clone fid
@@ -1966,17 +1959,17 @@ def convert_HAIR(rec: dict, *, writer=None) -> bytes:
     side-emits an HDPT for every other variant the plugin's NPCs ask for:
 
     LENGTH   Skyrim has no per-NPC hair-length field, so NPC_.LNAM is baked
-             into the mesh per quantized bucket (asset_convert.hair_pipeline).
-    GENDER   every mesh is FITTED to the Skyrim head (asset_convert.head_fit)
+             into the mesh per quantized bucket (asset_convert.character.hair_pipeline).
+    GENDER   every mesh is FITTED to the Skyrim head (asset_convert.character.head_fit)
              and the male and female Skyrim skulls differ by up to 1.23 units
              over the scalp, so each allowed gender gets its own mesh + HDPT,
              exactly as vanilla genders every hairstyle.  TES4's NotMale /
              NotFemale restriction picks which genders exist at all.
     """
-    from asset_convert.hair_pipeline import (_fit_group_lock, hair_genders,
+    from asset_convert.character.hair_pipeline import (fit_group_lock, hair_genders,
                                              output_model_path,
                                              output_tri_path, variant_edid)
-    from asset_convert.head_fit import fit_race_for_hair
+    from asset_convert.character.head_fit import fit_race_for_hair
     from ..hair_variants import hair_buckets_for, hair_has_tri
 
     model = get_str(rec, 'Model.MODL')
@@ -1988,7 +1981,7 @@ def convert_HAIR(rec: dict, *, writer=None) -> bytes:
     # Generic hair (not race-named, not a beast head) is emitted once per
     # race GROUP — see HDPT_GROUPS; race-named hair keeps its single HDPT.
     generic = (fit_race_for_hair(edid) is None
-               and _fit_group_lock(edid) is None)
+               and fit_group_lock(edid) is None)
     groups = HDPT_GROUPS if generic else (('', None, 0),)
 
     genders = hair_genders(get_int(rec, 'DATA.Flags'))

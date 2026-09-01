@@ -37,7 +37,7 @@ Usage:
     python tools/nif/collision_winding.py ../TESConversion/export/Oblivion.esm/meshes/dungeons
 
 See docs/commentary/asset_convert_nif.md "Inverted collision winding in Nehrim source
-meshes" for the repair (`asset_convert.collision._repair_inverted_floors`).
+meshes" for the repair (`asset_convert.collision.collision._repair_inverted_floors`).
 """
 import argparse
 import math
@@ -65,7 +65,8 @@ def _normal(v0, v1, v2):
 
 def _collision_tris(path, converted):
     """Return collision triangles as xyz tuples, roughly in game units."""
-    from asset_convert import pyffi_monkey_patch  # noqa: F401  (clock patch)
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     data = NifFormat.Data()
     with open(path, 'rb') as f:
@@ -75,7 +76,7 @@ def _collision_tris(path, converted):
     for blk in data.blocks:
         name = type(blk).__name__
         if converted and name == 'bhkCompressedMeshShapeData':
-            from asset_convert.cms import decode_cms
+            from asset_convert.collision.cms import decode_cms
             for _key, tri in decode_cms(blk):
                 tris.append(tuple(tuple(c * _HAVOK_SCALE for c in v)
                                   for v in tri))
@@ -143,7 +144,7 @@ def _scan(args):
 
 def _repair_soups(path):
     """[(node, tris_hu, groups)] for every mesh collision, converter-side."""
-    from asset_convert import collision as C
+    from asset_convert.collision import collision as C
     from pyffi.formats.nif import NifFormat as NF
     data = NF.Data()
     with open(path, 'rb') as f:
@@ -193,7 +194,7 @@ def _scan_regress(path):
     wound at the source (the SI bridges have 242 of 324 shared edges
     disagreeing), so a changed triangle there is a repair, not damage.
     """
-    from asset_convert import collision as C
+    from asset_convert.collision import collision as C
     try:
         soups = _repair_soups(path)
     except Exception:
@@ -221,7 +222,7 @@ def _scan_ab(args):
     much of the real damage the repair fixes) and, critically, how many
     already-correct triangles it breaks.
     """
-    from asset_convert import collision as C
+    from asset_convert.collision import collision as C
     rel, src, dst = args
     npath, opath = os.path.join(src, rel), os.path.join(dst, rel)
     if not (os.path.exists(npath) and os.path.exists(opath)):

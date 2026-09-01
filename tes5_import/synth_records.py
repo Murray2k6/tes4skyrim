@@ -229,8 +229,8 @@ def create_vtyp_records(writer: PluginWriter, export_dir: str = None):
     if not export_dir:
         return
     try:
-        from asset_convert.voice_races import load_race_voices
-        from asset_convert.voice_races import vtyp_edid as _vtyp_edid
+        from asset_convert.audio.voice_races import load_race_voices
+        from asset_convert.audio.voice_races import vtyp_edid as _vtyp_edid
     except ImportError:
         return
     try:

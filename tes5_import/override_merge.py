@@ -16,7 +16,7 @@ authors never touched. Authorship now comes from diffing the two TES4 exports
 import os
 import struct
 import zlib
-from output_layout import paths  # noqa: E402
+from output_layout import paths
 
 _HEADER_SIZE = 24
 

@@ -33,18 +33,18 @@ from pyffi.formats.nif import NifFormat
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from asset_convert.skin_replacement import (
+from asset_convert.character.skin_replacement import (
     is_body_skin_geometry,
     collect_skin_info,
     load_body_geom,
     clip_body_geom,
     is_underwear_only,
-    _is_torso_skin,
+    is_torso_skin,
 )
-from asset_convert.nif_converter import (
-    _walk_node,
-    _upgrade_skin_instances,
-    _remap_bone_names,
+from asset_convert.nif.nif_converter import (
+    walk_node,
+    upgrade_skin_instances,
+    remap_bone_names,
     OUTPUT_VERSION,
     OUTPUT_USER_VERSION,
     OUTPUT_USER_VERSION_2,
@@ -128,13 +128,13 @@ def _run_to_skin_collect_stage(nif_path: str, src_path: str):
       6. Rename bones to Skyrim format (adds bracket notation)
     Returns the converted NifFormat.Data object.
     """
-    from asset_convert.skin_retarget import retarget_skin_to_skyrim
+    from asset_convert.character.skin_retarget import retarget_skin_to_skyrim
 
     data = NifFormat.Data()
     with open(nif_path, "rb") as f:
         data.read(f)
 
-    _upgrade_skin_instances(data)
+    upgrade_skin_instances(data)
 
     data.version = OUTPUT_VERSION
     data.user_version = OUTPUT_USER_VERSION
@@ -151,7 +151,7 @@ def _run_to_skin_collect_stage(nif_path: str, src_path: str):
             continue
         if hasattr(root, "children"):
             for j in range(len(root.children)):
-                root.children[j] = _walk_node(root, root.children[j], True, stats)
+                root.children[j] = walk_node(root, root.children[j], True, stats)
             keep = [c for c in root.children if c is not None]
             if len(keep) < root.num_children:
                 root.num_children = len(keep)
@@ -160,7 +160,7 @@ def _run_to_skin_collect_stage(nif_path: str, src_path: str):
                     root.children[ri] = rv
 
     retarget_skin_to_skyrim(data, src_path=src_path)
-    _remap_bone_names(data)
+    remap_bone_names(data)
     return data
 
 
@@ -218,8 +218,8 @@ class TestCollectSkinInfo:
     """Tests for collect_skin_info — called AFTER retarget + bone rename.
 
     The function reads BSLightingShaderProperty texture paths (converted from
-    NiTexturingProperty by _walk_node) and bone names (Skyrim names after
-    _remap_bone_names).  Tests must run the pre-collect pipeline first via
+    NiTexturingProperty by walk_node) and bone names (Skyrim names after
+    remap_bone_names).  Tests must run the pre-collect pipeline first via
     _run_to_skin_collect_stage().
     """
 
@@ -339,7 +339,7 @@ class TestTorsoSkinOverride:
     def test_spine_marks_a_torso(self):
         skin = self._Skin(['NPC Spine1 [Spn1]', 'NPC L Clavicle [LClv]',
                            'NPC Neck [Neck]'])
-        assert _is_torso_skin(skin)
+        assert is_torso_skin(skin)
 
     def test_a_gauntlet_reaching_the_forearm_is_not_a_torso(self):
         """The false positive that forced the bone list to stay narrow.
@@ -349,15 +349,15 @@ class TestTorsoSkinOverride:
         """
         skin = self._Skin(['NPC L Hand [LHnd]', 'NPC L Forearm [LLar]',
                            'NPC L UpperArm [LUar]'])
-        assert not _is_torso_skin(skin)
+        assert not is_torso_skin(skin)
 
     def test_a_boot_reaching_the_calf_is_not_a_torso(self):
         skin = self._Skin(['NPC L Foot [Lft ]', 'NPC L Calf [LClf]',
                            'NPC L Thigh [LThg]'])
-        assert not _is_torso_skin(skin)
+        assert not is_torso_skin(skin)
 
     def test_an_empty_skin_is_not_a_torso(self):
-        assert not _is_torso_skin(self._Skin([]))
+        assert not is_torso_skin(self._Skin([]))
 
 
 class TestLoadBodyGeom:
@@ -1082,7 +1082,7 @@ class TestFemaleSplicedVertexBounds:
 # 9.  M@B@W identity for spliced body geometry
 # ===========================================================================
 
-def _skin_transform_to_np(st):
+def skin_transform_to_np(st):
     """SkinTransform to numpy 4x4 (row-vector convention)."""
     M = np.eye(4, dtype=np.float64)
     M[0, 0] = st.rotation.m_11; M[0, 1] = st.rotation.m_12; M[0, 2] = st.rotation.m_13
@@ -1092,7 +1092,7 @@ def _skin_transform_to_np(st):
     return M
 
 
-def _m44_to_np(m):
+def m44_to_np(m):
     """PyFFI Matrix44 to numpy 4x4."""
     return np.array([
         [m.m_11, m.m_12, m.m_13, m.m_14],
@@ -1121,13 +1121,13 @@ def _check_mbw_identity_shapes(nif_data, shape_filter=None, tol=0.001):
             skel_root = skin.skeleton_root
             if skel_root is None:
                 continue
-            M = _skin_transform_to_np(sd.skin_transform)
+            M = skin_transform_to_np(sd.skin_transform)
             for i in range(sd.num_bones):
                 if i >= skin.num_bones or skin.bones[i] is None:
                     continue
-                B = _skin_transform_to_np(sd.bone_list[i].skin_transform)
+                B = skin_transform_to_np(sd.bone_list[i].skin_transform)
                 try:
-                    W = _m44_to_np(skin.bones[i].get_transform(skel_root))
+                    W = m44_to_np(skin.bones[i].get_transform(skel_root))
                 except Exception:
                     continue
                 MBW = M @ B @ W
@@ -1152,7 +1152,7 @@ def _compute_rest_pose_world(shape, bone_map_nodes):
     skel_root = skin.skeleton_root
     n = shape.data.num_vertices
 
-    M = _skin_transform_to_np(sd.skin_transform)
+    M = skin_transform_to_np(sd.skin_transform)
 
     # Build per-bone combined transform: M @ B_i @ W_i
     bone_transforms = []
@@ -1160,9 +1160,9 @@ def _compute_rest_pose_world(shape, bone_map_nodes):
         if bi >= skin.num_bones or skin.bones[bi] is None:
             bone_transforms.append(None)
             continue
-        B = _skin_transform_to_np(sd.bone_list[bi].skin_transform)
+        B = skin_transform_to_np(sd.bone_list[bi].skin_transform)
         try:
-            W = _m44_to_np(skin.bones[bi].get_transform(skel_root))
+            W = m44_to_np(skin.bones[bi].get_transform(skel_root))
         except Exception:
             bone_transforms.append(None)
             continue
@@ -1231,15 +1231,15 @@ def _compute_vanilla_body_rest_pose(body_nif_name):
                                        [r.m_12, r.m_22, r.m_32],
                                        [r.m_13, r.m_23, r.m_33]])
             G[3, :3] = [blk.translation.x, blk.translation.y, blk.translation.z]
-            M = _skin_transform_to_np(sd.skin_transform)
+            M = skin_transform_to_np(sd.skin_transform)
             bone_transforms = []
             for bi in range(sd.num_bones):
                 if bi >= skin.num_bones or skin.bones[bi] is None:
                     bone_transforms.append(None)
                     continue
-                B = _skin_transform_to_np(sd.bone_list[bi].skin_transform)
+                B = skin_transform_to_np(sd.bone_list[bi].skin_transform)
                 try:
-                    W = _m44_to_np(skin.bones[bi].get_transform(skel_root))
+                    W = m44_to_np(skin.bones[bi].get_transform(skel_root))
                 except Exception:
                     bone_transforms.append(None)
                     continue
@@ -1947,7 +1947,7 @@ def _find_geometry_blocks(data):
 
 
 # ===========================================================================
-# Occlusion trim of the spliced fill (_drop_armor_covered_tris)
+# Occlusion trim of the spliced fill (drop_armor_covered_tris)
 # ===========================================================================
 #
 # The splice fills the gap left by the stripped Oblivion body skin with vanilla
@@ -2003,46 +2003,46 @@ def _pt_key(p):
 
 
 class TestFillOcclusionTrim:
-    """`_drop_armor_covered_tris` -- drop only fill that is genuinely buried."""
+    """`drop_armor_covered_tris` -- drop only fill that is genuinely buried."""
 
     def test_no_armor_surface_is_a_passthrough(self):
         """`_armor_surface` returns None without scipy or without geometry;
         the trim must then be exactly inert, not silently empty the fill."""
-        from asset_convert.skin_replacement import _drop_armor_covered_tris
+        from asset_convert.character.skin_replacement import drop_armor_covered_tris
         fill = _grid_fill()
-        assert _drop_armor_covered_tris(fill, None, (0.0, 0.0, 0.0)) is fill
+        assert drop_armor_covered_tris(fill, None, (0.0, 0.0, 0.0)) is fill
 
     def test_uncovered_fill_is_untouched(self):
         """Bare skin with no armor over it keeps every triangle -- this is the
         exposed midriff / open shirt case, where trimming leaves a hole."""
-        from asset_convert.skin_replacement import _drop_armor_covered_tris
+        from asset_convert.character.skin_replacement import drop_armor_covered_tris
         fill = _grid_fill()
         far = _armor_sheet(_plane_centroids(z=60.0))
-        out = _drop_armor_covered_tris(fill, far, (0.0, 0.0, 0.0))
+        out = drop_armor_covered_tris(fill, far, (0.0, 0.0, 0.0))
         assert out[3] == fill[3]
 
     def test_armor_outside_the_cover_band_is_not_cover(self):
         """Cover is measured along the vertex normal within FILL_COVER_ALONG.
         Armor NEARER than the band (already-clipped overlap) and armor FURTHER
         than it (the far side of a loose robe) must both read as uncovered."""
-        from asset_convert.skin_replacement import (FILL_COVER_ALONG,
-                                                    _drop_armor_covered_tris)
+        from asset_convert.character.skin_replacement import (FILL_COVER_ALONG,
+                                                    drop_armor_covered_tris)
         fill = _grid_fill()
         lo, hi = FILL_COVER_ALONG
         for z in (lo - 0.5, hi + 0.5):
             surf = _armor_sheet(_plane_centroids(z=z))
-            out = _drop_armor_covered_tris(fill, surf, (0.0, 0.0, 0.0))
+            out = drop_armor_covered_tris(fill, surf, (0.0, 0.0, 0.0))
             assert out[3] == fill[3], 'armor at %s counted as cover' % z
 
     def test_fully_covered_fill_is_left_alone(self):
         """A fill entirely under armor is a legitimate backing layer some
         armor keeps; dropping all of it would delete the geometry outright."""
-        from asset_convert.skin_replacement import (FILL_COVER_ALONG,
-                                                    _drop_armor_covered_tris)
+        from asset_convert.character.skin_replacement import (FILL_COVER_ALONG,
+                                                    drop_armor_covered_tris)
         fill = _grid_fill()
         mid = sum(FILL_COVER_ALONG) / 2.0
         surf = _armor_sheet(_plane_centroids(z=mid, step=0.2))
-        out = _drop_armor_covered_tris(fill, surf, (0.0, 0.0, 0.0))
+        out = drop_armor_covered_tris(fill, surf, (0.0, 0.0, 0.0))
         assert out[3] == fill[3]
 
     def test_buried_interior_is_dropped_and_the_border_survives(self):
@@ -2052,15 +2052,15 @@ class TestFillOcclusionTrim:
         The erosion is what makes it safe -- the kept fill has to run PAST the
         armor edge and under it, never stop at it, or the seam shows.
         """
-        from asset_convert.skin_replacement import (FILL_COVER_ALONG,
-                                                    _drop_armor_covered_tris)
+        from asset_convert.character.skin_replacement import (FILL_COVER_ALONG,
+                                                    drop_armor_covered_tris)
         n = 13
         fill = _grid_fill(n=n)
         half = (n - 1) / 2.0
         mid = sum(FILL_COVER_ALONG) / 2.0
         cent = _plane_centroids(n=n, z=mid, step=0.2)
         cent = cent[cent[:, 0] <= half]                 # cover the low-x half
-        out = _drop_armor_covered_tris(fill, _armor_sheet(cent),
+        out = drop_armor_covered_tris(fill, _armor_sheet(cent),
                                        (0.0, 0.0, 0.0))
         kept, orig, vs = out[3], fill[3], fill[0]
         assert 0 < len(kept) < len(orig), 'expected a partial trim'
@@ -2083,14 +2083,14 @@ class TestFillOcclusionTrim:
     def test_trim_result_stays_internally_consistent(self):
         """Every parallel array is remapped together and the indices stay in
         range -- a mismatch here writes a corrupt NIF rather than failing."""
-        from asset_convert.skin_replacement import (FILL_COVER_ALONG,
-                                                    _drop_armor_covered_tris)
+        from asset_convert.character.skin_replacement import (FILL_COVER_ALONG,
+                                                    drop_armor_covered_tris)
         n = 13
         fill = _grid_fill(n=n)
         mid = sum(FILL_COVER_ALONG) / 2.0
         cent = _plane_centroids(n=n, z=mid, step=0.2)
         cent = cent[cent[:, 0] <= (n - 1) / 2.0]
-        verts, normals, uvs, tris, weights, bi = _drop_armor_covered_tris(
+        verts, normals, uvs, tris, weights, bi = drop_armor_covered_tris(
             fill, _armor_sheet(cent), (0.0, 0.0, 0.0))
         assert len(normals) == len(verts)
         assert len(uvs) == len(verts)
@@ -2108,8 +2108,8 @@ class TestFillOcclusionTrim:
         """The fill is body-local and the armor is in skeleton space, so the
         geom translation has to be applied or the occlusion test compares two
         different frames and cover is judged at the wrong place entirely."""
-        from asset_convert.skin_replacement import (FILL_COVER_ALONG,
-                                                    _drop_armor_covered_tris)
+        from asset_convert.character.skin_replacement import (FILL_COVER_ALONG,
+                                                    drop_armor_covered_tris)
         n = 13
         fill = _grid_fill(n=n)
         mid = sum(FILL_COVER_ALONG) / 2.0
@@ -2118,8 +2118,8 @@ class TestFillOcclusionTrim:
         cent = cent[cent[:, 0] <= (n - 1) / 2.0]
         surf = _armor_sheet(cent)
         # with the translation applied the armor covers half the fill...
-        moved = _drop_armor_covered_tris(fill, surf, offset)
+        moved = drop_armor_covered_tris(fill, surf, offset)
         assert len(moved[3]) < len(fill[3])
         # ...and without it, that same armor is 40 units away and covers none
-        unmoved = _drop_armor_covered_tris(fill, surf, (0.0, 0.0, 0.0))
+        unmoved = drop_armor_covered_tris(fill, surf, (0.0, 0.0, 0.0))
         assert unmoved[3] == fill[3]

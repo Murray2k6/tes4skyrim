@@ -22,8 +22,9 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-import asset_convert.pyffi_monkey_patch  # noqa: F401,E402
-from pyffi.formats.nif import NifFormat  # noqa: E402
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from pyffi.formats.nif import NifFormat
 
 # Only the header block-type table is needed to decide whether a file is worth
 # a full parse, and that keeps a whole-tree sweep affordable.

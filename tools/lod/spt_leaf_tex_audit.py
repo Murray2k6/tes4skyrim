@@ -20,17 +20,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from asset_convert.spt_converter import (                    # noqa: E402
-    _match_tex_stem, _tex_index, load_tree_manifest)
-from asset_convert.spt_parser import parse_spt, SptParseError  # noqa: E402
+from asset_convert.speedtree.spt_converter import (
+    match_tex_stem, tex_index, load_tree_manifest)
+from asset_convert.speedtree.spt_parser import parse_spt, SptParseError
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from output_layout import paths  # noqa: E402
+from output_layout import paths
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-from output_layout import assets_for  # noqa: E402
+from output_layout import assets_for
 
 
-def _master_names(export_dir: Path):
+def master_names(export_dir: Path):
     """Master plugin names from the export header, in order."""
     out = []
     h = export_dir / '_HEADER.txt'
@@ -45,11 +45,11 @@ def _master_names(export_dir: Path):
 
 def build_tex_index(export_dir: Path, export_root: Path) -> dict:
     """Texture index for this plugin, then its masters' (same as the converter)."""
-    idx = _tex_index(assets_for(export_dir) / 'textures' / 'trees')
-    for m in _master_names(export_dir):
+    idx = tex_index(assets_for(export_dir) / 'textures' / 'trees')
+    for m in master_names(export_dir):
         mtex = paths(m, export_root=export_root).assets / 'textures' / 'trees'
         if mtex.is_dir():
-            for stem, sub in _tex_index(mtex).items():
+            for stem, sub in tex_index(mtex).items():
                 idx.setdefault(stem, sub)
     return idx
 
@@ -71,7 +71,7 @@ def audit(export_dir: Path, export_root: Path, show_ok=False):
             continue
         icons = [e[1] for e in man.get(spt.stem.lower(), [])]
         cands = icons + [t.composite_map] + [m.texture for m in t.leaf_maps]
-        hit = next((s for s in (_match_tex_stem(c, idx) for c in cands if c)
+        hit = next((s for s in (match_tex_stem(c, idx) for c in cands if c)
                     if s is not None), None)
         if hit is None:
             wanted = sorted({Path(str(m.texture).replace(chr(92), '/')).stem.lower()

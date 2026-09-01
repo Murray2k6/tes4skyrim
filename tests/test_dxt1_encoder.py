@@ -1,6 +1,6 @@
 """DXT1 terrain-texture encoder: identical output, bounded memory.
 
-`_encode_dxt1_quality` builds an (N,16,4,3) difference array to pick each
+`encode_dxt1_quality` builds an (N,16,4,3) difference array to pick each
 pixel's nearest palette entry. Whole-array, that is ~148 MB peak for a 1024²
 tile — and `sum` promotes int32 to int64, so half of it is pure waste. One
 worker survives it; 29 do not. The one-bake LOD model made every worker's
@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import terrain_lod as T
+from asset_convert.lod import terrain_lod as T
 
 
 def _reference(img):
@@ -73,14 +73,14 @@ def _img(shape, seed=1234):
                                  (256, 1, 3))),
 ])
 def test_output_is_byte_identical(name, img):
-    assert T._encode_dxt1_quality(img) == _reference(img), (
+    assert T.encode_dxt1_quality(img) == _reference(img), (
         f"{name}: chunking changed the encoded bytes")
 
 
 def test_encodes_exactly_8_bytes_per_4x4_block():
     """DXT1 is 8 bytes per block; a short buffer is a corrupt .dds."""
     img = _img((64, 64, 3))
-    assert len(T._encode_dxt1_quality(img)) == (64 // 4) * (64 // 4) * 8
+    assert len(T.encode_dxt1_quality(img)) == (64 // 4) * (64 // 4) * 8
 
 
 def test_peak_memory_stays_bounded():
@@ -93,7 +93,7 @@ def test_peak_memory_stays_bounded():
     img = _img((1024, 1024, 3))
     tracemalloc.start()
     try:
-        T._encode_dxt1_quality(img)
+        T.encode_dxt1_quality(img)
         _cur, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()

@@ -16,9 +16,9 @@ MASTER-EXPORT AWARENESS
 
 import os
 
-from asset_convert.hair_pipeline import (collect_hair_usage, hair_genders,
+from asset_convert.character.hair_pipeline import (collect_hair_usage, hair_genders,
                                          quantize_length, source_tri_exists,
-                                         _iter_records)
+                                         iter_records)
 
 # hair FormID -> sorted tuple of length buckets needed
 _BUCKETS: dict = {}
@@ -50,7 +50,7 @@ def load(export_dir, master_dirs=()) -> dict:
         if not d:
             continue
         npc_txt = os.path.join(str(d), 'NPC_.txt')
-        for fid, buckets in collect_hair_usage(_iter_records(npc_txt)).items():
+        for fid, buckets in collect_hair_usage(iter_records(npc_txt)).items():
             usage.setdefault(fid, set()).update(buckets)
 
     _BUCKETS.clear()
@@ -68,7 +68,7 @@ def load(export_dir, master_dirs=()) -> dict:
     for d in [export_dir] + list(master_dirs or ()):
         if not d:
             continue
-        for rec in _iter_records(os.path.join(str(d), 'HAIR.txt')):
+        for rec in iter_records(os.path.join(str(d), 'HAIR.txt')):
             raw = (rec.get('FormID') or '').strip()
             try:
                 fid = int(raw, 16)

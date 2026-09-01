@@ -1,6 +1,6 @@
 # 7-Zip — bundled console binary
 
-Used by `asset_convert/archive.py` to read mod archives (`.zip`, `.7z`, `.rar`)
+Used by `asset_convert/sources/archive.py` to read mod archives (`.zip`, `.7z`, `.rar`)
 during **Mods ▸ Import Mod Archive…** / `convert.py --import-mod`.
 
 | File | Size | Purpose |

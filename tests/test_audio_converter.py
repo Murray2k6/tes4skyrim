@@ -1,4 +1,4 @@
-"""Tests for asset_convert.audio_converter.
+"""Tests for asset_convert.audio.audio_converter.
 
 Tests cover:
   - find_ffmpeg(): detection on PATH vs missing
@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from asset_convert.audio_converter import (
-    _FONIX_MUTEX_NAME,
-    _TES4_VOICE_TYPE_MAP,
-    _VOICE_FILENAME_RE,
+from asset_convert.audio.audio_converter import (
+    FONIX_MUTEX_NAME,
+    TES4_VOICE_TYPE_MAP,
+    VOICE_FILENAME_RE,
     build_lipgen_pool,
     convert_file_to_xwm,
     convert_sounds,
@@ -285,7 +285,7 @@ def test_organize_voice_files_generates_fuz(tmp_path):
     with no transcript stays .xwm."""
     plugin = 'Test.esm'
     # BSA archives store every internal path lowercase (see
-    # asset_convert/audio_converter.py's organize_voice_files) -- the source
+    # asset_convert/audio/audio_converter.py's organize_voice_files) -- the source
     # fixture must match, the destination stays 'Voice' (our own convention).
     voice_src = tmp_path / 'extract' / 'sound' / 'voice' / plugin / 'Nord' / 'M'
     voice_src.mkdir(parents=True, exist_ok=True)
@@ -317,7 +317,7 @@ def test_organize_voice_files_generates_fuz(tmp_path):
 def _make_fake_lipgen(dir_path: Path, mutex_count: int = 1) -> Path:
     """Write a fake LipGenerator.exe + FonixData.cdf into *dir_path*."""
     dir_path.mkdir(parents=True, exist_ok=True)
-    blob = b'MZ fake exe ' + (_FONIX_MUTEX_NAME + b'\x00junk') * mutex_count \
+    blob = b'MZ fake exe ' + (FONIX_MUTEX_NAME + b'\x00junk') * mutex_count \
         + b' tail bytes'
     exe = dir_path / 'LipGenerator.exe'
     exe.write_bytes(blob)
@@ -334,7 +334,7 @@ def test_build_lipgen_pool_patches_unique_mutex_names(tmp_path):
     for p in pool:
         p = Path(p)
         data = p.read_bytes()
-        assert _FONIX_MUTEX_NAME not in data
+        assert FONIX_MUTEX_NAME not in data
         assert len(data) == exe.stat().st_size, 'patch must not change size'
         m = data[data.find(b'FonixMemMtx_'):][:16]
         assert len(m) == 16
@@ -370,7 +370,7 @@ def test_build_lipgen_pool_real_exe(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _VOICE_FILENAME_RE
+# VOICE_FILENAME_RE
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize('name,expected', [
@@ -382,7 +382,7 @@ def test_build_lipgen_pool_real_exe(tmp_path):
     ('tooShort_abc_1.mp3',                    None),
 ])
 def test_voice_filename_re(name, expected):
-    m = _VOICE_FILENAME_RE.match(name)
+    m = VOICE_FILENAME_RE.match(name)
     if expected is None:
         assert m is None, f'Expected no match for {name!r}'
     else:
@@ -394,7 +394,7 @@ def test_voice_filename_re(name, expected):
 
 
 # ---------------------------------------------------------------------------
-# _TES4_VOICE_TYPE_MAP
+# TES4_VOICE_TYPE_MAP
 # ---------------------------------------------------------------------------
 
 def test_voice_type_map_has_standard_races():
@@ -402,13 +402,13 @@ def test_voice_type_map_has_standard_races():
     races = ['Argonian', 'Breton', 'DarkElf', 'HighElf', 'Imperial',
              'Khajiit', 'Nord', 'Orc', 'Redguard', 'WoodElf']
     for race in races:
-        assert (race, 'M') in _TES4_VOICE_TYPE_MAP
-        assert (race, 'F') in _TES4_VOICE_TYPE_MAP
+        assert (race, 'M') in TES4_VOICE_TYPE_MAP
+        assert (race, 'F') in TES4_VOICE_TYPE_MAP
 
 
 def test_voice_type_map_includes_shivering_isles_races():
-    assert ('DarkSeducer', 'M') in _TES4_VOICE_TYPE_MAP
-    assert ('GoldenSaint', 'F') in _TES4_VOICE_TYPE_MAP
+    assert ('DarkSeducer', 'M') in TES4_VOICE_TYPE_MAP
+    assert ('GoldenSaint', 'F') in TES4_VOICE_TYPE_MAP
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +421,7 @@ def test_organize_voice_files_basic(tmp_path):
     plugin = 'Test.esm'
     # Build TES4 voice layout: sound/Voice/<plugin>/Nord/M/<topic>_<fid>_0.wav
     # BSA archives store every internal path lowercase (see
-    # asset_convert/audio_converter.py's organize_voice_files) -- the source
+    # asset_convert/audio/audio_converter.py's organize_voice_files) -- the source
     # fixture must match, the destination stays 'Voice' (our own convention).
     voice_src = tmp_path / 'extract' / 'sound' / 'voice' / plugin / 'Nord' / 'M'
     voice_src.mkdir(parents=True, exist_ok=True)
@@ -452,7 +452,7 @@ def test_organize_voice_files_uses_voice_map(tmp_path):
     actually look up (converted owning-quest + topic EditorIDs)."""
     plugin = 'Test.esm'
     # BSA archives store every internal path lowercase (see
-    # asset_convert/audio_converter.py's organize_voice_files) -- the source
+    # asset_convert/audio/audio_converter.py's organize_voice_files) -- the source
     # fixture must match, the destination stays 'Voice' (our own convention).
     voice_src = tmp_path / 'extract' / 'sound' / 'voice' / plugin / 'Nord' / 'M'
     voice_src.mkdir(parents=True, exist_ok=True)
@@ -483,7 +483,7 @@ def test_organize_voice_files_prunes_renamed_leftovers(tmp_path):
     """
     plugin = 'Test.esm'
     # BSA archives store every internal path lowercase (see
-    # asset_convert/audio_converter.py's organize_voice_files) -- the source
+    # asset_convert/audio/audio_converter.py's organize_voice_files) -- the source
     # fixture must match, the destination stays 'Voice' (our own convention).
     voice_src = tmp_path / 'extract' / 'sound' / 'voice' / plugin / 'Nord' / 'M'
     voice_src.mkdir(parents=True, exist_ok=True)
@@ -529,7 +529,7 @@ def test_organize_voice_files_prune_scope(tmp_path):
     """
     plugin = 'Test.esm'
     # BSA archives store every internal path lowercase (see
-    # asset_convert/audio_converter.py's organize_voice_files) -- the source
+    # asset_convert/audio/audio_converter.py's organize_voice_files) -- the source
     # fixture must match, the destination stays 'Voice' (our own convention).
     voice_src = tmp_path / 'extract' / 'sound' / 'voice' / plugin / 'Nord' / 'M'
     voice_src.mkdir(parents=True, exist_ok=True)
@@ -564,7 +564,7 @@ def test_organize_voice_files_no_match_counted(tmp_path):
     """Files that don't match the voice filename pattern are counted as no_match."""
     plugin = 'Test.esm'
     # BSA archives store every internal path lowercase (see
-    # asset_convert/audio_converter.py's organize_voice_files) -- the source
+    # asset_convert/audio/audio_converter.py's organize_voice_files) -- the source
     # fixture must match, the destination stays 'Voice' (our own convention).
     voice_src = tmp_path / 'extract' / 'sound' / 'voice' / plugin / 'Nord' / 'M'
     voice_src.mkdir(parents=True, exist_ok=True)

@@ -57,7 +57,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from tools.live.game_bridge import Bridge  # noqa: E402
+from tools.live.game_bridge import Bridge
 
 LOOKUP_BY_ID = 14617           # TESForm::LookupByID stable id
 NO_VALUE = -3.4028234663852886e+38

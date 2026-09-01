@@ -20,8 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from asset_convert import collision as C  # noqa: E402
-from pyffi.formats.nif import NifFormat  # noqa: E402
+from asset_convert.collision import collision as C
+from pyffi.formats.nif import NifFormat
 
 
 def _matrix(vals):

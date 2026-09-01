@@ -8,7 +8,7 @@ texture tree every run — and only shows in game as untextured terrain.
 
 import re
 
-from asset_convert import texture_prune as tp
+from asset_convert.texture import texture_prune as tp
 
 
 def _write(tmp_path, name, body):
@@ -137,7 +137,7 @@ class TestPackTimeFilter:
         return tmp_path
 
     def test_unreferenced_texture_is_left_out_of_the_archive(self, tmp_path):
-        from asset_convert import bsa_pack
+        from asset_convert.sources import bsa_pack
         plugin = self._tree(tmp_path)
         keep = {'tes4/landscape/kept.dds'}
 
@@ -148,7 +148,7 @@ class TestPackTimeFilter:
 
     def test_the_filter_never_deletes_from_output(self, tmp_path):
         """Loose-file testing must keep the full tree."""
-        from asset_convert import bsa_pack
+        from asset_convert.sources import bsa_pack
         plugin = self._tree(tmp_path)
         bsa_pack._collect_files(plugin, ['textures'],
                                 {'tes4/landscape/kept.dds'})
@@ -160,7 +160,7 @@ class TestPackTimeFilter:
 
     def test_no_keep_set_packs_everything(self, tmp_path):
         """Without an export dir the filter is off — never guess."""
-        from asset_convert import bsa_pack
+        from asset_convert.sources import bsa_pack
         plugin = self._tree(tmp_path)
 
         staged = bsa_pack._collect_files(plugin, ['textures'], None)
@@ -168,7 +168,7 @@ class TestPackTimeFilter:
 
     def test_non_texture_dirs_are_never_filtered(self, tmp_path):
         """The keep-set is about textures/ only; meshes/ passes through."""
-        from asset_convert import bsa_pack
+        from asset_convert.sources import bsa_pack
         plugin = self._tree(tmp_path)
 
         staged = bsa_pack._collect_files(plugin, ['meshes'], set())
@@ -177,7 +177,7 @@ class TestPackTimeFilter:
 
 
 class TestBinaryTextureScan:
-    r"""`_texture_refs_in` replaced a lazy-star regex; it must match it exactly.
+    r"""`texture_refs_in` replaced a lazy-star regex; it must match it exactly.
 
     The old pattern was `[A-Za-z0-9_\\/ .()&+-]{3,200}?\.dds` (IGNORECASE).
     Lazy + leftmost means it took the longest legal run ending at each `.dds`,
@@ -201,7 +201,7 @@ class TestBinaryTextureScan:
         return {tp._norm(m) for m in matches} - {''}
 
     def _assert_same(self, raw):
-        assert self._keys(tp._texture_refs_in(raw)) == \
+        assert self._keys(tp.texture_refs_in(raw)) == \
             self._keys(self._OLD_RE.findall(raw)), raw[:80]
 
     def test_matches_the_old_regex_on_realistic_blobs(self):
@@ -222,13 +222,13 @@ class TestBinaryTextureScan:
     def test_adjacent_paths_do_not_bleed_into_each_other(self):
         """Non-overlapping, exactly like finditer."""
         raw = rb'first\a01.dds' + rb'second\b02.dds'
-        keys = self._keys(tp._texture_refs_in(raw))
+        keys = self._keys(tp.texture_refs_in(raw))
         assert keys == self._keys(self._OLD_RE.findall(raw))
         assert len(keys) == 2
 
     def test_a_run_longer_than_the_cap_matches_the_regex(self):
         """{3,200} counts the run BEFORE '.dds' — the match runs to 204."""
         raw = b'x' * 400 + b'.dds'
-        got = tp._texture_refs_in(raw)
+        got = tp.texture_refs_in(raw)
         assert len(got[0]) == 204
         self._assert_same(raw)

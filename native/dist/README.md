@@ -6,7 +6,7 @@ it have no C++ compiler:
 | Artifact | Kind | Source | Used by |
 |---|---|---|---|
 | `_navgrow_native.<abi>.pyd` | Python extension (64-bit) | `../src/navgrow/grow.cpp` | `navmesh.corridor_grow` (Phase-2 width march) and `navmesh.corridor_union` (per-vertex surface levels) |
-| `spt_engine_dump.exe` | standalone program (**32-bit**) | `../src/spt_engine/` | `asset_convert.spt_engine_geom` — the SpeedTree engine-branch path (`--engine-branches`) |
+| `spt_engine_dump.exe` | standalone program (**32-bit**) | `../src/spt_engine/` | `asset_convert.speedtree.spt_engine_geom` — the SpeedTree engine-branch path (`--engine-branches`) |
 
 Build everything with:
 

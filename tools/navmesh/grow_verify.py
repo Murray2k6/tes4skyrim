@@ -22,7 +22,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tes5_import.navmesh import corridor_grow as cg, params  # noqa: E402
+from tes5_import.navmesh import corridor_grow as cg, params
 
 
 def make_world(rng):

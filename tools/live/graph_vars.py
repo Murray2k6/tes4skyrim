@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tools.live.game_bridge import Bridge, BridgeError  # noqa: E402
+from tools.live.game_bridge import Bridge, BridgeError
 
 LOOKUP_BY_ID = 14617
 
@@ -119,7 +119,7 @@ def behavior_graph(b: Bridge, m: Mem, actor: int) -> int:
 def variable_names(creature_dir: str) -> list[str]:
     """Declaration order from OUR generator (hkx_behavior.graph_variables),
     which is exactly the order the shipped graph declares them in."""
-    from asset_convert.hkx_behavior import (classify_clips, graph_variables,
+    from asset_convert.havok.hkx_behavior import (classify_clips, graph_variables,
                                             movement_type_names)
     clips = classify_clips(creature_dir)
     name = Path(creature_dir).name

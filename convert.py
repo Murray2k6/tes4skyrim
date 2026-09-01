@@ -167,7 +167,7 @@ def resolve_plugin_path(file_name: str, tes4_data: str,
                         export_dir: str = None) -> str:
     """Absolute path to a plugin's TES4 binary.
 
-    A plugin imported from a mod archive (see `asset_convert/mod_ingest.py`)
+    A plugin imported from a mod archive (see `asset_convert/sources/mod_ingest.py`)
     keeps its binary at `export/<plugin>/_source/<plugin>` and is registered in
     `export/sources.json`; anything else lives in the Oblivion Data directory
     exactly as it always has.
@@ -178,7 +178,7 @@ def resolve_plugin_path(file_name: str, tes4_data: str,
     """
     export_dir = export_dir or str(SCRIPT_DIR / "export")
     try:
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
         imported = source_registry.plugin_binary(export_dir, file_name)
         if imported:
             return str(imported)
@@ -195,7 +195,8 @@ def _mod_commands(args, export_dir: str, tes4_data: str) -> int:
     These manage conversion SOURCES rather than converting anything, so they
     never touch the pipeline.
     """
-    from asset_convert import mod_ingest, source_registry
+    from asset_convert.sources import mod_ingest
+    from asset_convert.sources import source_registry
 
     if args.list_mods:
         groups = source_registry.groups(export_dir)
@@ -315,7 +316,7 @@ def _mod_commands(args, export_dir: str, tes4_data: str) -> int:
     # fallback never saw it and --base silently did nothing for any mod
     # that ships a plugin.  asset_root_name reads the registry entry the
     # ingest above just wrote, so it is right on the cached path too.
-    from asset_convert import source_registry as _sr
+    from asset_convert.sources import source_registry as _sr
     _asset_tree = _sr.asset_root_name(export_dir, first)
     _write_base_plugins(export_dir, _asset_tree, args.base)
     print()
@@ -343,7 +344,7 @@ def _is_asset_only(file_name: str, export_dir: str) -> bool:
     have no binary to read and are skipped rather than failed.
     """
     try:
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
         entry = source_registry.get(export_dir, file_name)
     except Exception:
         return False
@@ -469,7 +470,7 @@ def _write_base_plugins(export_dir, name, bases):
     """
     if not bases:
         return
-    from asset_convert.nif_converter import BASE_PLUGINS_FILE
+    from asset_convert.nif.nif_converter import BASE_PLUGINS_FILE
     d = Path(export_dir) / name / '_source'
     d.mkdir(parents=True, exist_ok=True)
     (d / BASE_PLUGINS_FILE).write_text('\n'.join(bases) + '\n',
@@ -489,7 +490,7 @@ def _missing_master_exports(results, export_dir: str, tes4_data: str) -> dict:
     so a plugin mastering a resource pack's ESM reported every one of its
     masters as missing while they sat converted one level down.
     """
-    from asset_convert import source_registry
+    from asset_convert.sources import source_registry
 
     missing = {}
     for name in results:
@@ -631,9 +632,9 @@ def phase_extract(file_name: str, tes4_data: str, config: dict,
     """
     extract_dir = str(SCRIPT_DIR / "export")
 
-    from asset_convert import source_registry
+    from asset_convert.sources import source_registry
     if source_registry.get(extract_dir, file_name):
-        from asset_convert import mod_ingest
+        from asset_convert.sources import mod_ingest
         print(f"[{file_name}] Re-importing mod archive...")
         try:
             mod_ingest.reingest(file_name, extract_dir)
@@ -696,23 +697,23 @@ def phase_assets(file_name: str, config: dict, output_dir: str = None,
     print(f"[{file_name}] Meshes complete ({total} items processed)")
 
     # Book inventory-art: bake each distinct BOOK model's textures onto the
-    # vanilla Skyrim reading rigs (see asset_convert/book_inam.py); the import
+    # vanilla Skyrim reading rigs (see asset_convert/ui/book_inam.py); the import
     # phase points each BOOK's INAM at meshes\tes4\clutter\books\inv\<base>.nif
     if textures_only:
         print(f"[{file_name}] Textures only: no meshes, no book art "
               f"(PGPatcher patches the meshes in the load order)")
         return True
 
-    from asset_convert.book_inam import generate_book_inams
+    from asset_convert.ui.book_inam import generate_book_inams
 
     _, tes5_data = get_paths(config)
     print(f"[{file_name}] Generating book inventory-art meshes...")
     # A plugin places its MASTERS' book models too, and those meshes/textures
     # were extracted into the master's export dir only.
-    # base_plugins, not terrain_lod's _master_names: the latter reads only
+    # base_plugins, not terrain_lod's master_names: the latter reads only
     # _HEADER.txt, which an asset-only merge does not have, so its books
     # would find no BOOK records and ship no inventory art at all.
-    from asset_convert import base_plugins as _bp
+    from asset_convert.sources import base_plugins as _bp
     bstats = generate_book_inams(
         source_file=file_name,
         extract_dir=extract_dir,
@@ -770,7 +771,7 @@ def phase_creatures(file_name: str, tes5_data: str, config: dict,
     export/<name>/creature_projects.json to generate RACE/ARMA/ARMO chains.
     NPC_ humanoids are unaffected (they keep the Skyrim race overrides).
     """
-    from asset_convert.creature_pipeline import convert_creatures
+    from asset_convert.havok.creature_pipeline import convert_creatures
 
     export_root = str(SCRIPT_DIR / "export")
     export_subdir = str(record_dir(export_root, file_name))
@@ -784,11 +785,11 @@ def phase_creatures(file_name: str, tes5_data: str, config: dict,
     # The animation singlefiles are ONE shared file in Data. A child plugin
     # registers its creatures in its MASTER's copy rather than shipping a
     # rival copy of its own (see _shared_singlefile_dir).
-    from asset_convert.terrain_lod import _master_names
+    from asset_convert.lod.terrain_lod import master_names
     # A master's OUTPUT folder is its mod's folder for an imported mod, so
     # resolve it the same way the export side does.
     master_dirs = [plugin_out_root(out_root, m, export_root)
-                   for m in _master_names(Path(export_subdir))
+                   for m in master_names(Path(export_subdir))
                    if plugin_out_root(out_root, m, export_root).is_dir()]
 
     print(f"[{file_name}] Converting creatures (behavior projects + meshes)...")
@@ -898,7 +899,7 @@ def phase_sounds(file_name: str, config: dict, output_dir: str = None):
     # single --sounds-only rebuilds both.  It writes music_tracks.json, which
     # the importer reads to build MUST/MUSC, so it must run before --import-only
     # for the records to name real files.
-    from asset_convert.music_convert import convert_music
+    from asset_convert.audio.music_convert import convert_music
     print(f"[{file_name}] Converting music to xWMA...")
     mstats = convert_music(
         source_file=file_name,
@@ -1366,7 +1367,7 @@ def phase_pack(file_name: str, config: dict, output_dir: str = None):
     Textures nothing references are filtered out as the archive is staged, so
     output/ keeps the full loose tree for testing (see bsa_pack).
     """
-    from asset_convert.bsa_pack import pack_bsas
+    from asset_convert.sources.bsa_pack import pack_bsas
 
     out_dir = output_dir or str(SCRIPT_DIR / "output")
     bsarch  = config.get("bsarchPath") or None
@@ -1535,7 +1536,7 @@ def _run_pipeline():
                         help="Skyrim plugin filenames to generate a slot-44 "
                              "patch for (e.g. Skyrim.esm Dawnguard.esm). "
                              "Default: Skyrim.esm only.")
-    # The INFERRED collision winding steps (asset_convert/collision.py steps
+    # The INFERRED collision winding steps (asset_convert/collision/collision.py steps
     # 1-3). The authored-normal repair (step 0) is always on and this flag does
     # not touch it. Tri-state: the flag forces the inferred steps on, --no-
     # forces them off, and unspecified (None) defers to the per-plugin default
@@ -1554,7 +1555,7 @@ def _run_pipeline():
                          action="store_false", default=None,
                          help="Disable the inferred winding steps (the "
                               "authored-normal repair still runs).")
-    # Parallax (asset_convert/parallax.py). Deliberately opt-in and NOT a
+    # Parallax (asset_convert/texture/parallax.py). Deliberately opt-in and NOT a
     # per-plugin default: a correct parallax shape renders wrong under vanilla
     # SSE, and the converter cannot tell what the player will run it under.
     parser.add_argument("--parallax", action="store_true",

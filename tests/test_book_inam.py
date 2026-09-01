@@ -1,4 +1,4 @@
-"""Tests for asset_convert/book_inam.py (INAM reading-rig generation).
+"""Tests for asset_convert/ui/book_inam.py (INAM reading-rig generation).
 
 The calibration/bake layers are exercised hermetically on synthetic geometry;
 the end-to-end template path only runs when a references clone of the Skyrim
@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from asset_convert.book_inam import (
+from asset_convert.ui.book_inam import (
     CANVAS,
     Calibration,
     Island,
@@ -21,7 +21,7 @@ from asset_convert.book_inam import (
     calibrate,
     inv_basename,
     write_dds,
-    _bbox_fit,
+    bbox_fit,
 )
 
 REFS = os.path.join(os.path.dirname(__file__), '..', 'references', 'Skyrim Meshes')
@@ -164,7 +164,7 @@ def test_bake_sheet_is_uv_space_copy():
                   [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)])
     obl = calibrate([_merge([sheet], 'textures\\t\\s.dds')])
     assert obl.kind == 'sheet'
-    tpl = Calibration('sheet', cover=_bbox_fit((0, 0), (1, 1)))
+    tpl = Calibration('sheet', cover=bbox_fit((0, 0), (1, 1)))
     src = _gradient_img()
     atlas = bake_atlas(obl, tpl, src, None)
     # left edge of atlas = left edge of source (red channel low), even though
@@ -200,7 +200,7 @@ def test_inv_basename():
 
 @pytest.mark.skipif(not os.path.isdir(REFS), reason='Skyrim meshes refs not present')
 def test_template_calibration():
-    from asset_convert.book_inam import (
+    from asset_convert.ui.book_inam import (
         BOOK_TEMPLATE, NOTE_TEMPLATE, calibrate_book_template,
         calibrate_note_template, read_shapes)
     book = calibrate_book_template(

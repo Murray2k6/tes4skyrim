@@ -1,6 +1,6 @@
-# asset_convert/creature_pipeline.py - creature conversion
+# asset_convert/havok/creature_pipeline.py - creature conversion
 
-**Code:** `asset_convert/collision.py`, `asset_convert/hkx_ragdoll.py`, `asset_convert/animation_data.py`, `tes5_import/creature_races.py`
+**Code:** `asset_convert/collision/collision.py`, `asset_convert/havok/hkx_ragdoll.py`, `asset_convert/havok/animation_data.py`, `tes5_import/creature_races.py`
 
 ## Contents
 
@@ -154,7 +154,7 @@ output.
 | pynifly hkx codec (VENDORED) | `external/pynifly_hkx/` (from PyNifly 27.4.0; format docs remain at `references/PyNifly-27.4.0/docs/hkx_*.md`) | hk_2010 packfile READER (validator) + hkaSplineCompressedAnimation COMPRESSOR (used by hkx_anim.py). Its binary WRITER is bypassed — output crashes real Havok deserializers. Zero Oblivion support — Oblivion side stays on PyFFI. |
 | hkxcmd.exe (VENDORED) | `external/hkxcmd/hkxcmd.exe` | XML↔binary hkx compiler (real Havok serializer — owns all binary layout), verified byte-identical round-trip; EXPORTKF for studying vanilla clips. GOTCHAS: crashes on forward-slash paths; its CONVERTKF compressor is unusably lossy (debug only). |
 | niftools addon | `.../blender_niftools_addon-master/io_scene_niftools/` | Oblivion KF/skeleton semantics: Bip01 X-forward convention, string-palette targeting, B-spline API shape (`get_times()/get_translations()/…`), bhkBlendController layout |
-| Our pipeline | `tools/generators/kf_animation_explorer.py` (KF parse, palette resolve, FK math — **skips B-splines**), `asset_convert/collision.py` (OB→SK bhk + ragdoll constraint conversion), `nif_converter.py` (`_resolve_palette_strings`, version upgrade), `skin_retarget.py` (NOT needed for creatures — see §4 Step 3) | Most machinery exists |
+| Our pipeline | `tools/generators/kf_animation_explorer.py` (KF parse, palette resolve, FK math — **skips B-splines**), `asset_convert/collision/collision.py` (OB→SK bhk + ragdoll constraint conversion), `nif_converter.py` (`_resolve_palette_strings`, version upgrade), `skin_retarget.py` (NOT needed for creatures — see §4 Step 3) | Most machinery exists |
 | LE archives (more) | `D:\SteamLibrary\steamapps\common\Skyrim\Data\` (`Update.bsa` has animation fixes; Meshes/Misc as needed) | Additional reference data |
 
 ### Remaining gaps (action items)
@@ -175,21 +175,21 @@ output.
 The whole chain is implemented and wired as pipeline **Phase 4b: Creatures**
 (`python convert.py -f X --creatures-only`, GUI step "5. Creatures"):
 
-- `asset_convert/creature_pipeline.py` — orchestrator: per creature folder →
+- `asset_convert/havok/creature_pipeline.py` — orchestrator: per creature folder →
   behavior project (`hkx_behavior.generate_creature_project`) + skeleton.nif/
   body-NIF conversion (`nif_converter creature=True`) + animation singlefile
   registration (`animation_data.write_singlefiles`) + the
   `export/<plugin>/creature_projects.json` contract for the importer.
   32/32 real Oblivion.esm creatures convert (boxtest/endgame excluded: test
   asset / KFM cinematic).
-- `asset_convert/animation_data.py` — animationdata + boundanims +
+- `asset_convert/havok/animation_data.py` — animationdata + boundanims +
   animationsetdata emission and the **singlefile merge** (vanilla base
   auto-extracted from the user's `Skyrim - Animations.bsa`, LE v104 zlib or
   SSE v105 LZ4, cached in `export/animdata_base/`). Grammar + the
   Bethesda hash (crc32 init=0/xorout=0 of lowercase; ≤4-char strings stored
   as packed ASCII — `hkx` = 7891816; dirs hashed WITH `meshes\` prefix)
   byte-validated against the vanilla files.
-- `asset_convert/hkx_ragdoll.py` — the ragdoll stage inside skeleton.hkx:
+- `asset_convert/havok/hkx_ragdoll.py` — the ragdoll stage inside skeleton.hkx:
   Oblivion `bhkBlendCollisionObject` bodies + ragdoll/hinge constraints →
   ragdoll hkaSkeleton + 2 hkaSkeletonMappers + hkpPhysicsData +
   hkaRagdollInstance (vanilla deer anatomy; GAME units — ob-havok ×7;
@@ -335,13 +335,13 @@ hkx total, and both in vanilla's range for a comparable creature.
 **Symptom:** dead creatures are nearly immovable — havok-grabbing a limb moves
 it only slightly, on EVERY ragdoll.
 
-**Cause:** `extract_ragdoll` scaled every LENGTH by `_OB_TO_GAME` (7) but
+**Cause:** `extract_ragdoll` scaled every LENGTH by `OB_TO_GAME` (7) but
 carried Oblivion's authored **mass** through untouched. Oblivion tunes mass
 against Oblivion-scale lengths, and Havok's rotational inertia goes as
 `mass * length^2`, so unconverted mass inflates resistance-to-rotation by 49x
 versus what the animators tuned.
 
-**Fix:** divide mass by 7 (`_OB_MASS_DIV = _OB_TO_GAME`). Inertia is computed
+**Fix:** divide mass by 7 (`_OB_MASS_DIV = OB_TO_GAME`). Inertia is computed
 from mass in `_capsule_inertia`, so it follows automatically. Matched-pair
 landing (total mass, ours vs closest vanilla creature): dog 262 -> 37.4 vs wolf
 29; rat 271 -> 38.7 vs skeever 60; lion 501 -> 71.6 vs sabrecat 245; minotaur
@@ -666,7 +666,7 @@ collision. Two vanilla-parity gaps compounded it — ours emitted every body
 inertia on the ~4 round bodies: the COM/torso hub and the tiny leg-tip caps),
 and the anisotropy was unbounded.
 
-**Fix (`asset_convert/hkx_ragdoll.py`):**
+**Fix (`asset_convert/havok/hkx_ragdoll.py`):**
 - `_capsule_inertia(shape, mass)` computes each body's tensor analytically
   from its capsule (solid cylinder + two hemisphere caps) instead of trusting
   Oblivion's diagonal.
@@ -731,7 +731,7 @@ each attack play the NEXT attack's file and the run gait play the
 aware-vocal clip. `motion_block_lines` had the same bug — root-motion
 blocks are keyed by animation index, one per FILE, not one per clip.
 
-Fixed by `_anim_file_index()` (mirrors the character emitter's
+Fixed by `anim_file_index()` (mirrors the character emitter's
 `dict.fromkeys` dedupe exactly). **Audit with
 `python tools/validate/animdata_index_check.py`** after touching `animation_data.py`,
 `clip_meta` composition, or the character animation list; the older
@@ -748,7 +748,7 @@ present under every experiment of that period.
 ### The SAME out-of-range symptom from PLUGIN COLLISION (2026-08-10)
 
 `animdata_index_check` can report out-of-range indices even when
-`_anim_file_index()` is perfectly correct, because the block and the character
+`anim_file_index()` is perfectly correct, because the block and the character
 hkx are chosen by **different** mechanisms:
 
 - Every plugin deploys its creatures LOOSE to the same
@@ -1065,7 +1065,7 @@ correct and ship unchanged:
    reverted; revisit only with in-game evidence that authored capsules are
    too thin to activate (they match what Oblivion shipped, and the
    "radius 0.5, 40× too small" claim was a units error — 0.54 ob-havok
-   units × `_OB_TO_GAME`(7) = 3.8 game units).
+   units × `OB_TO_GAME`(7) = 3.8 game units).
 
 **Frame contracts (the traps that made both wrong fixes easy to write):**
 - Blend body `rb.translation`/`rotation` are BIND WORLD; capsule
@@ -1161,12 +1161,12 @@ hardest humanoid-pipeline problem (rest-pose retarget) from the creature path en
     no-basis-data interpolators (bowidle.kf) = static pose;
     `NiBSplineCompFloatInterpolator` (bone stretch) dropped; `-3.4e38` sentinel = rest
     pose (already handled).
-4.2 New `asset_convert/kf_decode.py`: per KF emit uniform 30 fps sampled local transforms
+4.2 New `asset_convert/havok/kf_decode.py`: per KF emit uniform 30 fps sampled local transforms
     per target bone (NiStringPalette resolution as in kf_animation_explorer), text keys,
     cycle type, duration. **Root motion split**: the sampled `Bip01 NonAccum` (and root
     `Bip01`) translation/rotation is extracted into a root-motion curve (→ boundanims,
     Step 6) and removed from the in-hkx track (Skyrim clips are in-place).
-4.3 **Write HKX** — IMPLEMENTED (`asset_convert/hkx_anim.py`, 2026-07-08): no bone
+4.3 **Write HKX** — IMPLEMENTED (`asset_convert/havok/hkx_anim.py`, 2026-07-08): no bone
     retargeting needed (our own skeleton). Winning path after testing all three:
     tracks → pynifly's `_compress_all_blocks` spline compressor (vendored
     `external/pynifly_hkx/`) → hkaSplineCompressedAnimation as packfile XML
@@ -1313,7 +1313,7 @@ stack (simplest quadruped) with the draugr/troll stacks as bipedal references:
   in-game testing before generalizing.
 
 ### Step 6 — animationdata / animationsetdata emission + merge — DONE
-`asset_convert/animation_data.py`. Grammar notes that cost real digging:
+`asset_convert/havok/animation_data.py`. Grammar notes that cost real digging:
 - animationdatasinglefile = N + names + per project `[linecount, block]`,
   where a `[linecount, motion block]` pair follows ONLY when the flag line
   AFTER the project-file list (NOT line 1) is "1". Validated by a full walk
@@ -1407,19 +1407,19 @@ creature is fully proven.
   BSXFlags=198) — creatures have NO separate ragdoll hkx (deer verified).
 - Because we keep the Oblivion skeleton, body meshes need NO reskin/retarget — bone
   names/weights/bind matrices stay valid. `skin_retarget.py` is NOT used for creatures.
-- **`asset_convert/kf_decode.py`**: KF decode incl. B-spline, uniform 30fps sampling,
+- **`asset_convert/havok/kf_decode.py`**: KF decode incl. B-spline, uniform 30fps sampling,
   `split_root_motion` (locomotion accumulates on `Bip01` ITSELF, NonAccum static; turn
   anims carry root ROTATION, both extracted).
-- **`asset_convert/hkx_xml.py`**: hk_2010 packfile XML emitter + hkxcmd compile/decompile
+- **`asset_convert/havok/hkx_xml.py`**: hk_2010 packfile XML emitter + hkxcmd compile/decompile
   wrappers.
-- **`asset_convert/hkx_skeleton.py`**: skeleton.nif → minimal skeleton.hkx (hkaSkeleton
+- **`asset_convert/havok/hkx_skeleton.py`**: skeleton.nif → minimal skeleton.hkx (hkaSkeleton
   only; ragdoll stage handled separately, see below).
-- **`asset_convert/hkx_anim.py`**: THE animation path — DecodedClip → AnimationData →
+- **`asset_convert/havok/hkx_anim.py`**: THE animation path — DecodedClip → AnimationData →
   pynifly spline COMPRESSOR → packfile XML → hkxcmd `-v:WIN32`; validated 0.0000u/0.0000°
   vs source + hkxcmd deserializer-clean.
-- **`asset_convert/kf_writer.py`**: Skyrim-format KF writer + CONVERTKF wrapper — DEBUG
+- **`asset_convert/havok/kf_writer.py`**: Skyrim-format KF writer + CONVERTKF wrapper — DEBUG
   ONLY (see toolchain gotchas below; hkxcmd's spline compression is too lossy to ship).
-- **`asset_convert/hkx_behavior.py` (2026-07-08)**: full project generator —
+- **`asset_convert/havok/hkx_behavior.py` (2026-07-08)**: full project generator —
   `generate_creature_project(ob_creature_dir, name, out_root)` emits `actors/tes4/<name>/`
   with project/character/behavior hkx (XML templates copied from the vanilla deer dumps),
   skeleton.hkx, all converted animations, and `project_manifest.json` (clips, durations,
@@ -1431,7 +1431,7 @@ creature is fully proven.
   (RACE ATKE strings use the same, in creature_races.py). Dog validated: 20/20 generated
   hkx deserialize cleanly through hkxcmd (real Havok).
 - **CREATURE PIPELINE IS LIVE END-TO-END (2026-07-09)** — pipeline Phase 4b /
-  `--creatures-only` / GUI step "5. Creatures": `asset_convert/creature_pipeline.py`
+  `--creatures-only` / GUI step "5. Creatures": `asset_convert/havok/creature_pipeline.py`
   converts every creature folder → behavior project + converted skeleton.nif/body NIFs +
   animation singlefile registration + `export/<plugin>/creature_projects.json`. MUST run
   before import (Phase 0f consumes the json). `boxtest`+`endgame` are excluded (test asset
@@ -1464,7 +1464,7 @@ creature is fully proven.
   80 generated `TES4*Race` chains. Diagnose by diffing CREA model folders against `creature_projects.json`
   (`crea_project_gap.py` did this; removed 2026-08-25).
 - **animationdata/boundanims/animationsetdata + singlefile merge
-  (`asset_convert/animation_data.py`)**: the engine loads projects ONLY via merged
+  (`asset_convert/havok/animation_data.py`)**: the engine loads projects ONLY via merged
   `meshes/animationdatasinglefile.txt` + `animationsetdatasinglefile.txt`. Singlefile
   grammar: N + names + per-project `[linecount, block]`; a `[linecount, motion block]`
   pair follows ONLY when the flag line AFTER the project-file list (NOT line 1) is '1'
@@ -1477,7 +1477,7 @@ creature is fully proven.
   v103/104/105: v105 = 24-byte folder recs hash8+cnt4+unk4+off8 + LZ4-frame compression,
   embedded-name flag 0x100; layouts verified vs xEdit wbBSArchive.pas) and cached in
   `export/animdata_base/`. Always merge from the vanilla base → idempotent re-runs.
-- **Ragdoll stage in skeleton.hkx (`asset_convert/hkx_ragdoll.py`, 2026-07-09)**: Oblivion
+- **Ragdoll stage in skeleton.hkx (`asset_convert/havok/hkx_ragdoll.py`, 2026-07-09)**: Oblivion
   skeleton.nif bhkBlendCollisionObjects + ragdoll/limited-hinge/malleable(demoted)
   constraints → vanilla anatomy (ragdoll hkaSkeleton "Ragdoll_<bone>" + 2
   hkaSkeletonMappers + hkpPhysicsData/System + hkaRagdollInstance; the constraint graph is
@@ -1492,7 +1492,7 @@ creature is fully proven.
   bodies/capsules + 25 constraints compile + round-trip through real Havok.
 - **Creature mesh conversion (`nif_converter creature=True`)**: skinned bodies keep NiNode
   root + plain NiSkinInstance + ORIGINAL Oblivion bone names (no retarget — same
-  skeleton), NiSkinPartition regenerated in Skyrim tri format (`_regen_skin_partition`);
+  skeleton), NiSkinPartition regenerated in Skyrim tri format (`regen_skin_partition`);
   Prn-attached parts (doghead 'Prn'="Bip01 Head") get node transforms BAKED into verts
   (`_bake_node_transforms_into_verts` — skinning ignores node transforms and the head
   root carries a real rotation) then rigid plain-NiSkinInstance to the Oblivion bone
@@ -1781,13 +1781,13 @@ creature is fully proven.
   permuted order (constraints on the wrong bones — no crash, mangled corpse).
   Fix: `plan_ragdoll_tree` picks each body's parent as (1) its own authored
   joint to an earlier body, else (2) an earlier body's authored joint naming
-  it — the same joint with its ends exchanged (`_swap_joint_ends` /
+  it — the same joint with its ends exchanged (`swap_joint_ends` /
   `collision._reverse_constraint_ends`: frames and pivots swap, limits negate),
   else (3) a synthetic joint to the nearest body-carrying ancestor (fallback:
   the root). `extract_ragdoll` emits parts in NIF DFS order and
   `collision.enforce_ragdoll_tree` rebuilds every NIF body's constraint list to
   exactly that joint (extra authored joints dropped), so both files agree.
-  `_assert_ragdoll_invariants` rejects a parent index >= the child's.
+  `assert_ragdoll_invariants` rejects a parent index >= the child's.
   **The four earlier rounds (name-keyed anim-bone aliasing, duplicate bone
   names, zero-volume-body mass/radius floors, "the engine builds a powered
   constraint on a volumeless body") were NOT the crash** — each shipped and
@@ -1799,7 +1799,7 @@ creature is fully proven.
   (`extract_ragdoll`): the hkaSkeletonMapper keys parts by name.
   Alit's 12 `CollisionNode` (95%-scale
   duplicate capsule at mass 1e-4) / `EnableCollisions` (radius 0) pairs are
-  still dropped as collision-toggle proxies (`_is_marker_body`, applied on
+  still dropped as collision-toggle proxies (`is_marker_body`, applied on
   SOURCE units only — `nif_converter` strips them before collision conversion,
   and `enforce_ragdoll_tree` runs the plan with `exclude_markers=False`
   because azura's static bodies convert to mass 0). The alit is one creature
@@ -1921,7 +1921,7 @@ creature is fully proven.
   root/COM-level bones.
 - PyFFI 2.2.3 HAS B-spline helpers (get_times/get_translations/get_rotations/get_scales)
   but they return raw CONTROL POINTS (curve eval unimplemented per its docstring) — real
-  de Boor eval is in asset_convert/kf_decode.py, algorithm mirrored from NifSkope
+  de Boor eval is in asset_convert/havok/kf_decode.py, algorithm mirrored from NifSkope
   glcontroller.cpp (degree 3, clamped integer knots; dequant = short/32767*half_range
   +offset; interval v=(t-start)/(stop-start)*(nctrl-3)).
 - LE animation archive EXTRACTED to `references/Skyrim Animations/` (behavior projects,
@@ -1945,7 +1945,7 @@ creature is fully proven.
    `get_times/get_translations/get_rotations/get_scales` exist and dequantize correctly,
    but they return raw CONTROL POINTS (PyFFI's own docstring says curve evaluation is
    unimplemented). Proper cubic B-spline (de Boor) evaluation implemented in
-   `asset_convert/kf_decode.py` using NifSkope's exact algorithm (glcontroller.cpp:
+   `asset_convert/havok/kf_decode.py` using NifSkope's exact algorithm (glcontroller.cpp:
    degree 3, clamped integer knots, Cox–de Boor blend).
 3. Ragdoll sufficiency: deer has no separate ragdoll hkx (skeleton.nif bhk + graph
    modifiers only) — confirm the same holds for draugr/werewolf, and that our converted
@@ -2579,7 +2579,7 @@ feet.  See docs/commentary/asset_convert_creature.md#ragdoll-root-bone1-dead-end
 
 ## The clip claim tables
 
-**Code:** `asset_convert/behavior_clips.py`
+**Code:** `asset_convert/havok/behavior_clips.py`
 
 Split out of `hkx_behavior.py` — the taxonomy references nothing from the Havok
 XML builders, so the dependency is one-directional.
@@ -2592,7 +2592,7 @@ attack sweep.
 
 ### <a id="forward-blend-layout"></a>The MoveForward and Run blend layouts
 
-**Code:** `asset_convert/behavior_clips.py` — `speed_blend_plan`,
+**Code:** `asset_convert/havok/behavior_clips.py` — `speed_blend_plan`,
 `run_blend_plan`, `state_defs`.
 
 **The walk blend** is the vanilla MONOLITHIC-creature layout, verbatim from
@@ -2642,7 +2642,7 @@ quadruped layout), not by a state.
 
 ### <a id="forward-blend-layout"></a>The MoveForward and Run blend layouts
 
-**Code:** `asset_convert/behavior_clips.py` — `speed_blend_plan`,
+**Code:** `asset_convert/havok/behavior_clips.py` — `speed_blend_plan`,
 `run_blend_plan`, `state_defs`.
 
 **The walk blend** is the vanilla MONOLITHIC-creature layout, verbatim from
@@ -2867,7 +2867,7 @@ marker.
 
 ## FO3/FNV creature clip naming
 
-**Code:** `asset_convert/hkx_behavior_falloutnv.py`
+**Code:** `asset_convert/havok/hkx_behavior_falloutnv.py`
 
 `classify_clips` flat-scans a creature folder for `.kf` files and matches
 bare TES4 basenames (`idle`, `forward`, `turnleft`). FO3/FNV name and nest

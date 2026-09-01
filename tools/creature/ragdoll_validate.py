@@ -2,7 +2,7 @@
 """Validate a creature ragdoll conversion at bind pose.
 
 For each Oblivion skeleton.nif, runs the SAME extraction the skeleton.hkx
-generator uses (asset_convert.hkx_ragdoll.extract_ragdoll) and then checks,
+generator uses (asset_convert.havok.hkx_ragdoll.extract_ragdoll) and then checks,
 with every ragdoll body placed at its bind-pose bone world transform:
 
   pivot     child-frame and parent-frame constraint pivots must coincide in
@@ -37,11 +37,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), '..'))
 
-from asset_convert import pyffi_monkey_patch  # noqa: F401
-from asset_convert.hkx_ragdoll import (_bone_worlds, _quat_to_mat_row, _v4,
-                                       _OB_TO_GAME, extract_ragdoll,
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from asset_convert.havok.hkx_ragdoll import (bone_worlds, quat_to_mat_row, v4,
+                                       OB_TO_GAME, extract_ragdoll,
                                        plan_ragdoll_tree)
-from asset_convert.hkx_skeleton import load_skeleton_bones
+from asset_convert.havok.hkx_skeleton import load_skeleton_bones
 from pyffi.formats.nif import NifFormat
 
 DEG = 180.0 / math.pi
@@ -79,8 +80,8 @@ def _body_frame_report(nif_path):
     for n in plan['body_nodes']:
         body = n.collision_object.body
         q = body.rotation
-        R_bw = _quat_to_mat_row((q.x, q.y, q.z, q.w))
-        t_bw = _v4(body.translation, _OB_TO_GAME)
+        R_bw = quat_to_mat_row((q.x, q.y, q.z, q.w))
+        t_bw = v4(body.translation, OB_TO_GAME)
         R_bone, t_bone = plan['worlds'][id(n)]
         R_delta = R_bw @ R_bone.T
         t_delta = (t_bw - t_bone) @ R_bone.T
@@ -113,7 +114,7 @@ def validate(nif_path, verbose=False):
     print(f'  {len(parts)} parts; {n_bad_frame} bodies with non-identity '
           f'bone-from-body delta')
 
-    worlds = _bone_worlds(bones)
+    worlds = bone_worlds(bones)
     issues = 0
     for p in parts:
         if p.constraint is None or p.parent < 0:

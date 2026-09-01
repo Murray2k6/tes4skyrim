@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from asset_convert import grass_profile, landscape_normals
-from asset_convert.flipbook import _decode_dxt
-from asset_convert.nif_converter import NifFormat, convert_nif
+from asset_convert.lod import grass_profile
+from asset_convert.texture import landscape_normals
+from asset_convert.nif.flipbook import decode_dxt
+from asset_convert.nif.nif_converter import NifFormat, convert_nif
 
 EXPORT_MESHES = Path('export/Oblivion.esm/meshes')
 
@@ -251,12 +252,12 @@ class TestLandscapeNormals:
         path = tmp_path / 'test_n.dds'
         path.write_bytes(_make_dxt1_dds(8, 8, 2, [top, mip1]))
 
-        before = _decode_dxt(path.read_bytes()[128:128 + 32], 8, 8, 'DXT1')
+        before = decode_dxt(path.read_bytes()[128:128 + 32], 8, 8, 'DXT1')
         assert landscape_normals.fix_normal_specular(path) is True
 
         data = path.read_bytes()
         assert data[84:88] == b'DXT5'
-        after = _decode_dxt(data[128:128 + 64], 8, 8, 'DXT5')
+        after = decode_dxt(data[128:128 + 64], 8, 8, 'DXT5')
         for i in range(0, len(before), 4):
             assert before[i:i + 3] == after[i:i + 3], f'RGB mismatch at texel {i // 4}'
             assert after[i + 3] == landscape_normals.SPECULAR_ALPHA
@@ -378,7 +379,7 @@ class TestConstantSpecularAlpha:
 
     def test_default_normal_is_flat_and_masked(self, tmp_path):
         """The shared stand-in must classify as a real DXT5 with our alpha."""
-        from asset_convert import parallax
+        from asset_convert.texture import parallax
         landscape_normals.write_default_normal(tmp_path)
         dest = tmp_path / 'tes4' / 'default_n.dds'
         assert dest.is_file()

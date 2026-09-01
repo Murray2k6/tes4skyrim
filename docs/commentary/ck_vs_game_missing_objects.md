@@ -1,6 +1,6 @@
 # tes5_import/ - objects in the CK, missing in game
 
-**Code:** `asset_convert/lod_gen.py`, `tools/audit/lod_coverage_check.py`, `tools/audit/missing_mesh_refs.py`, `tools/validate/refr_render_audit.py`
+**Code:** `asset_convert/lod/lod_gen.py`, `tools/audit/lod_coverage_check.py`, `tools/audit/missing_mesh_refs.py`, `tools/validate/refr_render_audit.py`
 
 ## Contents
 
@@ -86,7 +86,7 @@ Three real divergences found on the way, none of them the cause, none fixed.
 **No LOD ships at all.** `tools/audit/lod_coverage_check.py` reports 0 `.bto` and 0
 `.btr` in the loose tree and in all three BSAs, for every worldspace including
 `TES4Tamriel` (14,686 cells). `lod_gen.py` writes
-`meshes/terrain/<EDID>/Objects/*.bto` (`asset_convert/lod_gen.py:1402,1699`),
+`meshes/terrain/<EDID>/Objects/*.bto` (`asset_convert/lod/lod_gen.py:1402,1699`),
 so the stage simply never ran for this build. Everything past the uGridsToLoad
 window is undrawn until the player closes to ~2 cells. Fix is
 `convert.py -f <plugin> --lod-only`.

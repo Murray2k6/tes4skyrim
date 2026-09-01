@@ -319,7 +319,7 @@ def load_music_manifest(out_root, export_dir=None, plugin=None) -> dict:
         # No usable manifest: derive one from the extracted tree.  Pure
         # directory walk -- no ffmpeg, no xWMAEncode, no subprocess.
         try:
-            from asset_convert.music_convert import scan_music
+            from asset_convert.audio.music_convert import scan_music
             n = scan_music(plugin, export_dir, str(Path(out_root).parent))
             if n:
                 print(f'  Music: scanned {n} tracks from the extracted '
@@ -399,28 +399,6 @@ def build_music_records(manifest: dict, writer, plugin: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # DOBJ -- the Default Object Manager
-# ---------------------------------------------------------------------------
-# 🛑 THIS is how the engine finds combat music.  It does NOT scan MUSC records
-# for the combat flags; it asks BGSDefaultObjectManager for `kBattleMusic`,
-# whose form comes from the DOBJ record's `BTMS` entry -- hardcoded in
-# Skyrim.esm to MUSCombat (0003418E).
-#
-# Confirmed against SeaSparrowOG/CombatMusic (an SKSE combat-music plugin),
-# whose every hook is keyed on exactly that lookup:
-#
-#     const auto MUSCombat = defaultObjects->GetObject<RE::BGSMusicType>(
-#         RE::BGSDefaultObjectManager::DefaultObject::kBattleMusic);
-#     if (!MUSCombat || a_music != MUSCombat) { return a_music; }
-#
-# So a Battle MUSC that nothing points at is unreachable no matter how
-# correctly it is built -- which is why ours stayed silent with vanilla-perfect
-# flags, priority, ducking, cue points and conditions.  Battle is the ONE
-# category with no CELL/WRLD/REGN route: `by_enum` only carries the 3 TES4
-# enum values (explore/public/dungeon), so nothing else can ever name it.
-#
-# Every DLC overrides DOBJ with the FULL array (Dawnguard 324, Dragonborn 346,
-# HearthFires 346, Update 366 entries), so that is the established pattern: we
-# copy the winning master's entries and replace only BTMS.
 DOBJ_BATTLE_MUSIC_TAG = b'BTMS'
 
 

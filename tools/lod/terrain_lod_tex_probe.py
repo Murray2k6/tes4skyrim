@@ -18,8 +18,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from asset_convert.terrain_lod_textures import (
-    build_ltex_texture_map, _load_texture_rgb)
+from asset_convert.lod.terrain_lod_textures import (
+    build_ltex_texture_map, load_texture_rgb)
 
 
 def probe_ltex(esm: Path, tex_root: Path):
@@ -62,8 +62,8 @@ def probe_ltex(esm: Path, tex_root: Path):
 
 
 def probe_cell(esm: Path, tex_root: Path, ltex, cx: int, cy: int, worldspace: str):
-    from asset_convert.terrain_lod import _parse_land_records
-    lands, cell_water, default_wh = _parse_land_records(esm, worldspace)
+    from asset_convert.lod.terrain_lod import parse_land_records
+    lands, cell_water, default_wh = parse_land_records(esm, worldspace)
     print(f"LAND cells parsed: {len(lands)}; water cells: "
           f"{sum(1 for hw, _ in cell_water.values() if hw)}; "
           f"default water height: {default_wh}")
@@ -82,7 +82,7 @@ def probe_cell(esm: Path, tex_root: Path, ltex, cx: int, cy: int, worldspace: st
                   f"max={grid.max():.2f} mean={grid.mean():.2f}] -> {d}")
     for q, fid in layers['base'].items():
         d = ltex.get(fid, {}).get('diffuse', '<UNRESOLVED>')
-        tile = _load_texture_rgb(d, tex_root, 64)
+        tile = load_texture_rgb(d, tex_root, 64)
         print(f"  quad {q} base fid={fid:08X} -> {d}  "
               f"loaded std={tile.reshape(-1,3).std(axis=0).round(1).tolist()}")
 
