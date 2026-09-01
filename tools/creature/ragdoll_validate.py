@@ -39,9 +39,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), '..'
 
 from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
-from asset_convert.havok.hkx_ragdoll import (bone_worlds, quat_to_mat_row, v4,
-                                       OB_TO_GAME, extract_ragdoll,
-                                       plan_ragdoll_tree)
+from asset_convert.havok.ragdoll_math import bone_worlds, quat_to_mat_row, v4
+from asset_convert.havok.hkx_ragdoll import (OB_TO_GAME, extract_ragdoll,
+                                             plan_ragdoll_tree)
 from asset_convert.havok.hkx_skeleton import load_skeleton_bones
 from pyffi.formats.nif import NifFormat
 

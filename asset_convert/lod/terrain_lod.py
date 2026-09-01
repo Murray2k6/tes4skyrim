@@ -316,7 +316,7 @@ def _scan_cell_coords(esm_path: Path, coords: dict):
     plugins' 02s routinely name unrelated records, so raw keys let one plugin's
     cell silently inherit another's grid coordinates.
     """
-    from asset_convert.lod.lod_gen import formid_remap_table
+    from asset_convert.lod.esm_scan import formid_remap_table
     gmap = formid_remap_table(Path(esm_path))
     raw = esm_path.read_bytes()
     n = len(raw)
@@ -532,7 +532,7 @@ def parse_land_records(esm_path: Path, worldspace_edid: str = 'TES4Tamriel',
     # OVERLAY scans to compare against THEIR ids. A raw id from one file means
     # nothing in another.
     try:
-        from asset_convert.lod.lod_gen import formid_remap_table
+        from asset_convert.lod.esm_scan import formid_remap_table
         _base_raw = _plugin_bytes(Path(esm_path))
         _raw_fid = _worldspace_fid_cached(Path(esm_path), _base_raw,
                                           worldspace_edid)
@@ -563,44 +563,17 @@ def scan_land_file(esm_path: Path, worldspace_edid: str,
                     allow_unscoped: bool = True, known_wrld_fid=None):
     """Scan one plugin's LAND/CELL/WRLD data into the shared accumulators.
 
-    A CELL record an override plugin ships carries only the fields its author
-    changed, so its XCLC grid coords may be absent. Coordinates are therefore
-    resolved against the coords already learned from earlier files in load
-    order before falling back to this file's own.
-
-    `known_wrld_fid` is the target worldspace's FormID as resolved from the file
-    that DEFINES it. An override plugin edits a master's worldspace through the
-    master's GRUPs — its records sit under a type-1 GRUP labelled with the
-    master's WRLD FormID — while shipping no WRLD record of its own. Passing the
-    master's FormID in is what lets those edits be scoped correctly instead of
-    falling back to a wildcard.
-
-    `allow_unscoped` decides what "this file has no such WRLD record, and no
-    FormID was supplied" means.
-
-    True (the default, and correct for the file the worldspace is sourced FROM)
-    keeps the historical fallback: take every LAND record, because a file being
-    scanned for its own worldspace may name it differently, and returning
-    nothing would silently produce no terrain at all.
-
-    False is mandatory for OVERLAYS, where the same fallback is a data-
-    corruption bug: it imports the plugin's OTHER worldspaces as if they were
-    this one. Morrowind_ob.esm ships no TES4Tamriel WRLD, so all 5,796 of its
-    Vvardenfell cells were collected into Cyrodiil's heightmap, overwriting
-    5,787 of Oblivion's own Tamriel cells and stamping Vvardenfell across
-    central Cyrodiil's distant terrain.
+    `known_wrld_fid` scopes the scan to a worldspace an override edits without
+    defining; `allow_unscoped` decides whether an unresolvable worldspace takes
+    every LAND record (True, for the defining file) or none (False, mandatory
+    for overlays).  Every FormID is normalised into the load-order-wide space
+    first, since the accumulators are shared across the whole stack.
+    See: docs/commentary/asset_convert_terrain.md#land-scan-scoping
     """
     raw = _plugin_bytes(Path(esm_path))
     n   = len(raw)
 
-    # FormIDs are normalised into the load-order-wide space before anything is
-    # keyed on them. `cell_coords` and the caller's `lands`/`cell_water` are
-    # shared across every file in the stack, and a raw id is only meaningful
-    # inside the file it came from — the index byte is an offset into THAT
-    # file's master list. Two plugins' 02s routinely name unrelated records
-    # (Morrowind_ob.esm and Tamriel.esp collide on 4 CELL ids), which without
-    # this makes one plugin's cell adopt another's grid coordinates.
-    from asset_convert.lod.lod_gen import formid_remap_table
+    from asset_convert.lod.esm_scan import formid_remap_table
     _gmap = formid_remap_table(Path(esm_path))
 
     def g(fid: int) -> int:

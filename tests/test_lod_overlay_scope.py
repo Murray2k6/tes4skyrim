@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from asset_convert.lod.sibling_lod import touched_worldspace_fids
-from asset_convert.lod.lod_gen import formid_remap_table, plugin_masters
+from asset_convert.lod.esm_scan import formid_remap_table, plugin_masters
 
 
 def _rec(sig: bytes, fid: int, body: bytes = b'') -> bytes:
@@ -60,7 +60,7 @@ def _plugin(tmp_path: Path, name: str, payload: bytes,
 
 def _norm(fid: int, masters=('Skyrim.esm', 'Oblivion.esm')) -> int:
     """The load-order-wide id these tests' MASTER-owned raw ids normalise to."""
-    from asset_convert.lod.lod_gen import global_file_index
+    from asset_convert.lod.esm_scan import global_file_index
     top = fid >> 24
     owner = masters[top] if top < len(masters) else None
     assert owner is not None, 'use _self() for ids the plugin owns'
@@ -69,7 +69,7 @@ def _norm(fid: int, masters=('Skyrim.esm', 'Oblivion.esm')) -> int:
 
 def _self(esm: Path, fid: int) -> int:
     """Same, for an id whose index byte is past the master list (self-owned)."""
-    from asset_convert.lod.lod_gen import global_file_index
+    from asset_convert.lod.esm_scan import global_file_index
     return global_file_index(esm.name.lower()) << 24 | (fid & 0x00FFFFFF)
 
 

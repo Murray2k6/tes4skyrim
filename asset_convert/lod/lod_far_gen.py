@@ -48,37 +48,29 @@ from asset_convert.game_paths import win_join
 from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
 from pyffi.formats.nif import NifFormat
+from asset_convert.lod.mesh_decimate import (compute_tangents,
+                                             is_boundary_fraction,
+                                             qem_decimate, vertex_normals,
+                                             MAX_DEV_FRAC,
+                                             TOPO_BOUNDARY_WEIGHT,
+                                             WELD_EPS)
 
 _SKYRIM_VER = 0x14020007
 _NIF_FLAGS  = 14
 
-# Global target across all shapes combined.
-#
-# The budget below targets roughly vanilla Skyrim object-LOD density +25%.
-# Vanilla Tamriel spends ~11,000 bytes of object LOD per CELL at level 4
-# (measured from `Skyrim - Meshes1.bsa`); before this pass we spent ~410,000,
-# i.e. 37x vanilla, because decimation was structurally broken and every
-# constant here had been clamped down to hide the damage:
-#   - shapes were decimated INDEPENDENTLY, so shared rims drifted apart and
-#     tore holes; `_BOUNDARY_WEIGHT` froze both rims to limit the drift and
-#     `_MIN_SRC_TRIS`/`_MIN_TRIS` deleted small shapes rather than risk them.
-#   - collapses kept the ORIGINAL UV, so charts were squeezed into a third of
-#     their proper footprint; `_MAX_DEV_FRAC` was clamped to 0.03 to limit the
-#     shearing, which stalled reduction at ~40% of source verts against a
-#     nominal 8% target.
-# Both defects are fixed (one welded topology per model; UVs interpolated onto
-# the survivor), so the defensive constants are gone and the real budget can
-# stand on its own.
-_DECIMATE_RATIO    = 0.05    # share of source verts to keep
-_MIN_TOTAL_TARGET  = 24      # floor on a whole model's combined vertex budget:
-                             # small props must still read as themselves
-_NO_CAP            = 1 << 30  # the base tier is bounded by _DECIMATE_RATIO
-                             # alone; only the _far8/_far16 tiers cap verts
-_SF2_VERTEX_COLORS = 0x20    # SF2 bit to clear when removing vertex colors
+#: Share of source verts to keep, targeting vanilla object-LOD density +25%.
+_DECIMATE_RATIO = 0.05
 
-# Tree models get a crossed-quad billboard _far.nif (vanilla-style flat tree
-# LOD) instead of decimated geometry — decimating leaf cards shreds canopies
-# and drops trunks, and the full geometry made .bto tiles enormous.
+#: Floor on a model's combined budget: small props must still read as themselves.
+_MIN_TOTAL_TARGET = 24
+
+#: The base tier is bounded by the ratio alone; only _far8/_far16 cap verts.
+_NO_CAP = 1 << 30
+
+#: SF2 bit to clear when removing vertex colors.
+_SF2_VERTEX_COLORS = 0x20
+
+#: Trees get a crossed-quad billboard instead: decimating leaf cards shreds them.
 _TREE_MODEL_PREFIX = 'tes4\\speedtrees\\'
 BILLBOARD_TEX_DIR = 'tes4\\trees\\billboards'
 
@@ -88,645 +80,10 @@ BILLBOARD_TEX_DIR = 'tes4\\trees\\billboards'
 # ---------------------------------------------------------------------------
 
 
-# Boundary-edge constraint quadric weight (× len²).  This used to be 8.0, to
-# stop the two sides of a shared rim drifting apart — which it could never do,
-# because each side was decimated separately and nothing made them AGREE.  Now
-# that a model is one welded topology the seam cannot open, so this only has to
-# do its real job: hold GENUINELY open rims (window frames, wall tops, leaf-card
-# edges) a little longer than interior geometry.
-_BOUNDARY_WEIGHT = 1.0
-_WELD_EPS        = 1e-3    # position weld tolerance (game units)
-_STITCH_MAX_EDGE_MULT = 1.0  # hard cap on the stitch radius, in multiples of
-                             # the model's median edge length: never merge
-                             # across more than the scale of the authored
-                             # detail (see the stitch pass for the census)
-_STITCH_FRAC     = 0.008   # proximity-stitch tolerance, as a fraction of the
-                           # model diagonal: nodes this close are treated as
-                           # one surface even when they only interpenetrate
-                           # rather than share vertices (see the stitch pass).
-_MAX_DEV_FRAC    = 0.25    # error floor: stop when a collapse would deviate
-                           # more than this fraction of the model diagonal.
-                           # 0.03 existed to limit UV shearing and cost ~5x the
-                           # intended reduction; at LOD range (2+ km) a quarter
-                           # of the diagonal is well under a pixel of silhouette.
-_EDGE_LEN_REG    = 0.5     # edge-length regularization (× mean face area)
-_TOPO_BOUNDARY_WEIGHT = 6.0  # budget multiplier per unit of boundary-vertex
-                             # fraction: a 30%-rim building gets 2.8x the
-                             # vertices of a closed rock at the same ratio
-
-# Coarser variants for the far LOD rings.  The _far8/_far16 meshes are
-# re-decimated FROM the _far.nif with a relaxed error floor — at level-8/16
-# distances (2+ km) silhouette lumps are invisible but baked verts still
-# cost disk/VRAM in every tile.
-# A tier is only written when it comes back at least this much lighter than
-# the mesh it would replace.  Below that it is the same geometry under a
-# second filename: LODGen bakes identical triangles either way, so the file
-# is pure cost.  When it is absent `_lod_meshes_for` lists the _far.nif for
-# that level instead.
 _TIER_MIN_GAIN = 0.90
 
 TIER8  = dict(ratio=0.5,  cap=250, dev=0.08, suffix='_far8')
 TIER16 = dict(ratio=0.25, cap=120, dev=0.12, suffix='_far16')
-
-
-def is_boundary_fraction(verts: np.ndarray, tris: np.ndarray) -> float:
-    """Share of welded vertices that sit on an open rim (0.0 - 1.0).
-
-    Used to scale the decimation budget: rim vertices are pinned by the
-    open-rim guard, so a model that is mostly rim has little collapsible
-    interior and needs a larger budget to survive.
-    """
-    if len(verts) == 0 or len(tris) == 0:
-        return 0.0
-    keys = np.round(verts / _WELD_EPS).astype(np.int64)
-    uq, wid = np.unique(keys, axis=0, return_inverse=True)
-    F = wid[tris]
-    ok = (F[:, 0] != F[:, 1]) & (F[:, 1] != F[:, 2]) & (F[:, 0] != F[:, 2])
-    F = F[ok]
-    if not len(F):
-        return 0.0
-    e = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
-    ue, c = np.unique(np.sort(e, axis=1), axis=0, return_counts=True)
-    if not (c == 1).any():
-        return 0.0
-    return len(np.unique(ue[c == 1])) / max(len(uq), 1)
-
-
-def _qem_decimate(verts: np.ndarray, tris: np.ndarray,
-                  uvs: Optional[np.ndarray],
-                  target_verts: int,
-                  max_dev_frac: float = _MAX_DEV_FRAC,
-                  tri_mat: Optional[np.ndarray] = None) -> Tuple:
-    """Quadric-error-metric half-edge-collapse simplification.
-
-    Positions are welded (UV-seam duplicates share one topology node) so
-    collapses can cross seams.  A collapse u→v moves u to v's exact original
-    position, interpolates the moved corner's UV onto that position so the
-    texture chart follows the geometry, is charged the combined quadric error
-    at v, is rejected if it would flip an adjacent face's normal, and boundary
-    edges carry perpendicular constraint quadrics so open rims shrink last.
-    This preserves silhouettes and never punches holes the way grid
-    vertex-clustering did.
-
-    `tri_mat` optionally tags each input triangle with the material (source
-    shape) it came from.  It is carried through the collapse unchanged and
-    returned alongside the surviving triangles, which is what lets a whole
-    model be welded into ONE topology and decimated together — shared rims
-    between shapes become genuinely shared graph nodes, so a collapse moves
-    both sides at once and the seam cannot tear — then split back out per
-    material afterwards.  Decimating each shape separately instead let the two
-    sides of a seam pick different survivors and drift apart: measured on
-    `centrancerockmosslg01`, the shared boundary went from 32% welded to 9%
-    and the gap opened from 3.8 to 93.4 units (6% of the object diagonal).
-
-    Returns (new_verts, new_tris, new_uvs, new_tri_mat).
-    """
-    nV, nT = len(verts), len(tris)
-    if nV == 0 or nT == 0:
-        return verts, tris, uvs, tri_mat
-
-    # ---- weld positions for topology -------------------------------------
-    keys = np.round(verts / _WELD_EPS).astype(np.int64)
-    _, first_idx, wid = np.unique(keys, axis=0, return_index=True,
-                                  return_inverse=True)
-    W = len(first_idx)
-    P = verts[first_idx].astype(np.float64)          # position per weld node
-
-    # ---- stitch touching pieces into ONE component ------------------------
-    # An exact position weld only joins vertices that COINCIDE.  Game models
-    # are not built that way: `piratecabin01` is 14 open sheets that overlap
-    # and interpenetrate — visually one solid cabin, topologically 33 separate
-    # components with only 20 of 91 shape pairs having any vertex within a
-    # unit of each other.  Decimating that means dividing one budget among 33
-    # pieces, which grinds each to nothing and takes whole planks with it.
-    #
-    # So merge nodes that are merely CLOSE, not identical.  The tolerance is
-    # relative to the model, because "touching" means something different on a
-    # 100-unit crate and an 8,000-unit fort.  This runs before quadrics are
-    # built, so the collapse sees one connected surface and can simplify a
-    # plank into its neighbour exactly as it simplifies one rock face into the
-    # next.
-    # The radius is capped by the model's own DETAIL scale, not just its
-    # overall size.  A fraction of the diagonal is right for a building, whose
-    # planks are large and genuinely overlap, but on thin repeated geometry it
-    # exceeds the size of the parts themselves and fuses things that merely
-    # pass near each other: `mainmast01` is rigging with a 2,968-unit diagonal
-    # and a 9-unit median edge, so a 24-unit radius welded separate ropes into
-    # one rope and the collapse then dragged them together.  Measured across
-    # models, radius / median-edge cleanly separates the two cases — cabin
-    # 0.38 and castle 0.79 (both want stitching) against IC wall 1.78 and mast
-    # 2.62 (both do not) — so cap the radius at the median edge length.
-    _f = wid[tris]
-    _f = _f[(_f[:, 0] != _f[:, 1]) & (_f[:, 1] != _f[:, 2])
-            & (_f[:, 0] != _f[:, 2])]
-    if len(_f):
-        _ue = np.unique(np.sort(np.concatenate(
-            [_f[:, [0, 1]], _f[:, [1, 2]], _f[:, [2, 0]]]), axis=1), axis=0)
-        _median_edge = float(np.median(
-            np.linalg.norm(P[_ue[:, 0]] - P[_ue[:, 1]], axis=1)))
-    else:
-        _median_edge = 0.0
-    stitch_eps = max(_WELD_EPS,
-                     min(float(np.linalg.norm(P.max(axis=0) - P.min(axis=0)))
-                         * _STITCH_FRAC,
-                         _median_edge * _STITCH_MAX_EDGE_MULT))
-    if W > 1 and stitch_eps > _WELD_EPS:
-        try:
-            from scipy.spatial import cKDTree
-            pairs = cKDTree(P).query_pairs(stitch_eps, output_type='ndarray')
-        except Exception:
-            pairs = None
-        if pairs is not None and len(pairs):
-            sp = list(range(W))
-
-            def _sfind(x):
-                while sp[x] != x:
-                    sp[x] = sp[sp[x]]
-                    x = sp[x]
-                return x
-
-            for a, b in pairs:
-                ra, rb = _sfind(int(a)), _sfind(int(b))
-                if ra != rb:
-                    sp[rb] = ra
-            rep = np.array([_sfind(i) for i in range(W)], dtype=np.int64)
-            uniq_rep, remap = np.unique(rep, return_inverse=True)
-            if len(uniq_rep) < W:
-                # Keep the representative's ORIGINAL position: averaging the
-                # merged group would pull the surface off the silhouette.
-                P = P[uniq_rep]
-                wid = remap[wid]
-                W = len(uniq_rep)
-
-    F0 = wid[tris]                                    # faces in weld space
-    ok = (F0[:, 0] != F0[:, 1]) & (F0[:, 1] != F0[:, 2]) & (F0[:, 0] != F0[:, 2])
-    F0 = F0[ok]
-    C0 = tris[ok]                                     # original corner ids (UVs)
-    M0 = tri_mat[ok] if tri_mat is not None else None  # material tag per face
-    if not len(F0):
-        return verts, tris, uvs, tri_mat
-
-    # ---- initial quadrics (area-weighted face planes) ---------------------
-    v0, v1, v2 = P[F0[:, 0]], P[F0[:, 1]], P[F0[:, 2]]
-    fn = np.cross(v1 - v0, v2 - v0)                   # |fn| = 2×area
-    area2 = np.linalg.norm(fn, axis=1)
-    nrm = fn / np.maximum(area2, 1e-12)[:, None]
-    d = -np.einsum('ij,ij->i', nrm, v0)
-    plane = np.concatenate([nrm, d[:, None]], axis=1)             # (nF,4)
-    fq = plane[:, :, None] * plane[:, None, :] * area2[:, None, None]
-    Q = np.zeros((W, 4, 4), np.float64)
-    for k in range(3):
-        np.add.at(Q, F0[:, k], fq)
-
-    # ---- boundary constraint quadrics -------------------------------------
-    edges = np.concatenate([F0[:, [0, 1]], F0[:, [1, 2]], F0[:, [2, 0]]])
-    edges_s = np.sort(edges, axis=1)
-    uniq_e, e_cnt = np.unique(edges_s, axis=0, return_counts=True)
-    boundary = uniq_e[e_cnt == 1]
-    # Which weld nodes sit on a genuinely open rim (an edge used by ONE face).
-    # The collapse loop refuses to merge one of these into an interior vertex:
-    # the constraint quadrics below only penalise moving a rim vertex ALONG
-    # its edge line, and say nothing about it being absorbed upward into the
-    # body, so a rock with a flat open bottom would have that bottom eaten
-    # away.  Measured on `rockgreatforest1125rdm`, whose 106 rim verts all sit
-    # at z=-241.2: without the guard only 12 of 178 rim nodes survived and the
-    # rim rose 162 units — 34% of the model height — leaving the rock floating
-    # above the terrain.
-    is_boundary = np.zeros(W, dtype=bool)
-    if len(boundary):
-        is_boundary[boundary.ravel()] = True
-    if len(boundary):
-        # Constraint plane through each boundary edge: any plane containing the
-        # edge penalizes moving its endpoints off the edge line, which is what
-        # keeps open rims (window frames, wall tops, leaf-card edges) intact.
-        # Use the plane spanned by the edge and the world axis least aligned
-        # with it.
-        ea, eb = boundary[:, 0], boundary[:, 1]
-        edge_v = P[eb] - P[ea]
-        ax = np.zeros_like(edge_v)
-        ax[np.arange(len(edge_v)), np.argmin(np.abs(edge_v), axis=1)] = 1.0
-        cn = np.cross(edge_v, ax)
-        cl = np.linalg.norm(cn, axis=1)
-        good = cl > 1e-12
-        cn[good] /= cl[good][:, None]
-        cd = -np.einsum('ij,ij->i', cn, P[ea])
-        cplane = np.concatenate([cn, cd[:, None]], axis=1)
-        w = _BOUNDARY_WEIGHT * np.einsum('ij,ij->i', edge_v, edge_v)
-        cq = cplane[:, :, None] * cplane[:, None, :] * w[:, None, None]
-        np.add.at(Q, ea, cq)
-        np.add.at(Q, eb, cq)
-
-    # ---- UV charts per weld node ------------------------------------------
-    # A collapse u->v moves the corner's POSITION to v while the corner keeps
-    # u's ORIGINAL UV.  The triangle then covers the geometry both vertices
-    # used to span, but its UV footprint is unchanged — so the chart is
-    # squeezed into less and less of the texture as collapses accumulate.
-    # Measured on `rockgreatforest1500fgdrlichen`: the far mesh retains 96.3%
-    # of the source's geometric area but only 32.3% of its UV area, leaving
-    # 80% of triangles below half the source texel density (stretched).  On
-    # `icexteriorwall02` the density spread reached 53,303x — a single-texel
-    # streak, which reads in-game as a garbled or invisible texture.
-    #
-    # The fix is to carry a MUTABLE UV per corner and move it with the vertex:
-    # when u collapses into v, the corner's UV becomes the point in u's chart
-    # that corresponds to v's position, found by projecting v onto the edge
-    # u->v in 3D and interpolating the UV by the same parameter.  UVs are
-    # piecewise-linear over the surface, so this is exact along the edge and
-    # keeps the chart's area in step with the geometry it covers.
-    # A corner's UV is per-FACE once it starts moving (two faces sharing a
-    # vertex can sit in different charts), so give each corner its own slot.
-    # Plain (u, v) tuples, not NumPy rows: the collapse loop touches these
-    # hundreds of thousands of times and scalar tuples are far cheaper.
-    corner_uv = None
-    if uvs is not None:
-        uvl = [(float(a), float(b)) for a, b in uvs]
-        corner_uv = [[uvl[int(C0[fi, k])] for k in range(3)]
-                     for fi in range(len(F0))]
-
-    def _uv_at(fi, i, u, v, cu):
-        """UV for the corner of face `fi` that just moved from u to v.
-
-        The face still holds its other two corners, whose UVs are known and
-        whose positions are unchanged, so the face defines a local affine
-        map from position to UV.  Solve it for v's position: that is exactly
-        where v lands in this face's chart.  Falls back to the edge-parameter
-        interpolation (and then to the unchanged UV) when the face is
-        degenerate in position or UV and the map is not invertible.
-        """
-        f = faces[fi]
-        j, k = (i + 1) % 3, (i + 2) % 3
-        # Scalar arithmetic throughout: this runs once per collapsed corner
-        # (~50k times per shape), where NumPy's per-call dispatch costs far
-        # more than the handful of multiplies — same reason cost_of and the
-        # flip guard are written out longhand.
-        ax, ay, az = PL[f[j]]
-        bx, by, bz = PL[f[k]]
-        ux, uy, uz = PL[u]
-        vx, vy, vz = PL[v]
-        ua_ = corner_uv[fi][j]
-        ub_ = corner_uv[fi][k]
-        # Express (pv - pa) in the basis (pb - pa, pu - pa), then apply the
-        # same weights to the UVs.  det == 0 covers the degenerate face, so
-        # no separate normal test is needed.
-        e1x, e1y, e1z = bx - ax, by - ay, bz - az
-        e2x, e2y, e2z = ux - ax, uy - ay, uz - az
-        d11 = e1x * e1x + e1y * e1y + e1z * e1z
-        d12 = e1x * e2x + e1y * e2y + e1z * e2z
-        d22 = e2x * e2x + e2y * e2y + e2z * e2z
-        det = d11 * d22 - d12 * d12
-        if det > 1e-20 or det < -1e-20:
-            dx, dy, dz = vx - ax, vy - ay, vz - az
-            b1 = dx * e1x + dy * e1y + dz * e1z
-            b2 = dx * e2x + dy * e2y + dz * e2z
-            s = (b1 * d22 - b2 * d12) / det
-            t_ = (d11 * b2 - d12 * b1) / det
-            au, av = ua_
-            return (au + s * (ub_[0] - au) + t_ * (cu[0] - au),
-                    av + s * (ub_[1] - av) + t_ * (cu[1] - av))
-        # Degenerate face: the affine map is not invertible, so leave the UV.
-        return cu
-
-    # ---- mutable topology --------------------------------------------------
-    import heapq
-    faces = [[int(a), int(b), int(c)] for a, b, c in F0]
-    corners = [[int(a), int(b), int(c)] for a, b, c in C0]
-    face_alive = [True] * len(faces)
-    vert_faces = [set() for _ in range(W)]
-    for fi, f in enumerate(faces):
-        for v in f:
-            vert_faces[v].add(fi)
-
-    version = [0] * W
-    alive = sum(1 for s in vert_faces if s)
-
-    # Per-vertex accumulated face area (for the error floor) + regularization.
-    A = np.zeros(W, np.float64)
-    for k in range(3):
-        np.add.at(A, F0[:, k], area2 / 6.0)   # area2 = 2×area, /3 per corner
-    mean_face_area = float(area2.mean()) / 2.0
-    diag = float(np.linalg.norm(P.max(axis=0) - P.min(axis=0)))
-    max_dev2 = (diag * max_dev_frac) ** 2
-
-    hom = np.ones(4)
-
-    # Python-list views of the per-node data the inner loop touches.  cost_of
-    # and the flip guard run ~100k times per shape on 3-vectors, where NumPy's
-    # per-call dispatch overhead dwarfs the arithmetic (np.cross alone spent
-    # more time in normalize_axis_tuple/moveaxis than on the cross product).
-    PL = [tuple(map(float, p)) for p in P]
-
-    def cost_of(u, v):
-        hom[:3] = P[v]
-        q = Q[u] + Q[v]
-        c = float(hom @ q @ hom)
-        # edge-length regularization: discourage long-distance collapses that
-        # stretch faces into "sails" even when the quadric error is small.
-        # Scaled like "one average face displaced by the collapse distance".
-        ux, uy, uz = PL[u]
-        vx, vy, vz = PL[v]
-        dx, dy, dz = ux - vx, uy - vy, uz - vz
-        c += _EDGE_LEN_REG * mean_face_area * (dx * dx + dy * dy + dz * dz)
-        return c
-
-    def _flips(a, b, ox, oy, oz, nx_, ny_, nz_):
-        """True if triangle (a, b, ·) flips when its third vertex moves from
-        (ox,oy,oz) to (nx_,ny_,nz_).  Scalar cross products + dot."""
-        ax, ay, az = PL[a]
-        bx, by, bz = PL[b]
-        a1x, a1y, a1z = ax - ox, ay - oy, az - oz
-        b1x, b1y, b1z = bx - ox, by - oy, bz - oz
-        c1x = a1y * b1z - a1z * b1y
-        c1y = a1z * b1x - a1x * b1z
-        c1z = a1x * b1y - a1y * b1x
-        a2x, a2y, a2z = ax - nx_, ay - ny_, az - nz_
-        b2x, b2y, b2z = bx - nx_, by - ny_, bz - nz_
-        c2x = a2y * b2z - a2z * b2y
-        c2y = a2z * b2x - a2x * b2z
-        c2z = a2x * b2y - a2y * b2x
-        return (c1x * c2x + c1y * c2y + c1z * c2z) <= 0.0
-
-    def neighbors(u):
-        out = set()
-        for fi in vert_faces[u]:
-            out.update(faces[fi])
-        out.discard(u)
-        return out
-
-    heap = []
-    for e in uniq_e:
-        a, b = int(e[0]), int(e[1])
-        heapq.heappush(heap, (cost_of(a, b), a, b, version[a], version[b]))
-        heapq.heappush(heap, (cost_of(b, a), b, a, version[b], version[a]))
-
-    # ---- per-component floor ----------------------------------------------
-    # A model is often many DISCONNECTED pieces — `piratecabin01` is 33 planks,
-    # beams and panels — and a global vertex budget says nothing about how it
-    # should be split between them.  Asking for 54 vertices across 33 pieces is
-    # ~1.6 each, far below the 4 a closed piece needs, so the loop ground whole
-    # planks out of existence and the "holes" were missing parts, not torn
-    # surface.  Decimation must never delete a piece: give every component its
-    # own floor and refuse the collapse that would take it below.
-    comp_of = list(range(W))
-
-    def _find(x):
-        while comp_of[x] != x:
-            comp_of[x] = comp_of[comp_of[x]]
-            x = comp_of[x]
-        return x
-
-    for f_ in faces:
-        r0 = _find(f_[0])
-        for k in (1, 2):
-            rk = _find(f_[k])
-            if rk != r0:
-                comp_of[rk] = r0
-    comp_alive: dict = {}
-    for w_ in range(W):
-        if vert_faces[w_]:
-            r = _find(w_)
-            comp_alive[r] = comp_alive.get(r, 0) + 1
-    # 4 vertices is the minimum for a closed piece (a tetrahedron); a flat open
-    # sheet still reads correctly at 3.  Use 4 — one wasted vertex on a plank
-    # is nothing against the plank disappearing.
-    _COMP_MIN = 4
-
-    target = max(int(target_verts), 4)
-
-    while alive > target and heap:
-        cost, u, v, vu, vv = heapq.heappop(heap)
-        if version[u] != vu or version[v] != vv:
-            continue
-        if not vert_faces[u] or not vert_faces[v]:
-            continue
-        if not math.isfinite(cost):
-            continue
-        # error floor: if even the cheapest remaining collapse would deviate
-        # more than _MAX_DEV_FRAC of the diagonal, stop — a heavier LOD beats
-        # a shredded one.  (cost ≈ local_area × deviation².)
-        if cost > (A[u] + A[v]) * max_dev2 + 1e-12:
-            continue
-        # still adjacent?
-        shared = [fi for fi in vert_faces[u] if v in faces[fi]]
-        if not shared:
-            continue
-
-        # open-rim guard: a boundary vertex may only collapse INTO another
-        # boundary vertex, so an open rim simplifies along itself and stays
-        # where the author put it.  Collapsing it into an interior vertex is
-        # what pulled flat rock bottoms upward (see is_boundary above); the
-        # constraint quadrics cannot prevent that on their own, because a
-        # half-edge collapse is charged the SURVIVOR's quadric.
-        if is_boundary[u] and not is_boundary[v]:
-            continue
-
-        # per-component floor: never grind a disconnected piece out of the
-        # model, however tight the global budget is (see _COMP_MIN above).
-        cr = _find(u)
-        if comp_alive.get(cr, 0) <= _COMP_MIN:
-            continue
-
-        # isolation guard: decimation must never leave a triangle floating on
-        # its own.  A collapse removes the faces containing edge (u,v) and
-        # rewrites the rest; if that would strand any surviving neighbour as a
-        # triangle sharing no edge with another live face, refuse it.  Without
-        # this a low budget shreds a surface into loose confetti rather than
-        # simplifying it, which reads in-game as holes with stray triangles
-        # floating in them.
-        _dying = {fi for fi in vert_faces[u] if v in faces[fi]}
-        _isolated = False
-        for fi in vert_faces[u] | vert_faces[v]:
-            if fi in _dying or not face_alive[fi]:
-                continue
-            f = faces[fi]
-            # The face as it will look after the collapse.
-            nf = [v if w_ == u else w_ for w_ in f]
-            if nf[0] == nf[1] or nf[1] == nf[2] or nf[0] == nf[2]:
-                continue                       # degenerates away, not stranded
-            shares = False
-            for a_, b_ in ((nf[0], nf[1]), (nf[1], nf[2]), (nf[2], nf[0])):
-                for gi in vert_faces[a_]:
-                    if gi == fi or gi in _dying or not face_alive[gi]:
-                        continue
-                    g = [v if w_ == u else w_ for w_ in faces[gi]]
-                    if a_ in g and b_ in g:
-                        shares = True
-                        break
-                if shares:
-                    break
-            if not shares:
-                _isolated = True
-                break
-        if _isolated:
-            continue
-
-        # normal-flip guard: faces of u that survive (don't contain v)
-        flip = False
-        ux, uy, uz = PL[u]
-        vx, vy, vz = PL[v]
-        for fi in vert_faces[u]:
-            f = faces[fi]
-            if v in f:
-                continue
-            i = f.index(u)
-            a, b = f[(i + 1) % 3], f[(i + 2) % 3]
-            if _flips(a, b, ux, uy, uz, vx, vy, vz):
-                flip = True
-                break
-        if flip:
-            continue
-
-        # ---- perform collapse u -> v ----
-        # A degenerating face can strand a THIRD vertex — not just u or v — by
-        # taking its last face away.  Those have to be counted, or `alive`
-        # drifts above the real vertex count and the loop keeps collapsing long
-        # after the budget is met: `piratecabin01` asked for 54 vertices and
-        # was ground down to 14, losing 10 of its 14 shapes.
-        stranded = 0
-        for fi in list(vert_faces[u]):
-            f = faces[fi]
-            if v in f:
-                # face degenerates: remove from all its vertices
-                face_alive[fi] = False
-                for w_ in f:
-                    had = bool(vert_faces[w_])
-                    vert_faces[w_].discard(fi)
-                    if had and not vert_faces[w_] and w_ != u and w_ != v:
-                        stranded += 1
-            else:
-                i = f.index(u)
-                f[i] = v
-                if corner_uv is not None:
-                    # Move this corner's UV along u->v by the same parameter
-                    # that moves its position, so the chart follows the
-                    # geometry instead of being squeezed (see cur_uv above).
-                    cu = corner_uv[fi][i]
-                    # Other corners of this face name the surviving verts, so
-                    # their UVs are already correct; only the moved one shifts.
-                    ou = _uv_at(fi, i, u, v, cu)
-                    corner_uv[fi][i] = ou
-                vert_faces[v].add(fi)
-        vert_faces[u].clear()
-        Q[v] += Q[u]
-        A[v] += A[u]
-        version[u] += 1
-        version[v] += 1
-        alive -= 1 + stranded
-        comp_alive[cr] = comp_alive.get(cr, 0) - (1 + stranded)
-        if not vert_faces[v]:
-            alive -= 1
-            comp_alive[cr] = comp_alive.get(cr, 0) - 1
-            continue
-
-        for nb in neighbors(v):
-            heapq.heappush(heap, (cost_of(nb, v), nb, v, version[nb], version[v]))
-            heapq.heappush(heap, (cost_of(v, nb), v, nb, version[v], version[nb]))
-
-    # NOTE: there is deliberately NO component-pruning fallback here.
-    # An earlier version dropped whole connected components smallest-area-first
-    # when collapses stalled above target.  That was written when each SHAPE was
-    # decimated alone, so a "component" meant a disconnected island within one
-    # shape.  Now that a model is decimated as ONE welded soup, every shape is
-    # its own component, and the same code deleted entire shapes to meet the
-    # budget: `piratecabin01` went from 14 shapes / 2,686 verts to 4 shapes /
-    # 15 verts, and `ruinshallnxdeadenda01` lost most of its geometry the same
-    # way.  Overshooting the budget is far better than deleting parts of the
-    # model, so the shape is simply left heavier than target when the error
-    # floor genuinely blocks further collapses.
-
-    # ---- rebuild output arrays --------------------------------------------
-    # Output vertex = (surviving weld node, corner's ORIGINAL UV, material):
-    # faces keep their own texture chart, seams stay intact.  The material is
-    # part of the key so the per-material split afterwards never has to merge
-    # or reindex charts — two materials meeting at a welded seam share the
-    # POSITION (the seam cannot open) while keeping separate output vertices.
-    out_map = {}
-    out_v: list = []
-    out_uv: list = []
-    out_t = []
-    out_m = []
-    for fi, f in enumerate(faces):
-        if not face_alive[fi]:
-            continue
-        mat = int(M0[fi]) if M0 is not None else 0
-        idx3 = []
-        for k in range(3):
-            wnode = f[k]
-            if corner_uv is not None:
-                cu = corner_uv[fi][k]
-                key = (wnode, round(float(cu[0]) * 4096),
-                       round(float(cu[1]) * 4096), mat)
-            else:
-                key = (wnode, mat)
-            j = out_map.get(key)
-            if j is None:
-                j = len(out_v)
-                out_map[key] = j
-                out_v.append(P[wnode])
-                if corner_uv is not None:
-                    out_uv.append(cu)
-            idx3.append(j)
-        if idx3[0] != idx3[1] and idx3[1] != idx3[2] and idx3[0] != idx3[2]:
-            out_t.append(idx3)
-            out_m.append(mat)
-
-    if not out_t:
-        return (np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int32),
-                np.zeros((0, 2), np.float32) if uvs is not None else None,
-                np.zeros((0,), np.int32) if tri_mat is not None else None)
-
-    nv = np.asarray(out_v, dtype=np.float32)
-    nt = np.asarray(out_t, dtype=np.int32)
-    nuv = np.asarray(out_uv, dtype=np.float32) if uvs is not None else None
-    nm = np.asarray(out_m, dtype=np.int32) if tri_mat is not None else None
-    return nv, nt, nuv, nm
-
-
-def _normals(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
-    """Smooth per-vertex normals averaged from face normals."""
-    n_out = np.zeros_like(verts)
-    v0, v1, v2 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
-    fn = np.cross(v1 - v0, v2 - v0)
-    d = np.linalg.norm(fn, axis=1, keepdims=True)
-    d[d < 1e-10] = 1.0
-    fn /= d
-    np.add.at(n_out, tris[:, 0], fn)
-    np.add.at(n_out, tris[:, 1], fn)
-    np.add.at(n_out, tris[:, 2], fn)
-    d2 = np.linalg.norm(n_out, axis=1, keepdims=True)
-    d2[d2 < 1e-10] = 1.0
-    return (n_out / d2).astype(np.float32)
-
-
-def _compute_tangents(verts: np.ndarray, tris: np.ndarray,
-                      uvs: np.ndarray, normals: np.ndarray
-                      ) -> Tuple[np.ndarray, np.ndarray]:
-    """Per-vertex tangents and bitangents via UV differentials (Gram-Schmidt)."""
-    tan1 = np.zeros_like(verts)
-    tan2 = np.zeros_like(verts)
-
-    v0 = verts[tris[:, 0]];  v1 = verts[tris[:, 1]];  v2 = verts[tris[:, 2]]
-    uv0 = uvs[tris[:, 0]];   uv1 = uvs[tris[:, 1]];   uv2 = uvs[tris[:, 2]]
-
-    dv1 = v1 - v0;    dv2 = v2 - v0
-    duv1 = uv1 - uv0; duv2 = uv2 - uv0
-
-    denom = duv1[:, 0] * duv2[:, 1] - duv2[:, 0] * duv1[:, 1]
-    with np.errstate(divide='ignore', invalid='ignore'):
-        r = np.where(np.abs(denom) > 1e-10, 1.0 / denom, 0.0)
-
-    t_face = r[:, None] * (duv2[:, 1:2] * dv1 - duv1[:, 1:2] * dv2)
-    b_face = r[:, None] * (duv1[:, 0:1] * dv2 - duv2[:, 0:1] * dv1)
-
-    np.add.at(tan1, tris[:, 0], t_face); np.add.at(tan1, tris[:, 1], t_face); np.add.at(tan1, tris[:, 2], t_face)
-    np.add.at(tan2, tris[:, 0], b_face); np.add.at(tan2, tris[:, 1], b_face); np.add.at(tan2, tris[:, 2], b_face)
-
-    nT = np.einsum('ij,ij->i', normals, tan1)[:, None]
-    t_ortho = tan1 - nT * normals
-    d_t = np.linalg.norm(t_ortho, axis=1, keepdims=True)
-    d_t[d_t < 1e-10] = 1.0
-    tangents = (t_ortho / d_t).astype(np.float32)
-    bitangents = np.cross(normals, tangents).astype(np.float32)
-    return tangents, bitangents
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +122,7 @@ def _write_shape_geometry(shape, d_v: np.ndarray, d_t: np.ndarray,
     f_v  = d_v[used]
     f_t  = v_map[d_t]
     f_uv = d_uv[used] if d_uv is not None else None
-    f_n  = _normals(f_v, f_t)
+    f_n  = vertex_normals(f_v, f_t)
 
     nv = len(f_v)
     nt = len(f_t)
@@ -809,7 +166,7 @@ def _write_shape_geometry(shape, d_v: np.ndarray, d_t: np.ndarray,
     if has_tang:
         if f_uv is not None:
             try:
-                f_tang, f_bita = _compute_tangents(f_v, f_t, f_uv, f_n)
+                f_tang, f_bita = compute_tangents(f_v, f_t, f_uv, f_n)
                 d.tangents.update_size()
                 for i, (tx, ty, tz) in enumerate(f_tang):
                     d.tangents[i].x = float(tx)
@@ -899,24 +256,17 @@ def _shape_world_transform(root, shape):
 
 def _decimate_nif_inplace(nif_data, ratio: float,
                           cap: int = _NO_CAP,
-                          max_dev_frac: float = _MAX_DEV_FRAC) -> bool:
+                          max_dev_frac: float = MAX_DEV_FRAC) -> bool:
     """Decimate all geometry in the NIF in-place as ONE welded topology.
 
-    Every shape's geometry is transformed to a common (root) space and
-    concatenated into a single vertex/triangle soup, tagged per triangle with
-    the shape it came from.  `_qem_decimate` then welds by position, so two
-    shapes meeting at a shared rim become the SAME topology node: a collapse
-    there moves both sides together and the seam cannot open.  Afterwards the
-    surviving triangles are split back out by material tag and written into
-    their original shapes, which keeps each one's own texture and shader.
-
-    Decimating shapes independently is what produced the holes: each side of a
-    seam chose different survivors, so the rims drifted apart.  Measured on
-    `centrancerockmosslg01`, shared-boundary welding fell from 32% to 9% and
-    the mean gap opened from 3.8 to 93.4 units (6% of the object's diagonal);
-    across 28 multi-shape Oblivion rocks, 27 lost seam welding (mean 44%->20%).
+    Every shape is transformed to root space and concatenated into a single
+    soup tagged per triangle with its source shape, decimated together so a
+    shared rim is one topology node, then split back out by tag so each shape
+    keeps its own texture and shader.  The budget counts WELDED nodes and
+    scales with the model's open-rim fraction.
 
     Returns True if at least one shape survived.
+    See: docs/commentary/asset_convert_terrain.md#qem-topology-budget
     """
     # ---- collect valid shapes ---------------------------------------------
     all_shapes: list = []
@@ -982,38 +332,14 @@ def _decimate_nif_inplace(nif_data, ratio: float,
     mats  = np.concatenate(M).astype(np.int32)
     uvs   = np.concatenate(U).astype(np.float32) if any_uv else None
 
-    # The budget must be expressed in WELDED nodes, because that is what the
-    # collapse loop counts down.  A NIF's vertex array splits a position once
-    # per UV/normal seam — measured across greatforest _far.nif, 314 stored
-    # vertices for 62 distinct positions, 5.0x — so a ratio applied to the
-    # stored count asks for far more than exists.  That is what made the
-    # far-ring tiers inert: `TIER16`'s ratio 0.25 of the stored count works
-    # out to 1.26x the welded count, so `alive > target` was false on entry,
-    # the loop never ran, and `_far16.nif` was written as a byte-for-byte copy
-    # of `_far.nif`.
-    weld_nodes = len(np.unique(np.round(verts / _WELD_EPS).astype(np.int64),
+    weld_nodes = len(np.unique(np.round(verts / WELD_EPS).astype(np.int64),
                                axis=0))
-
-    # ---- topology-aware budget --------------------------------------------
-    # A flat share of the vertex count assumes every model simplifies equally
-    # well, and they do not.  A rock is one closed blob: 12% of its vertices
-    # sit on an open rim, so almost every vertex is interior and free to
-    # collapse.  A building is a pile of open sheets — `piratecabin01` is 30%
-    # boundary, `ruinshallnxdeadenda01` 47% — and those rim vertices are held
-    # in place by the open-rim guard.  Give both the same 5% and the rock
-    # lands on a clean silhouette while the building runs out of collapsible
-    # interior and tears itself apart: measured on the cabin, open edges went
-    # 11.5% (source) -> 21% -> 43% as the target dropped 500 -> 300 -> 54.
-    #
-    # So scale the budget by how much of the model is rim.  A mostly-closed
-    # model keeps the base ratio; a rim-heavy one gets proportionally more
-    # vertices, which is exactly what it needs to still read as itself.
     b_frac = float(is_boundary_fraction(verts, tris))
-    topo_scale = 1.0 + _TOPO_BOUNDARY_WEIGHT * b_frac
+    topo_scale = 1.0 + TOPO_BOUNDARY_WEIGHT * b_frac
     total_target = min(max(_MIN_TOTAL_TARGET,
                            int(weld_nodes * ratio * topo_scale)), cap)
 
-    d_v, d_t, d_uv, d_m = _qem_decimate(verts, tris, uvs, total_target,
+    d_v, d_t, d_uv, d_m = qem_decimate(verts, tris, uvs, total_target,
                                         max_dev_frac, tri_mat=mats)
     if d_m is None or not len(d_t):
         return False
@@ -1281,7 +607,7 @@ def _report_far_nif_error(what: str, exc: Exception) -> None:
 def generate_far_nif(src_path: Path, dst_path: Path,
                      decimate_ratio: float = _DECIMATE_RATIO,
                      cap: int = _NO_CAP,
-                     max_dev_frac: float = _MAX_DEV_FRAC) -> bool:
+                     max_dev_frac: float = MAX_DEV_FRAC) -> bool:
     """Generate dst_path (_far.nif) by decimating each shape in src_path.
 
     Only processes NIFs already in Skyrim format (v20.2.0.7).

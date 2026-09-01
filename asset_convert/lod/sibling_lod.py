@@ -214,7 +214,7 @@ def touched_worldspace_fids(plugin_esm: Path) -> set:
 
     One linear header walk; record bodies are skipped, never parsed.
     """
-    from asset_convert.lod.lod_gen import formid_remap_table
+    from asset_convert.lod.esm_scan import formid_remap_table
     plugin_esm = Path(plugin_esm)
     gmap = formid_remap_table(plugin_esm)
     raw = plugin_esm.read_bytes()

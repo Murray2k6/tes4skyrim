@@ -81,7 +81,7 @@ TARGET_FID = 0x0100003C
 # 01 is Oblivion.esm; `_norm` states that mapping explicitly rather than
 # hard-coding whatever integer the global table happens to assign.
 def _norm(fid: int, masters=('Skyrim.esm', 'Oblivion.esm')) -> int:
-    from asset_convert.lod.lod_gen import global_file_index
+    from asset_convert.lod.esm_scan import global_file_index
     owner = (masters[fid >> 24] if (fid >> 24) < len(masters) else None)
     assert owner is not None, 'test ids should name a declared master'
     return global_file_index(owner.lower()) << 24 | (fid & 0x00FFFFFF)

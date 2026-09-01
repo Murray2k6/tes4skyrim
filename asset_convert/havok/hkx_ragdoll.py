@@ -57,6 +57,9 @@ import numpy as np
 
 from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
+from asset_convert.havok.ragdoll_math import (bone_worlds, capsule_inertia,
+                                              mat_row_to_quat,
+                                              quat_to_mat_row, unit, v4)
 from asset_convert.havok.hkx_xml import fmt_vec
 from asset_convert.havok import hkx_xml
 from pyffi.formats.nif import NifFormat
@@ -105,126 +108,6 @@ _MAX_IMPULSE = '340282001837565600000000000000000000000.000000'
 # ---------------------------------------------------------------------------
 # Extraction from the Oblivion skeleton.nif
 # ---------------------------------------------------------------------------
-
-def quat_to_mat_row(q):
-    """xyzw quat → row-convention 3x3 (inverse of mat33_to_quat_xyzw)."""
-    x, y, z, w = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w)],
-        [2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w)],
-        [2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)],
-    ])
-
-
-def _mat_row_to_quat(m):
-    """Row-convention 3x3 → xyzw quat (Shepperd)."""
-    m00, m01, m02 = m[0]
-    m10, m11, m12 = m[1]
-    m20, m21, m22 = m[2]
-    tr = m00 + m11 + m22
-    if tr > 0:
-        s = math.sqrt(tr + 1.0) * 2
-        w = 0.25 * s
-        x = (m12 - m21) / s
-        y = (m20 - m02) / s
-        z = (m01 - m10) / s
-    elif m00 > m11 and m00 > m22:
-        s = math.sqrt(1.0 + m00 - m11 - m22) * 2
-        w = (m12 - m21) / s
-        x = 0.25 * s
-        y = (m10 + m01) / s
-        z = (m20 + m02) / s
-    elif m11 > m22:
-        s = math.sqrt(1.0 + m11 - m00 - m22) * 2
-        w = (m20 - m02) / s
-        x = (m10 + m01) / s
-        y = 0.25 * s
-        z = (m21 + m12) / s
-    else:
-        s = math.sqrt(1.0 + m22 - m00 - m11) * 2
-        w = (m01 - m10) / s
-        x = (m20 + m02) / s
-        y = (m21 + m12) / s
-        z = 0.25 * s
-    n = math.sqrt(w * w + x * x + y * y + z * z)
-    return (x / n, y / n, z / n, w / n)
-
-
-def bone_worlds(bones):
-    """World (rotation 3x3 row-convention, translation vec3) per anim bone."""
-    worlds = []
-    for b in bones:
-        R = quat_to_mat_row(b.quat_xyzw) * b.scale
-        t = np.array(b.translation, dtype=float)
-        if b.parent < 0:
-            worlds.append((R, t))
-        else:
-            Rp, tp = worlds[b.parent]
-            worlds.append((R @ Rp, t @ Rp + tp))
-    return worlds
-
-
-def _unit(v):
-    v = np.asarray(v, dtype=float)
-    return v / (np.linalg.norm(v) or 1.0)
-
-
-def v4(v, scale=1.0):
-    return np.array([v.x * scale, v.y * scale, v.z * scale], dtype=float)
-
-
-def _capsule_inertia(shape, mass):
-    """Principal inertia diagonal (Ixx, Iyy, Izz) of a solid capsule of the
-    given (radius, vertexA, vertexB), about its centre of mass.
-
-    A capsule is a cylinder (length L along its segment axis, radius r) capped
-    by two hemispheres.  This is the well-conditioned tensor Havok expects —
-    replacing Oblivion's ill-conditioned authored diagonals, which diverge the
-    ragdoll solver (rigid corpse).  The diagonal is expressed in the capsule's
-    local frame with the segment along the discovered principal axis, then
-    mapped back to (x,y,z) so the axis with the segment gets Iaxial and the
-    other two get Iradial — vanilla stores exactly this axis-aligned form
-    (thin limbs anisotropic ~5x, hubs near-isotropic), never worse than ~7x.
-    """
-    r, va, vb = (float(shape[0]), np.asarray(shape[1], float),
-                 np.asarray(shape[2], float))
-    seg = vb - va
-    L = float(np.linalg.norm(seg))
-    r = max(r, 1e-3)
-
-    # masses split by volume between the cylinder and the two hemisphere caps
-    v_cyl = math.pi * r * r * L
-    v_cap = (4.0 / 3.0) * math.pi * r ** 3
-    v_tot = v_cyl + v_cap or 1.0
-    m_cyl = mass * v_cyl / v_tot
-    m_cap = mass * v_cap / v_tot
-
-    # axial (about the segment axis) and radial (perpendicular) moments
-    i_axial = 0.5 * m_cyl * r * r + 2.0 * (0.4 * m_cap * r * r)
-    i_radial = (m_cyl * (r * r / 4.0 + L * L / 12.0)
-                + 2.0 * m_cap * (0.4 * r * r
-                                 + 0.5 * (L / 2.0) ** 2 + 0.375 * r * L))
-
-    # place i_axial on the axis most aligned with the segment; radial on the
-    # other two.  A near-spherical capsule (L~0) comes out near-isotropic.
-    axis = int(np.argmax(np.abs(seg))) if L > 1e-6 else 2
-    diag = [i_radial, i_radial, i_radial]
-    diag[axis] = i_axial
-
-    # Clamp the principal-axis RATIO to what the ragdoll solver stays stable
-    # under.  Even the exact capsule tensor of a long thin limb (forearm ~31x)
-    # ill-conditions Havok's joint solver; vanilla Skyrim's WORST creature
-    # body is 6.6x, so it evidently fattens the effective inertia ellipsoid.
-    # Raise the small axes toward the largest until no axis exceeds MAX_ANISO
-    # times the smallest — preserves the ellipsoid orientation (limbs still
-    # resist axial spin least) while guaranteeing a well-conditioned tensor.
-    MAX_ANISO = 6.5
-    lo = min(diag)
-    if lo > 0:
-        diag = [min(x, lo * MAX_ANISO) for x in diag]
-        diag = [max(x, max(diag) / MAX_ANISO) for x in diag]
-    return tuple(max(x, 1e-6) for x in diag)
-
 
 class RagdollPart:
     def __init__(self):
@@ -596,8 +479,7 @@ def _joint_info(kind, d, cid, pid, _to_bone):
     axle_b = _to_bone(pid, v4(d.axle_b), 0)
     p2b = getattr(d, 'perp_2_axle_in_b_2', None)
     if p2b is not None:
-        # stored basis B = (axle, p1, p2); p1 = p2 x axle
-        p1b = np.cross(_unit(v4(p2b)), _unit(v4(d.axle_b)))
+        p1b = np.cross(unit(v4(p2b)), unit(v4(d.axle_b)))
         rows_b = _basis_rows(axle_b, _to_bone(pid, p1b, 0))
     else:
         rows_b = _basis_rows(axle_b, np.array([0.0, 0.0, 1.0]))
@@ -733,7 +615,7 @@ def extract_ragdoll(skeleton_nif_path: str, bones: list):
         con_of[id(child)] = ('ragdoll', {
             'rows_a': _basis_rows(np.array([1.0, 0.0, 0.0]),
                                   np.array([0.0, 1.0, 0.0])),
-            'rows_b': _basis_rows(_unit(R_rel[0]), _unit(R_rel[1])),
+            'rows_b': _basis_rows(unit(R_rel[0]), unit(R_rel[1])),
             'piv_a': com_child,
             'piv_b': piv_parent,
             'cone': _SYNTH_CONE,
@@ -807,7 +689,7 @@ def extract_ragdoll(skeleton_nif_path: str, bones: list):
         parts.append(p)
 
     for p in parts:
-        p.inertia = _capsule_inertia(p.shape, p.mass)
+        p.inertia = capsule_inertia(p.shape, p.mass)
     return parts
 
 
@@ -1059,7 +941,7 @@ def _add_rigid_body(pf, part, world_R, world_t, filter_info=0):
     shape.param('vertexB', fmt_vec(vb[0], vb[1], vb[2], r))
 
     com_w = part.com @ world_R + world_t
-    quat = _mat_row_to_quat(world_R)
+    quat = mat_row_to_quat(world_R)
     r_obj = max(np.linalg.norm(va), np.linalg.norm(vb)) + r
 
     body = pf.add('hkpRigidBody')
@@ -1430,12 +1312,12 @@ def emit_ragdoll(pf, bones, parts, anim_skel_ref):
         R, t = worlds[p.anim_index]
         if p.parent < 0:
             lt = (t - t_actor) @ _R_actor.T
-            lq = _mat_row_to_quat(R @ _R_actor.T)
+            lq = mat_row_to_quat(R @ _R_actor.T)
         else:
             Rp, tp = worlds[parts[p.parent].anim_index]
             inv = Rp.T
             lt = (t - tp) @ inv
-            lq = _mat_row_to_quat(R @ inv)
+            lq = mat_row_to_quat(R @ inv)
         pose_lines.append(fmt_vec(*lt) + fmt_vec(*lq)
                           + fmt_vec(1.0, 1.0, 1.0))
     rskel.param_raw('referencePose', '\n'.join(pose_lines),

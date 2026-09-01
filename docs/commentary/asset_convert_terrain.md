@@ -7,6 +7,7 @@
 - [Grass (GRAS) conversion — record invariants + shader profile (2026-07-09)](#grass-conversion-record-invariants-shader)
 - [Terrain/LOD/LAND-adjacent asset notes](#terrainlodland-adjacent-asset-notes)
 - [Lava surfaces — Oblivion realm water rendered as actual lava (2026-08-23)](#lava-surfaces-oblivion-realm-water)
+- [QEM decimation: the budget and its tuning constants](#qem-decimation-tuning)
 
 ## Grass (GRAS) conversion — record invariants + shader profile (2026-07-09)
 <a id="grass-conversion-record-invariants-shader"></a>
@@ -326,3 +327,329 @@ can resolve, so the worldspace silently drops out of the LOD set.
 A master's records are also NOT reliably a sibling directory: an imported mod's
 plugins live inside their mod's shared folder, so `.parent` is that folder
 rather than `export/`. Masters resolve through the source registry instead.
+
+## QEM decimation: the budget and its tuning constants
+<a id="qem-decimation-tuning"></a>
+
+**Code:** `asset_convert/lod/mesh_decimate.py`, called from
+`asset_convert/lod/lod_far_gen.py`.
+
+The budget targets roughly vanilla Skyrim object-LOD density +25%. Vanilla
+Tamriel spends **~11,000 bytes of object LOD per CELL at level 4** (measured
+from `Skyrim - Meshes1.bsa`); before this pass we spent **~410,000, i.e. 37x
+vanilla**, because decimation was structurally broken and every constant had
+been clamped down to hide the damage:
+
+- Shapes were decimated **independently**, so shared rims drifted apart and
+  tore holes. `_BOUNDARY_WEIGHT` froze both rims to limit the drift, and
+  `_MIN_SRC_TRIS`/`_MIN_TRIS` deleted small shapes rather than risk them.
+- Collapses kept the **original UV**, so charts were squeezed into a third of
+  their proper footprint. `MAX_DEV_FRAC` was clamped to 0.03 to limit the
+  shearing, which stalled reduction at ~40% of source verts against a nominal
+  8% target.
+
+Both defects are fixed — one welded topology per model, UVs interpolated onto
+the survivor — so the defensive constants are gone and the real budget stands
+on its own.
+
+### Why welding matters
+
+Decimating a model as ONE welded topology is what keeps it watertight. A rim
+shared by two shapes is a free boundary to both: each side chooses different
+survivors, the rims drift apart, and the gap is the hole. Welding makes the
+shared rim one graph node, so a collapse moves both sides at once.
+
+### The constants
+
+| Constant | Value | Role |
+|---|---:|---|
+| `WELD_EPS` | 1e-3 | position weld tolerance, game units |
+| `MAX_DEV_FRAC` | 0.25 | error floor, as a fraction of the model diagonal |
+| `TOPO_BOUNDARY_WEIGHT` | 6.0 | budget multiplier per unit of boundary fraction |
+| `_BOUNDARY_WEIGHT` | 1.0 | boundary-edge constraint quadric weight (× len²) |
+| `_STITCH_FRAC` | 0.008 | proximity-stitch tolerance, fraction of the diagonal |
+| `_STITCH_MAX_EDGE_MULT` | 1.0 | stitch radius cap, in median edge lengths |
+| `_EDGE_LEN_REG` | 0.5 | edge-length regularization (× mean face area) |
+
+`_BOUNDARY_WEIGHT` used to be 8.0, to stop the two sides of a shared rim
+drifting apart — which it could never do, because each side was decimated
+separately and nothing made them agree. Now that a model is one welded
+topology the seam cannot open, so it only has to hold genuinely open rims
+(window frames, wall tops, leaf-card edges) a little longer than interior
+geometry.
+
+`MAX_DEV_FRAC` at 0.25 is deliberately loose: at LOD range (2+ km) a quarter
+of the model diagonal is well under a pixel of silhouette.
+
+`TOPO_BOUNDARY_WEIGHT` scales the budget by how much of the model is open rim,
+since rim vertices are pinned by the open-rim guard — a 30%-rim building gets
+2.8x the vertices of a closed rock at the same ratio.
+
+`_STITCH_MAX_EDGE_MULT` caps the stitch radius so a merge never crosses more
+than the scale of the authored detail.
+
+### Stitching: why an exact weld is not enough
+<a id="qem-stitch-pass"></a>
+
+An exact position weld only joins vertices that **coincide**. Game models are
+not built that way: `piratecabin01` is 14 open sheets that overlap and
+interpenetrate — visually one solid cabin, topologically **33 separate
+components**, with only 20 of 91 shape pairs having any vertex within a unit of
+each other. Decimating that divides one budget among 33 pieces, which grinds
+each to nothing and takes whole planks with it.
+
+So nodes that are merely CLOSE are merged, not just identical ones. The
+tolerance is relative to the model, because "touching" means something
+different on a 100-unit crate and an 8,000-unit fort. The stitch runs before
+quadrics are built, so the collapse sees one connected surface and simplifies a
+plank into its neighbour exactly as it simplifies one rock face into the next.
+
+**The radius is capped by the model's DETAIL scale, not just its overall
+size.** A fraction of the diagonal is right for a building, whose planks are
+large and genuinely overlap, but on thin repeated geometry it exceeds the size
+of the parts themselves and fuses things that merely pass near each other:
+`mainmast01` is rigging with a 2,968-unit diagonal and a 9-unit median edge, so
+a 24-unit radius welded separate ropes into one and the collapse dragged them
+together. Measured across models, radius / median-edge cleanly separates the
+two cases:
+
+| model | ratio | wants stitching |
+|---|---:|---|
+| `piratecabin01` | 0.38 | yes |
+| castle | 0.79 | yes |
+| IC wall | 1.78 | no |
+| `mainmast01` | 2.62 | no |
+
+Hence the cap at the median edge length. When a group is merged the
+representative keeps its **original** position — averaging the group would pull
+the surface off the silhouette.
+
+### Why welding is what stops seams tearing
+<a id="qem-weld-seams"></a>
+
+`tri_mat` tags each input triangle with the material (source shape) it came
+from. It is carried through the collapse unchanged and returned alongside the
+surviving triangles, which is what lets a whole model be welded into ONE
+topology and decimated together: shared rims between shapes become genuinely
+shared graph nodes, so a collapse moves both sides at once and the seam cannot
+tear. The triangles are split back out per material afterwards.
+
+Decimating each shape separately instead let the two sides of a seam pick
+different survivors and drift apart. Measured on `centrancerockmosslg01`, the
+shared boundary went from **32% welded to 9%**, and the gap opened from **3.8
+to 93.4 units** — 6% of the object diagonal.
+
+### The four collapse guards
+<a id="qem-collapse-guards"></a>
+
+Each guard exists because removing it produced a specific measured failure.
+
+**Open-rim guard.** A boundary vertex may only collapse INTO another boundary
+vertex, so an open rim simplifies along itself and stays where the author put
+it. The constraint quadrics cannot prevent this on their own, because a
+half-edge collapse is charged the SURVIVOR's quadric — they only penalise
+moving a rim vertex ALONG its edge line, and say nothing about it being
+absorbed upward into the body. Measured on `rockgreatforest1125rdm`, whose 106
+rim verts all sit at z=-241.2: without the guard only **12 of 178 rim nodes
+survived and the rim rose 162 units** — 34% of the model height — leaving the
+rock floating above the terrain.
+
+**Per-component floor.** A model is often many DISCONNECTED pieces —
+`piratecabin01` is 33 planks, beams and panels — and a global vertex budget
+says nothing about how it should be split between them. Asking for 54 vertices
+across 33 pieces is ~1.6 each, far below the 4 a closed piece needs, so the
+loop ground whole planks out of existence and the "holes" were missing parts,
+not torn surface. Every component gets its own floor of `_COMP_MIN = 4`: four
+vertices is the minimum for a closed piece (a tetrahedron), and while a flat
+open sheet still reads at 3, one wasted vertex on a plank is nothing against
+the plank disappearing.
+
+**Isolation guard.** Decimation must never leave a triangle floating on its
+own. A collapse removes the faces containing edge (u,v) and rewrites the rest;
+if that would strand any surviving neighbour as a triangle sharing no edge with
+another live face, the collapse is refused. Without it a low budget shreds a
+surface into loose confetti rather than simplifying it, which reads in-game as
+holes with stray triangles floating in them.
+
+**Normal-flip guard.** A collapse is rejected if it would flip an adjacent
+face's normal.
+
+### Stranded vertices must be counted
+<a id="qem-stranded-verts"></a>
+
+A degenerating face can strand a THIRD vertex — not just `u` or `v` — by taking
+its last face away. Those have to be counted, or `alive` drifts above the real
+vertex count and the loop keeps collapsing long after the budget is met:
+`piratecabin01` asked for 54 vertices and was ground down to **14, losing 10 of
+its 14 shapes**.
+
+### UV charts: why the corner UV is mutable
+<a id="qem-uv-charts"></a>
+
+A collapse u→v moves the corner's POSITION to v while the corner keeps u's
+ORIGINAL UV. The triangle then covers the geometry both vertices used to span,
+but its UV footprint is unchanged — so the chart is squeezed into less and less
+of the texture as collapses accumulate. Measured on
+`rockgreatforest1500fgdrlichen`: the far mesh retains **96.3% of the source's
+geometric area but only 32.3% of its UV area**, leaving 80% of triangles below
+half the source texel density. On `icexteriorwall02` the density spread reached
+**53,303x** — a single-texel streak, which reads in-game as a garbled or
+invisible texture.
+
+The fix is a MUTABLE UV per corner that moves with the vertex: when u collapses
+into v, the corner's UV becomes the point in u's chart corresponding to v's
+position. The face still holds its other two corners, whose UVs are known and
+whose positions are unchanged, so the face defines a local affine map from
+position to UV; solving it for v's position gives exactly where v lands in this
+face's chart. UVs are piecewise-linear over the surface, so this is exact and
+keeps the chart's area in step with the geometry it covers. A degenerate face
+leaves the UV unchanged.
+
+A corner's UV is per-FACE once it starts moving, since two faces sharing a
+vertex can sit in different charts, so each corner gets its own slot.
+
+### Deliberately NO component-pruning fallback
+<a id="qem-no-component-pruning"></a>
+
+An earlier version dropped whole connected components smallest-area-first when
+collapses stalled above target. That was written when each SHAPE was decimated
+alone, so a "component" meant a disconnected island within one shape. Now that
+a model is decimated as ONE welded soup, every shape is its own component, and
+the same code deleted entire shapes to meet the budget: `piratecabin01` went
+from **14 shapes / 2,686 verts to 4 shapes / 15 verts**, and
+`ruinshallnxdeadenda01` lost most of its geometry the same way.
+
+Overshooting the budget is far better than deleting parts of the model, so a
+shape is simply left heavier than target when the error floor genuinely blocks
+further collapses.
+
+### Scalar arithmetic in the inner loop
+<a id="qem-scalar-inner-loop"></a>
+
+`cost_of`, `flips` and `uv_at` are written out longhand in plain Python
+scalars rather than NumPy. They run ~100k times per shape on 3-vectors, where
+NumPy's per-call dispatch overhead dwarfs the arithmetic — `np.cross` alone
+spent more time in `normalize_axis_tuple`/`moveaxis` than on the cross product.
+The corner UVs are plain `(u, v)` tuples for the same reason.
+
+### The budget must be counted in WELDED nodes
+<a id="qem-budget-welded-nodes"></a>
+
+The target handed to `qem_decimate` must be expressed in **welded nodes**,
+because that is what the collapse loop counts down. A NIF's vertex array splits
+a position once per UV/normal seam: measured across greatforest `_far.nif`,
+**310 stored vertices for 62 distinct positions — 5.0x**. So a ratio applied to
+the stored count asks for far more geometry than actually exists.
+
+That is what made the far-ring tiers inert. `TIER16`'s ratio of 0.25 against
+the stored count worked out to **1.26x the welded count**, so `alive > target`
+was false on entry, the loop never ran, and `_far16.nif` was written as a
+byte-for-byte copy of `_far.nif`.
+
+## Scoping a LAND scan to one worldspace
+<a id="land-scan-scoping"></a>
+
+**Code:** `scan_land_file` in `asset_convert/lod/terrain_lod.py`.
+
+`known_wrld_fid` is the target worldspace's FormID as resolved from the file
+that DEFINES it. An override plugin edits a master's worldspace through the
+master's GRUPs — its records sit under a type-1 GRUP labelled with the master's
+WRLD FormID — while shipping no WRLD record of its own. Passing the master's
+FormID in is what lets those edits be scoped correctly instead of falling back
+to a wildcard.
+
+`allow_unscoped` decides what "this file has no such WRLD record, and no FormID
+was supplied" means:
+
+- **True** (the default, correct for the file the worldspace is sourced FROM)
+  keeps the historical fallback: take every LAND record, because a file scanned
+  for its own worldspace may name it differently, and returning nothing would
+  silently produce no terrain at all.
+- **False** is mandatory for OVERLAYS, where the same fallback is a
+  data-corruption bug: it imports the plugin's OTHER worldspaces as if they
+  were this one. `Morrowind_ob.esm` ships no `TES4Tamriel` WRLD, so all **5,796
+  of its Vvardenfell cells** were collected into Cyrodiil's heightmap,
+  overwriting **5,787 of Oblivion's own Tamriel cells** and stamping
+  Vvardenfell across central Cyrodiil's distant terrain.
+
+A CELL record an override ships carries only the fields its author changed, so
+its XCLC grid coords may be absent. Coordinates are resolved against the coords
+already learned from earlier files in load order before falling back to this
+file's own.
+
+## LODGen rejects poisoned floats, and drops the whole worldspace
+<a id="lodgen-poisoned-floats"></a>
+
+**Code:** `finite` in `asset_convert/lod/esm_scan.py`.
+
+LODGen's C# parser rejects a poisoned line and then emits **NO .bto tiles for
+the entire worldspace**, so one bad REFR costs all of its object LOD. Two
+distinct poisons appear in real plugins, and they fail differently:
+
+| value | formats as | LODGen error |
+|---|---|---|
+| NaN (`0x7FC00000`) | `nan` | "Input string was not in a correct format" |
+| `-FLT_MAX` (`0xFF7FFFFF`) | a 40-digit literal | "Value was either too large or too small for a Single" |
+
+The second is **finite**, so an `isfinite()` check alone lets it straight
+through — hence the magnitude bound as well. `_PLACEMENT_LIMIT` is 1e9;
+Oblivion's largest worldspace spans ~2e6 units, so a sane coordinate never
+comes close.
+
+TWMP Valenwood/Elsweyr ships **505 REFRs** carrying one or the other in DATA's
+RotZ. A MASTER's record reaches this parser without passing the import-side
+`get_float` clamp, so both screens are needed here too.
+
+## The parsed-ESM cache
+<a id="parsed-esm-cache"></a>
+
+**Code:** `parse_esm_cached` in `asset_convert/lod/esm_scan.py`.
+
+`generate_lod()` is called ONCE PER WORLDSPACE and used to re-parse the whole
+plugin every time. Oblivion.esm ships 18 worldspaces and the parse is **5.7 s
+over 613 MB (1,017,612 refs)**, so ~103 s of the object-LOD stage was spent
+re-deriving byte-for-byte identical data.
+
+Keyed on `(path, mtime_ns, size)` so a rebuilt ESM is re-parsed rather than
+served stale.
+
+The cache holds the BASE plugin and its OVERLAYS together. It used to keep a
+single entry, which made the two uses evict each other: the overlay merge
+parses every overlay once per worldspace, so a 1-entry cache serving only the
+base still re-parsed ~930 MB of overlays 18 times — **114 s measured on the
+12-plugin selection, of which 4 s was useful.**
+
+The bound is the number of plugins in one run (a dozen), not a byte budget:
+these are compact index structures, and the raw `bytes` object is released
+inside `parse_esm` as soon as the scan finishes.
+
+🔴 The returned structures are treated as **READ-ONLY** by callers.
+`write_lodgen_input` builds its own per-worldspace views and `generate_lod`
+merges overlays into a COPY. If that ever stops being true this must hand out
+deep copies instead — the overlay merge in particular MUST NOT mutate what it
+is handed, now that the same object is served to the next worldspace.
+
+### The topology-aware budget
+<a id="qem-topology-budget"></a>
+
+A flat share of the vertex count assumes every model simplifies equally well,
+and they do not. A rock is one closed blob: **12%** of its vertices sit on an
+open rim, so almost every vertex is interior and free to collapse. A building
+is a pile of open sheets — `piratecabin01` is **30%** boundary,
+`ruinshallnxdeadenda01` **47%** — and those rim vertices are pinned by the
+open-rim guard.
+
+Give both the same 5% and the rock lands on a clean silhouette while the
+building runs out of collapsible interior and tears itself apart. Measured on
+the cabin, open edges went **11.5% (source) → 21% → 43%** as the target dropped
+500 → 300 → 54.
+
+So the budget scales by how much of the model is rim:
+
+```
+topo_scale   = 1.0 + TOPO_BOUNDARY_WEIGHT * boundary_fraction
+total_target = clamp(weld_nodes * ratio * topo_scale, _MIN_TOTAL_TARGET, cap)
+```
+
+A mostly-closed model keeps the base ratio; a rim-heavy one gets
+proportionally more vertices, which is what it needs to still read as itself.

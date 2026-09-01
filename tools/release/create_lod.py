@@ -77,7 +77,7 @@ def main() -> int:
                                            drop_staged_meshes,
                                            LOD_DIR_NAME)
     from asset_convert.lod.terrain_lod import find_worldspace_fid
-    from asset_convert.lod.lod_gen import formid_remap_table
+    from asset_convert.lod.esm_scan import formid_remap_table
 
     out_root = (Path(args.output_dir) if args.output_dir
                 else SCRIPT_DIR / "output")
