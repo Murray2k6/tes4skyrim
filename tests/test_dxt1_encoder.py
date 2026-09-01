@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert.lod import terrain_lod as T
+from asset_convert.lod import dds_codec as T
 
 
 def _reference(img):
@@ -32,15 +32,15 @@ def _reference(img):
     padded = np.zeros((ph, pw, 3), dtype=np.uint8)
     padded[:h, :w] = img
 
-    blocks = T._blocks_4x4(padded).astype(np.int32)
-    c0 = T._rgb_to_565_vec(blocks.max(axis=1))
-    c1 = T._rgb_to_565_vec(blocks.min(axis=1))
+    blocks = T.blocks_4x4(padded).astype(np.int32)
+    c0 = T.rgb_to_565_vec(blocks.max(axis=1))
+    c1 = T.rgb_to_565_vec(blocks.min(axis=1))
     swap = c0 < c1
     c0, c1 = np.where(swap, c1, c0), np.where(swap, c0, c1)
     eq = c0 == c1
     c1 = np.where(eq & (c0 != 0), c0 - 1, c1)
     c0 = np.where(eq & (c0 == 0), 1, c0)
-    p0, p1 = T._565_to_rgb_vec(c0), T._565_to_rgb_vec(c1)
+    p0, p1 = T.c565_to_rgb_vec(c0), T.c565_to_rgb_vec(c1)
     palette = np.stack([p0, p1, (2 * p0 + p1) // 3, (p0 + 2 * p1) // 3], axis=1)
 
     diffs = blocks[:, :, None, :] - palette[:, None, :, :]

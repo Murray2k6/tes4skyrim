@@ -1,7 +1,7 @@
 """_transform_verts: vectorised vertex transform for the winding oracle.
 
 _visual_tri_soup transforms every render vertex under a node into Havok units
-to serve as the orientation oracle for _repair_inverted_floors.  It used to do
+to serve as the orientation oracle for repair_inverted_floors.  It used to do
 that one vertex at a time through PyFFI's ``Vector3.__mul__``, which recurses
 into get_matrix_33()/get_translation() and allocates several Vector3 objects
 per vertex -- measured 3.42 s of 18.27 s (18.7%) on a 20-mesh sample, in 24,887

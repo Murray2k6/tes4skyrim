@@ -1,6 +1,6 @@
 # asset_convert/collision/collision.py — Havok collision
 
-**Code:** `asset_convert/collision/collision.py`, `asset_convert/collision/collision_extract.py`, `asset_convert/collision/mopp.py`
+**Code:** `asset_convert/collision/collision.py`, `asset_convert/collision/collision_constraints.py`, `asset_convert/collision/collision_winding.py`, `asset_convert/collision/collision_hulls.py`, `asset_convert/collision/collision_material.py`, `asset_convert/collision/collision_extract.py`, `asset_convert/collision/mopp.py`
 
 ## Contents
 
@@ -249,6 +249,127 @@ false**, and the gate hid a signal that was in the file the whole time.
   ~9-12% "inverted" raw while `lowerclasschair01` and `lowerclassbench01` in
   fact have **0** triangles disagreeing with their normals.
 
+### <a id="concave-hull-decomposition"></a>Concave clutter hull decomposition
+
+**Code:** `asset_convert/collision/collision_hulls.py`
+
+One convex hull over a concave prop — a chair, a cart, a rack — blocks every
+gap the shape should leave open. The hull is therefore cut recursively along
+whichever axis wastes the most volume and shipped as a `bhkListShape` of
+convex pieces.
+
+- **The cut must pay for itself.** A split is accepted only when the two piece
+  hulls together lose at least `1 - _DECOMP_SPLIT_GAIN` of the parent's volume,
+  so a genuinely convex shape stays a single piece.
+- **An axis under 3 game units is too thin to split**, and a piece under
+  `_DECOMP_MIN_PIECE_VERTS` vertices is rejected.
+- **Points near the cut are shared by BOTH halves**, so the piece hulls overlap
+  slightly and leave no gap. Each half has to reach past the first vertex
+  "ring" on the far side of the cut — sparse vertex rows otherwise leave an
+  unfilled band of collision between the two hulls.
+- **Vertices are quantised to a grid** (0.004 / 0.008 / 0.015 havok units =
+  0.28 / 0.56 / 1.05 game units) to keep hull vertex counts in the vanilla
+  range, taking the first grid that lands under `_DECOMP_MAX_HULL_VERTS`.
+- **scipy facet equations are triangulated**, so coplanar planes are deduped.
+  The convention is `n·x + d <= 0` inside, with `n` an outward unit normal.
+- **Face planes are pushed out by the convex radius.** The plane sits at
+  `n·x = -w`, and vanilla stores face distance = vertex distance + radius.
+
+### <a id="havok-material-crc"></a>Material values: enum index vs CRC
+
+**Code:** `asset_convert/collision/collision_material.py`
+
+Oblivion stores a havok material as a small enum index (0-31); Skyrim stores a
+CRC of the material's name. Values ≤ 31 are therefore Oblivion indices and
+anything larger is already a Skyrim CRC, which makes `convert_materials`
+idempotent — safe to call on a partially converted tree.
+
+`set_havok_material` assigns `it._value` directly instead of calling PyFFI's
+`set_value()`. **`EnumBase.set_value` only logs a warning and RETURNS when the
+value is not in its enum list**, and every Skyrim CRC is outside the
+Oblivion-era list PyFFI matched at read time, so `set_value` would silently do
+nothing. PyFFI also instantiates one enum item per read context, typed as
+whichever variant matched the source version, which is why the write loops over
+`_items` rather than touching a single field.
+
+### <a id="winding-repair-steps"></a>The four steps, and what each one can see
+
+**Code:** `asset_convert/collision/collision_winding.py`
+
+| Step | Question it answers | Gated |
+|---|---|---|
+| 0 — authored normal | Does this triangle contradict its own recorded normal? | no |
+| 1 — relative orientation | Do edge-neighbours traverse the shared edge in opposite directions? | yes |
+| 2 — absolute sign | Which way does this whole COMPONENT face? | yes |
+| 3 — walkable repair | Which way does this ONE floor triangle face? | yes |
+
+Step 1 is exact and threshold-free: two triangles sharing an edge are
+consistently wound if and only if they traverse it in opposite directions, so a
+breadth-first walk of the shared-edge graph settles a whole connected component
+from whichever triangle it starts on. It undoes a dropped strip parity exactly
+and is inert on correctly-wound input.
+
+Step 2 supplies the absolute reference step 1 cannot: flipping every triangle
+of a component is also self-consistent. A CLOSED component must enclose
+positive volume; otherwise the render mesh decides, since the artist's visual
+winding is correct by construction. The visual vote needs a quorum — at least
+half the component's triangles must have seen a qualifying visual face. Every
+false positive measured on already-correct vanilla collision came from a single
+stray facet (typically the far skin of a thin slab: an altar top, a shelf, a
+step tread) condemning a whole component. Where neither test is decisive the
+component is left alone: a lone down-facing surface is a perfectly valid ceiling
+or overhang, and flipping it would punch a new hole.
+
+### <a id="step-3-walkable-repair"></a>Step 3 — per-triangle walkable repair
+
+Step 2 decides one sign for a WHOLE component, which is right for a uniformly
+reversed surface but blind to a small patch inside a large one.
+`exUdeUship`'s raised foredeck is 12-22 triangles inside hull components of
+384-610, so the hull's correct faces outvote it ~1000:1 and the deck stays
+inverted — you fall through the front of the chargen ship.
+
+It is blind for a second reason too: the deck is a ZERO-THICKNESS double-sided
+sheet in the render mesh, so its up skin and down skin share a plane (measured
+mean z 3.6533 vs 3.6787). Step 2 weights votes by 1/distance, so the coincident
+down skin scores ~200000 against the real walkable skin's ~33 and "nearest face
+wins" picks the wrong one.
+
+So step 3 asks the question that actually matters for a floor, and asks it PER
+TRIANGLE: of the render faces **coincident** with this down-facing collision
+face, which way does the nearest one point? Coincident, not merely nearby — the
+render face has to BE this surface for its normal to settle the question, which
+is what makes the double-sided sheet decidable (the true skin sits ~0.004 away,
+any other surface is 0.2+). A face with no coincident render skin is a genuine
+underside or overhang and is left alone.
+
+The test is COINCIDENCE, not proximity, so the tolerances are tight. Measured on
+`exUdeUship`'s foredeck the walkable skin sits at dxy 0.003-0.006 / dz 0.002
+from its collision face, while the nearest DOWN skin is 0.2-1.6 away — three
+orders of magnitude of separation, so this is a wide margin, not a knife edge.
+
+Only near-horizontal faces are considered: a wall's sidedness is not decidable
+this way, and Havok single-sidedness only strands the player on floors.
+
+**Measured on `exUdeUship` by downward raycast** (the engine's own test):
+fall-through cells 10 → 0, walkable 92 → 102. Vanilla control sweeps (400
+architecture + 400 dungeon + 61 ship meshes) report 0 regressions.
+
+Candidate visual faces are bucketed into an XY grid at `_FLOOR_XY` cell size so
+a collision face tests the handful of visual faces above and below it rather
+than all of them — the whole-mesh scan is O(collision × visual) and this runs
+inside the per-mesh worker.
+
+### <a id="welding-is-per-group"></a>Welding is scoped PER GROUP
+
+The packed triangle list stores each triangle's corners independently, so
+without welding to shared vertex indices no two triangles ever share an edge and
+step 1 is a no-op.
+
+Welding is scoped per group (see `shape_tri_groups`). Independent pieces of a
+shape frequently touch — a bridge deck resting on its posts, a stair block
+against a landing — and welding across that seam would fuse them into one
+component, forcing a single orientation on both.
+
 ## `bhkPackedNiTriStripsShape` sub-shapes MOVED between formats — load CTD (SOLVED 2026-07-28)
 <a id="bhkpackednitristripsshape-sub-shapes-moved-between"></a>
 Three crashes in converted Morrowind_ob traced to one mesh, named directly in the crash log's stack strings (`inputFilePath: "data\MESHES\tes4\morro\i\inucaveuplant00.nif"`). Exception was `vmovntdq [rcx+0x40], ymm3` in VCRUNTIME140 (a `memcpy`) writing off the end of a heap page, with `bhkPackedNiTriStripsShape` + `bhkRigidBody` + `BSResource::LooseFileStream` on the stack — i.e. **a crash while reading the NIF, before anything renders**.
@@ -297,3 +418,125 @@ Besides the non-T rotation root cause above, the "chains/traps look right but ne
 <a id="nif-bhkmultisphereshape"></a>
 - **0 of 17,216 vanilla Skyrim meshes ship bhkMultiSphereShape** (deprecated Havok path). The only Oblivion source that has one is `clutter\magesguild\apparatusalembicnovice.nif`, and shipping it converted CRASHES SSE at cell load (Anvil Mages Guild) with no crash log. Vanilla expresses the same thing as ConvexTransform+Sphere children in a list shape (`clutter\kitchen\woodenladle01.nif`).
 - `_expand_multisphere()` in collision.py expands it: each sphere → a `bhkSphereShape` (radius ×0.1) wrapped in a `bhkConvexTransformShape` (identity rotation, sphere center ×0.1 in the 4th column, 4th matrix row all zeros incl. m_44 — matches vanilla). 1 sphere → bare wrapper, N → bhkListShape. `_convert_shape`'s bhkListShape branch now FLATTENS a nested list produced by the expansion (a list shape has no transform of its own so flattening is safe; vanilla never nests list shapes).
+
+## Constraint descriptor conversion
+<a id="constraint-descriptors"></a>
+
+**Code:** `asset_convert/collision/collision_constraints.py`
+
+Oblivion's constraint descriptors are missing fields Skyrim's Havok 2010
+layout requires. PyFFI leaves them zero, which ships a degenerate or singular
+basis, so each joint kind needs its own derivation.
+
+### <a id="limited-hinge-fix"></a>Limited hinge
+
+1. **`perp_2_axle_in_b_1` does not exist in Oblivion's descriptor.** Left zero
+   the sign spawns at a wrong tilt. Derive as `perp_b2 × axle_b`, normalised.
+   Vanilla Skyrim stores `w=-1` on both `perp_2_axle_in_a_1` and
+   `perp_2_axle_in_b_1`.
+2. **Clamp `max_friction`.** Oblivion stores 3.0; Skyrim signs use 0.01. At
+   3.0 the hinge has enough rotational friction to lock the sign at any angle
+   against gravity, so it stops at a wrong tilt instead of swinging back to
+   vertical.
+
+### <a id="ragdoll-descriptor-fix"></a>Ragdoll descriptor
+
+In the Havok 2010 layout twist / plane / motor are the three columns of an
+orthonormal basis — **motor = twist × plane** (verified on vanilla
+`desecratedimperial.nif`: twist=(1,0,0), plane=(0,1,0), motor=(0,0,1)).
+Oblivion's layout has no motor fields at all.
+
+`max_friction`: Oblivion chain and trap ragdoll constraints store 10.0, at
+which the joint locks solid — chains and swinging traps LOOK fine but never
+move when touched. Vanilla Skyrim prop ragdoll constraints use 0.01, the same
+value the limited-hinge clamp uses.
+
+`friction_target` selects the contract: **0.01 for props, 0.0 for creature
+blend joints** — vanilla creature skeleton.nifs are 89/89 constraints at
+exactly 0.0 (dog / wolf / sabrecat / skeever census 2026-08-08), matching
+their skeleton.hkx ragdolls. Earlier code exempted creature joints from the
+clamp entirely on the false premise that "the vanilla creature census mixes
+10.0/0.5/0.01"; carrying Oblivion's 10.0 through is what stopped corpses
+falling over.
+
+### <a id="hinge-descriptor-fix"></a>Plain hinge
+
+Oblivion stores only `pivot_a`, `perp_a1`, `perp_a2`, `pivot_b`, `axle_b`.
+Skyrim also needs `axle_a` and `perp_2_axle_in_b_1/2`; left zero the hinge
+axis is degenerate. Frame convention (per nif.xml) is `perp2 = axle × perp1`,
+so `axle_a = perp_a1 × perp_a2`. For the B side only `axle_b` is known, and
+any orthonormal complement works because a plain hinge has no angle limits —
+build `perp_b1` by Gram-Schmidt from `perp_a1`, then
+`perp_b2 = axle_b × perp_b1`. When `perp_a1` is parallel to `axle_b`, fall
+back to whichever world axis is not.
+
+### <a id="prismatic-descriptor-fix"></a>Prismatic
+
+Oblivion stores `pivot_a`, `pivot_b`, `sliding_b`, `plane_b` and a rotation;
+Skyrim also wants `sliding_a` / `plane_a`, the same axes in body A's frame.
+Without the body world transforms at this point we copy the B-frame axes —
+constrained prop pairs sit at near-identity relative rotation in practice.
+Sliding distances are lengths, so they scale by 0.1.
+
+**Vanilla Skyrim ships zero `bhkPrismaticConstraint` meshes**, so this path is
+inherently untested by Bethesda.
+
+### <a id="malleable-demotion"></a>Malleable demotion
+
+A `bhkMalleableConstraint` wraps an inner descriptor of any type. Skyrim
+expects the plain block, so each is replaced by a constraint of its inner
+type, and every rigid body's `constraints` array is repointed at the
+replacement. The `bhkConstraint` header's entities and priority come from the
+OUTER block — the SubConstraint's own entity list is "usually NONE".
+
+### <a id="enforce-ragdoll-tree"></a>Rebuilding the NIF constraint tree
+
+`enforce_ragdoll_tree` rewrites every creature ragdoll body's constraint list
+to exactly the joint `hkx_ragdoll.plan_ragdoll_tree` chose — the tree the
+skeleton.hkx ships — so the NIF satisfies the engine's ragdoll-attach
+contract. The contract, and the 2026-08-28 alit crash it explains, are
+documented on `plan_ragdoll_tree`.
+
+Per body:
+
+- **The chosen authored joint is kept and every other one dropped.** The
+  mudcrab ships bodies carrying 2, which shifts every later slot the engine
+  indexes.
+- **A joint authored on the parent's side moves to the child**, with its ends
+  exchanged. The landdreugh's first body is constrained to a LATER body.
+- **An unconstrained body gets the synthetic vanilla rock joint** to its
+  nearest body-carrying ancestor. This is the 2026-08-08 "corpse never falls
+  over" fix: an unconstrained `bhkRigidBody` is not in the ragdoll's
+  constraint island, so the chain through it cannot collapse. Vanilla ships
+  exactly bodies−1 constraints (dog 22/21, wolf 22/21, sabrecat 28/27,
+  skeever 21/20); stormatronach, mehrunesdagon, shambles and skeleton were
+  the incomplete rigs.
+
+Markers are stripped before collision conversion, while values are still in
+source units, so `enforce_ragdoll_tree` passes `exclude_markers=False`: every
+body left is real, and the converted mass/radius would fool the source-unit
+predicate (azura's static bodies convert to mass 0).
+
+A synthesized joint registers on the CHILD body — the Havok convention is that
+the constrained body is entity A — as well as in the block list.
+
+### <a id="creature-blend-body-contract"></a>Creature blend bodies are not props
+
+Creature-skeleton blend bodies follow the vanilla CREATURE contract, not the
+prop one: the broadphase byte stays 0, not the dynamic-prop 10, and
+`max_friction` is FORCED to 0.
+
+An older comment claimed "vanilla skeleton.nif joints mix 10.0/0.5/0.01 so
+keep the authored value". That is measurably wrong: a census of the vanilla
+dog / wolf / sabrecat / skeever creature skeleton.nifs is **89/89 constraints
+at exactly 0.000000**, matching their skeleton.hkx ragdolls.
+
+### <a id="synthesized-ragdoll-joints"></a>Synthesized joints
+
+An orphan body — one no constraint reaches — gets a synthesized
+`bhkRagdollConstraint` to its parent, on the vanilla atronach rock-joint
+template shared with `hkx_ragdoll`: cone 50°, plane ±90°, twist ±5°,
+friction 0. Pivots sit at the child body's own centre expressed in each body's
+local space (both `center` fields are already in Skyrim Havok units by then).
+Frames are axis-aligned — twist = X, plane = Y, motor = Z — the orthonormal
+basis the 2010 layout requires, since a zero motor ships a singular basis.

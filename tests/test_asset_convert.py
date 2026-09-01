@@ -4377,11 +4377,11 @@ class TestCollisionWindingRepair:
 
     def _repair(self, tris, normals, enabled, visual=None, groups=None):
         import os as _os
-        from asset_convert.collision import collision as C
+        from asset_convert.collision import collision_winding as W
         prev = _os.environ.get("TESCONV_COLLISION_WINDING_FIX")
         _os.environ["TESCONV_COLLISION_WINDING_FIX"] = "1" if enabled else "0"
         try:
-            return C._repair_inverted_floors(tris, visual, groups, normals)
+            return W.repair_inverted_floors(tris, visual, groups, normals)
         finally:
             if prev is None:
                 _os.environ.pop("TESCONV_COLLISION_WINDING_FIX", None)
@@ -4401,8 +4401,8 @@ class TestCollisionWindingRepair:
         normals = [(0.0, 0.0, 1.0)] * len(tris)   # authored: faces UP
         out, n = self._repair(tris, normals, enabled=False)
         assert n == len(tris), 'authored-normal repair must run ungated'
-        from asset_convert.collision import collision as C
-        assert all(C._face_normal(t)[2] > 0 for t in out)
+        from asset_convert.collision import collision_winding as W
+        assert all(W.face_normal(t)[2] > 0 for t in out)
 
     def test_correct_winding_is_left_alone(self):
         """Zero false positives on a mesh that already agrees with itself."""

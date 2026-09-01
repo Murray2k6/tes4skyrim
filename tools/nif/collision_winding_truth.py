@@ -78,6 +78,7 @@ def _scan(path):
     apply_patches()
     from pyffi.formats.nif import NifFormat
     from asset_convert.collision import collision as C
+    from asset_convert.collision import collision_winding as W
 
     try:
         data = NifFormat.Data()
@@ -117,19 +118,19 @@ def _scan(path):
 
                 grid = {}
                 for vt in vis:
-                    vn = C._face_normal(vt)
+                    vn = W.face_normal(vt)
                     if abs(vn[2]) < _FLAT:
                         continue
-                    vc = C._tri_centroid(vt)
+                    vc = W._tri_centroid(vt)
                     key = (int(vc[0] // _XY), int(vc[1] // _XY))
                     grid.setdefault(key, []).append((vc, vn[2]))
 
                 agree = dis = 0
                 for t in tris:
-                    n = C._face_normal(t)
+                    n = W.face_normal(t)
                     if abs(n[2]) < _FLAT:
                         continue
-                    c = C._tri_centroid(t)
+                    c = W._tri_centroid(t)
                     gx, gy = int(c[0] // _XY), int(c[1] // _XY)
                     best = None
                     for ox in (-1, 0, 1):

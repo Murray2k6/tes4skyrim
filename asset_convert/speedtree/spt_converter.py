@@ -41,7 +41,7 @@ from worker_budget import worker_count
 from asset_convert.nif.pyffi_monkey_patch import apply_patches
 from asset_convert.speedtree.spt_parser import parse_spt, SptTree
 from asset_convert.speedtree.spt_generator import build_tree, TreeGeometry
-from asset_convert.collision.collision import set_havok_material
+from asset_convert.collision.collision_material import set_havok_material
 from output_layout import assets_for
 
 apply_patches()

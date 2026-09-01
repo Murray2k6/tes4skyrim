@@ -1,6 +1,6 @@
 # asset_convert/lod/terrain_lod.py — terrain, LOD and grass
 
-**Code:** `asset_convert/lod/terrain_lod.py`, `asset_convert/lod/lod_gen.py`, `asset_convert/lod/lod_far_gen.py`, `asset_convert/lod/grass_profile.py`, `asset_convert/lava_surface.py`
+**Code:** `asset_convert/lod/terrain_lod.py`, `asset_convert/lod/dds_codec.py`, `asset_convert/lod/lod_gen.py`, `asset_convert/lod/lod_far_gen.py`, `asset_convert/lod/grass_profile.py`, `asset_convert/lava_surface.py`
 
 ## Contents
 
@@ -653,3 +653,48 @@ total_target = clamp(weld_nodes * ratio * topo_scale, _MIN_TOTAL_TARGET, cap)
 
 A mostly-closed model keeps the base ratio; a rim-heavy one gets
 proportionally more vertices, which is what it needs to still read as itself.
+
+## The DDS block codec
+<a id="dds-block-codec"></a>
+
+**Code:** `asset_convert/lod/dds_codec.py`
+
+Split out of `terrain_lod.py`: nothing in it knows about terrain, every entry
+point takes a pixel array and returns bytes.
+
+### <a id="dxt1-is-vectorised-over-blocks"></a>DXT1 is vectorised over blocks
+
+For each 4×4 block the encoder takes the per-channel min and max as the DXT1
+endpoints (`c0 > c1`, opaque 4-colour mode) and assigns each pixel the nearest
+of the four interpolated colours. The palette is re-expanded **from** 565 — the
+scalar version built its palette from `c565_to_rgb` of the quantised endpoints,
+and matching that is what keeps the output byte-identical.
+
+A 1024² tile is ~65k blocks, and the old per-block Python loop was the single
+hottest function in terrain LOD: **1.4s per LOD16 tile, ~33% of all tile time.**
+
+### <a id="dxt1-chunking-is-a-memory-fix"></a>The nearest-palette search is CHUNKED, and that is not an optimisation
+
+The whole-array form allocates `(N,16,4,3)` for the differences plus an
+`(N,16,4)` reduction, and `sum` promotes int32 to int64, so a 1024² tile
+(65,536 blocks) transiently needs **~80 MB**. That is survivable alone and fatal
+in parallel: with one worker per core, **29 of them peaked together and every
+level-16 tile died** on `Unable to allocate 32.0 MiB for an array with shape
+(65536, 16, 4)`.
+
+Chunking bounds the peak per worker regardless of tile size, and the explicit
+int32 accumulator halves what remains. The squared distance maxes at
+`3 × 255² = 195,075`, so int32 cannot overflow.
+
+### <a id="one-dds-header-builder"></a>One header builder, three formats
+
+`dds_header()` writes the 128-byte header for any compressed square texture,
+parameterised by FourCC and mip count. DXT1 and BC5 (`ATI2`) previously each
+hand-rolled the same layout — three copies, with the field names repeated as
+comments in each. The layout, in order: magic, `dwSize`, `dwFlags`,
+`dwHeight`, `dwWidth`, `dwPitchOrLinearSize` (the TOP mip), `dwDepth`,
+`dwMipMapCount`, `dwReserved1[11]`, the 32-byte pixel format (size, flags,
+FourCC, five unused masks), `dwCaps`, and four trailing reserved words.
+
+Mipmaps run down to 1×1, as vanilla Skyrim terrain LOD DDS files do. Tile size
+matches vanilla per LOD level: 1024 for LOD4/8, 2048 for LOD16/32.

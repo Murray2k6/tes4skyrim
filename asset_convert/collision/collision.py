@@ -12,6 +12,17 @@ from pyffi.formats.nif import NifFormat
 from collision_options import winding_fix_enabled
 
 from asset_convert.collision.cms_builder import build_cms_collision
+from asset_convert.collision.collision_hulls import decompose_clutter_hull
+from asset_convert.collision.collision_material import (
+    OB_TO_SK_MATERIAL,
+    convert_materials,
+    get_havok_material,
+    set_havok_material,
+)
+from asset_convert.collision.collision_winding import (
+    INVERTED_FLOOR_FLIPS,
+    repair_inverted_floors,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -27,101 +38,6 @@ _OB_MASS_DIV = 7.0
 NIF_FLAGS = 14  # Standard Skyrim NiAVObject flags (SelectiveUpdate bits 1-3)
 
 # ---------------------------------------------------------------------------
-# Havok material conversion
-_OB_TO_SK_MATERIAL = {
-    0:  3741512247,  # Stone            → SKY_HAV_MAT_STONE
-    1:  3839073443,  # Cloth            → SKY_HAV_MAT_CLOTH
-    2:  3106094762,  # Dirt             → SKY_HAV_MAT_DIRT
-    3:  3739830338,  # Glass            → SKY_HAV_MAT_GLASS
-    4:  1848600814,  # Grass            → SKY_HAV_MAT_GRASS
-    5:  1288358971,  # Metal            → SKY_HAV_MAT_SOLID_METAL
-    6:  2974920155,  # Organic          → SKY_HAV_MAT_ORGANIC
-    7:  591247106,   # Skin             → SKY_HAV_MAT_SKIN
-    8:  1024582599,  # Water            → SKY_HAV_MAT_WATER
-    9:  500811281,   # Wood             → SKY_HAV_MAT_WOOD
-    10: 1570821952,  # Heavy Stone      → SKY_HAV_MAT_HEAVY_STONE
-    11: 2229413539,  # Heavy Metal      → SKY_HAV_MAT_HEAVY_METAL
-    12: 3070783559,  # Heavy Wood       → SKY_HAV_MAT_HEAVY_WOOD
-    13: 3074114406,  # Chain            → SKY_HAV_MAT_MATERIAL_CHAIN
-    14: 398949039,   # Snow             → SKY_HAV_MAT_SNOW
-    15: 899511101,   # Stone Stairs     → SKY_HAV_MAT_STAIRS_STONE
-    16: 1461712277,  # Cloth Stairs     → SKY_HAV_MAT_STAIRS_WOOD (carpeted)
-    17: 899511101,   # Dirt Stairs      → SKY_HAV_MAT_STAIRS_STONE
-    18: 880200008,   # Glass Stairs     → SKY_HAV_MAT_STAIRS_GLASS
-    19: 899511101,   # Grass Stairs     → SKY_HAV_MAT_STAIRS_STONE
-    20: 899511101,   # Metal Stairs     → SKY_HAV_MAT_STAIRS_STONE (no metal stairs)
-    21: 1461712277,  # Organic Stairs   → SKY_HAV_MAT_STAIRS_WOOD
-    22: 1461712277,  # Skin Stairs      → SKY_HAV_MAT_STAIRS_WOOD
-    23: 899511101,   # Water Stairs     → SKY_HAV_MAT_STAIRS_STONE
-    24: 1461712277,  # Wood Stairs      → SKY_HAV_MAT_STAIRS_WOOD
-    25: 899511101,   # Heavy Stone Strs → SKY_HAV_MAT_STAIRS_STONE
-    26: 899511101,   # Heavy Metal Strs → SKY_HAV_MAT_STAIRS_STONE
-    27: 1461712277,  # Heavy Wood Strs  → SKY_HAV_MAT_STAIRS_WOOD
-    28: 899511101,   # Chain Stairs     → SKY_HAV_MAT_STAIRS_STONE
-    29: 1560365355,  # Snow Stairs      → SKY_HAV_MAT_STAIRS_SNOW
-    30: 1288358971,  # Elevator         → SKY_HAV_MAT_SOLID_METAL
-    31: 2974920155,  # Rubber           → SKY_HAV_MAT_ORGANIC
-}
-
-
-def set_havok_material(hm, value):
-    """Set every material item inside a HavokMaterial struct to *value*.
-
-    PyFFI instantiates one enum item per read context (typed as whichever
-    variant matched the source version); CRC values are outside the old
-    Oblivion enum's range so bypass enum validation when needed.
-    """
-    for it in getattr(hm, '_items', []):
-        if it.__class__.__name__.endswith('HavokMaterial'):
-            # NOT set_value(): PyFFI's EnumBase.set_value only logs a warning
-            # and returns when the value isn't in its (old, Oblivion-era) enum
-            # list.  Skyrim CRC values must be written raw.
-            it._value = int(value)
-
-
-def _get_havok_material(hm):
-    """Return the raw material int stored in a HavokMaterial struct."""
-    for it in getattr(hm, '_items', []):
-        if it.__class__.__name__.endswith('HavokMaterial'):
-            return int(it.get_value())
-    return 0
-
-
-def _convert_materials(shape, _seen=None):
-    """Recursively map Oblivion havok material enums to Skyrim CRC values.
-
-    Values ≤ 31 are Oblivion enum indices; anything larger is already a
-    Skyrim CRC (idempotent — safe to call on partially converted trees).
-    """
-    if shape is None:
-        return
-    if _seen is None:
-        _seen = set()
-    if id(shape) in _seen:
-        return
-    _seen.add(id(shape))
-
-    hm = getattr(shape, 'material', None)
-    if hm is not None and hasattr(hm, '_items'):
-        cur = _get_havok_material(hm)
-        if 0 <= cur <= 31:
-            set_havok_material(hm, _OB_TO_SK_MATERIAL.get(cur, 3741512247))
-
-    # Recurse into child shapes / sub-shape material carriers
-    for attr in ('shape',):
-        _convert_materials(getattr(shape, attr, None), _seen)
-    for list_attr in ('sub_shapes',):
-        subs = getattr(shape, list_attr, None)
-        if subs is not None:
-            for s in subs:
-                _convert_materials(s, _seen)
-    data = getattr(shape, 'data', None)
-    if data is not None:
-        subs = getattr(data, 'sub_shapes', None)
-        if subs is not None:
-            for s in subs:
-                _convert_materials(s, _seen)
-
 # ---------------------------------------------------------------------------
 # Triangle extraction from NiTriStripsData
 # ---------------------------------------------------------------------------
@@ -158,442 +74,6 @@ def _find_normal(verts, a, b, c):
 
 
 # ---------------------------------------------------------------------------
-# Shape conversion
-# ---------------------------------------------------------------------------
-
-def _face_normal(tri):
-    """Normalised face normal for a triangle given as three xyz tuples."""
-    (v0, v1, v2) = tri
-    ux, uy, uz = v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
-    vx, vy, vz = v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
-    nx = uy*vz - uz*vy
-    ny = uz*vx - ux*vz
-    nz = ux*vy - uy*vx
-    mag = math.sqrt(nx*nx + ny*ny + nz*nz)
-    if mag > 0:
-        nx /= mag; ny /= mag; nz /= mag
-    return nx, ny, nz
-
-
-# Count of triangles rewound by _repair_inverted_floors (list so process
-# workers can mutate it; read via inverted_floor_flip_count()).
-_INVERTED_FLOOR_FLIPS = [0]
-
-
-# Absolute-sign tuning for _repair_inverted_floors (step 2).  Distances are in
-# Skyrim havok units (1 hu = 69.9904 game units).
-_VIS_RADIUS = 0.30      # trust radius for a co-located visual face (~21 gu)
-_VIS_PARALLEL = 0.95    # visual face must be this aligned to count as a vote
-_VIS_MARGIN = 3.0       # winning side must outweigh the other this much
-_SIGN_MIN_TRIS = 4      # components smaller than this are never sign-flipped
-
-
-def _tri_centroid(t):
-    return ((t[0][0] + t[1][0] + t[2][0]) / 3.0,
-            (t[0][1] + t[1][1] + t[2][1]) / 3.0,
-            (t[0][2] + t[1][2] + t[2][2]) / 3.0)
-
-
-def _orient_components(idx):
-    """Make every triangle agree with its edge-neighbours.
-
-    Two triangles sharing an edge are consistently wound if and only if they
-    traverse that shared edge in OPPOSITE directions — the standard manifold
-    orientation test.  A breadth-first walk of the shared-edge graph therefore
-    settles the whole connected component from whichever triangle it starts
-    on, with no thresholds, no geometry and no external reference.
-
-    Returns (flip:set, comps:list[list[int]]).
-    """
-    edge_map = {}
-    for k, t in enumerate(idx):
-        for a, b in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
-            edge_map.setdefault((a, b) if a < b else (b, a), []).append(k)
-
-    flip = set()
-    seen = [False] * len(idx)
-    comps = []
-    for start in range(len(idx)):
-        if seen[start]:
-            continue
-        seen[start] = True
-        comp = [start]
-        queue = deque([start])
-        while queue:
-            k = queue.popleft()
-            t = idx[k]
-            if k in flip:
-                t = (t[0], t[2], t[1])
-            for a, b in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
-                for nb in edge_map.get((a, b) if a < b else (b, a), ()):
-                    if nb == k or seen[nb]:
-                        continue
-                    nt = idx[nb]
-                    edges = ((nt[0], nt[1]), (nt[1], nt[2]), (nt[2], nt[0]))
-                    if (b, a) in edges:
-                        pass                 # opposite direction → agrees
-                    elif (a, b) in edges:
-                        flip.add(nb)         # same direction → reversed
-                    else:
-                        continue
-                    seen[nb] = True
-                    comp.append(nb)
-                    queue.append(nb)
-        comps.append(comp)
-    return flip, comps
-
-
-def _component_is_closed(comp, idx):
-    """True when every edge of the component is shared by exactly 2 faces."""
-    cnt = {}
-    for k in comp:
-        t = idx[k]
-        for a, b in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
-            e = (a, b) if a < b else (b, a)
-            cnt[e] = cnt.get(e, 0) + 1
-    return all(c == 2 for c in cnt.values())
-
-
-def _component_volume(comp, idx, verts, flip):
-    """Signed volume of the component (positive when wound outward)."""
-    v = 0.0
-    for k in comp:
-        a, b, c = idx[k]
-        p, q, r = verts[a], verts[b], verts[c]
-        if k in flip:
-            q, r = r, q
-        v += (p[0] * (q[1]*r[2] - q[2]*r[1])
-              - p[1] * (q[0]*r[2] - q[2]*r[0])
-              + p[2] * (q[0]*r[1] - q[1]*r[0]))
-    return v / 6.0
-
-
-# Step-3 tuning: a near-horizontal collision face is a floor candidate.
-#
-# The test is COINCIDENCE, not proximity: the collision face and the render
-# face must be the same surface, so the tolerances are tight.  Measured on
-# exUdeUship's foredeck the walkable skin sits at dxy 0.003-0.006 / dz 0.002
-# from its collision face, while the nearest DOWN skin is 0.2-1.6 away — three
-# orders of magnitude of separation, so this is a wide margin, not a knife edge.
-_FLOOR_FLAT = 0.85      # |nz| above this is "near-horizontal"
-_FLOOR_PLANE_DZ = 0.05  # visual skin must be this co-planar in Z (~3.5 gu)
-_FLOOR_XY = 0.05        # ...and this coincident in XY (~3.5 gu)
-
-
-def _floor_skin_index(vdata):
-    """Bucket near-horizontal visual faces into an XY grid for lookup.
-
-    Returns {(gx, gy): [(cx, cy, cz, nz), ...]} at _FLOOR_XY cell size, so a
-    collision face only tests the handful of visual faces above/below it
-    instead of all of them (the whole-mesh scan is O(coll x visual) and this
-    runs inside the per-mesh worker).
-    """
-    grid = {}
-    for vc, vn in vdata:
-        if abs(vn[2]) < _FLOOR_FLAT:
-            continue
-        gx = int(vc[0] // _FLOOR_XY)
-        gy = int(vc[1] // _FLOOR_XY)
-        grid.setdefault((gx, gy), []).append((vc[0], vc[1], vc[2], vn[2]))
-    return grid
-
-
-def _repair_inverted_walkables(tris, flip, verts, idx, vdata):
-    """Flip individual down-facing floor faces the render mesh says are up.
-
-    Step 2 decides one sign for a WHOLE component, which is right for a
-    uniformly reversed surface but blind to a small patch inside a large
-    component: exUdeUship's raised foredeck is 12-22 triangles inside hull
-    components of 384-610, so the hull's correct faces outvote it ~1000:1 and
-    the deck stays inverted (you fall through the front of the chargen ship).
-
-    It is also blind for a different reason — the deck is a ZERO-THICKNESS
-    double-sided sheet in the render mesh, so its up skin and down skin share
-    a plane (measured mean z 3.6533 vs 3.6787).  Step 2 weights votes by
-    1/distance, so the coincident down skin scores ~200000 against the real
-    walkable skin's ~33 and "nearest face wins" picks the wrong one.
-
-    So this step asks the question that actually matters for a floor, and asks
-    it PER TRIANGLE: of the render faces COINCIDENT with this down-facing
-    collision face, which way does the nearest one point?  Coincident, not
-    merely nearby — the render face has to BE this surface for its normal to
-    settle the question, which is what makes the double-sided sheet decidable
-    (the true skin sits ~0.004 away, any other surface is 0.2+).  A face with
-    no coincident render skin is a genuine underside/overhang and is left
-    alone.  On exUdeUship this flips the 6 foredeck faces the player falls
-    through and leaves the other 357 down-facing faces untouched.
-
-    Measured on exUdeUship by downward raycast (the engine's own test):
-    fall-through cells 10 -> 0, walkable 92 -> 102.  Vanilla control sweeps
-    (400 architecture + 400 dungeon + 61 ship meshes) report 0 regressions.
-
-    Only near-horizontal faces are considered: a wall's sidedness is not
-    decidable this way and Havok single-sidedness only strands the player on
-    floors.
-    """
-    if not vdata:
-        return 0
-    grid = _floor_skin_index(vdata)
-    if not grid:
-        return 0
-
-    flipped = 0
-    for k in range(len(idx)):
-        a, b, c = idx[k]
-        p, q, r = verts[a], verts[b], verts[c]
-        if k in flip:
-            q, r = r, q
-        n = _face_normal((p, q, r))
-        if n[2] > -_FLOOR_FLAT:          # only currently DOWN-facing floors
-            continue
-        cx = (p[0] + q[0] + r[0]) / 3.0
-        cy = (p[1] + q[1] + r[1]) / 3.0
-        cz = (p[2] + q[2] + r[2]) / 3.0
-        gx = int(cx // _FLOOR_XY)
-        gy = int(cy // _FLOOR_XY)
-        best = None
-        for ox in (-1, 0, 1):
-            for oy in (-1, 0, 1):
-                for vx, vy, vz, vnz in grid.get((gx + ox, gy + oy), ()):
-                    if abs(vz - cz) > _FLOOR_PLANE_DZ:
-                        continue
-                    d2 = (vx - cx)**2 + (vy - cy)**2
-                    if d2 > _FLOOR_XY * _FLOOR_XY:
-                        continue
-                    if best is None or d2 < best[0]:
-                        best = (d2, vnz)
-        # The coincident render skin IS this surface, so its normal is the
-        # artist's statement of which way the surface faces.  Up means the
-        # collision contradicts a walkable floor; no coincident skin at all
-        # means a real underside/overhang, which is left alone.
-        if best is not None and best[1] > 0:
-            if k in flip:
-                flip.discard(k)
-            else:
-                flip.add(k)
-            flipped += 1
-    return flipped
-
-
-def _component_visual_vote(comp, idx, verts, flip, vdata):
-    """(agree, oppose, covered) for the component against the render mesh."""
-    agree = oppose = 0.0
-    covered = 0
-    for k in comp:
-        a, b, c = idx[k]
-        p, q, r = verts[a], verts[b], verts[c]
-        if k in flip:
-            q, r = r, q
-        n = _face_normal((p, q, r))
-        cx = (p[0] + q[0] + r[0]) / 3.0
-        cy = (p[1] + q[1] + r[1]) / 3.0
-        cz = (p[2] + q[2] + r[2]) / 3.0
-        hit = False
-        for vc, vn in vdata:
-            algn = n[0]*vn[0] + n[1]*vn[1] + n[2]*vn[2]
-            if abs(algn) < _VIS_PARALLEL:
-                continue
-            dd = ((cx - vc[0])**2 + (cy - vc[1])**2 + (cz - vc[2])**2)
-            if dd > _VIS_RADIUS * _VIS_RADIUS:
-                continue
-            hit = True
-            w = 1.0 / (dd + 1e-9)
-            if algn > 0:
-                agree += w
-            else:
-                oppose += w
-        if hit:
-            covered += 1
-    return agree, oppose, covered
-
-
-def _repair_inverted_floors(tris, visual_tris=None, groups=None,
-                            authored_normals=None):
-    """Rewind collision triangles whose winding was reversed at the source.
-
-    Havok mesh collision is single-sided: a face only blocks from the side its
-    normal points, so a surface wound backwards is walked straight through —
-    the classic "I fall through the floor" symptom.  Both Nehrim and
-    Morrowind_ob re-export collision as bhkPackedNiTriStripsShape triangle
-    lists, and that flatten drops the strip's alternating parity.
-
-    STEP 0 — the AUTHORED normal (always on, no toggle).
-        Every collision triangle stores the direction it is meant to face,
-        independently of the winding that produces that facing.  A flatten
-        reverses the winding but carries the stored normal through unchanged,
-        so a triangle whose winding contradicts its own normal is damaged BY
-        ITS OWN RECORD -- read off the file, not inferred.  This needs no
-        adjacency, no oracle mesh and no thresholds, it is inert wherever the
-        two already agree, and it is therefore safe on every plugin.
-
-        It is also the only step that repairs VANILLA Oblivion, which is not
-        clean: seIsland.nif ships 1480 of 3590 collision triangles contradicting
-        their own normals, and the rocks tree measures 14.5% of decidable floor
-        faces inverted.  You fall through the Shivering Isles island in vanilla
-        because of it.
-
-        Its limit is corruption that is SELF-CONSISTENT: where an exporter
-        rewrote the normals to match the winding it emitted, both sources agree
-        while both are wrong and nothing is left to detect.  That is the
-        Morroblivion case (inuhlaaluuroomuside's 10 triangles all score dot
-        +1.0 over an inverted floor), and it is what the gated steps below are
-        for.
-
-    Measured against the Oblivion originals of the same meshes (Nehrim
-    re-exports assets Oblivion also ships, so the vanilla file is exact ground
-    truth for what the winding should be), the damage is not scattered noise:
-    reversal strictly alternates along the packed triangle order, and 97% of
-    reversed triangles are explained by position within a flattened strip.
-    That makes the repair a structural problem, not a guessing problem.
-
-    STEP 1 — relative orientation (exact, no thresholds).
-        Triangles sharing an edge must traverse it in opposite directions.
-        BFS the shared-edge graph and flip whatever disagrees.  This undoes
-        the dropped parity exactly and is completely inert on correctly wound
-        input, so vanilla strip meshes pass through untouched.
-
-    STEP 2 — absolute sign (only where step 1 cannot help).
-        Step 1 makes a component self-consistent but cannot tell an outward
-        surface from an inside-out one, because flipping every triangle of a
-        component is also self-consistent.  A uniformly reversed floor
-        (Morrowind_ob's inuhlaaluuroomuside) needs an absolute reference:
-
-          * a CLOSED component must enclose positive volume;
-          * otherwise the render mesh decides — the artist's visual winding is
-            correct by construction, so collision facing opposite a co-located
-            visual face is reversed.
-
-        The visual vote requires a quorum: at least half the component's
-        triangles must have seen a qualifying visual face.  Every false
-        positive measured on already-correct vanilla collision came from a
-        single stray facet (typically the far skin of a thin slab — an altar
-        top, a shelf, a step tread) condemning a whole component; the quorum
-        removes those while still deciding genuinely reversed surfaces, whose
-        own render skin covers every triangle they have.
-
-        Where neither test is decisive the component is left alone.  A lone
-        down-facing surface is a perfectly valid ceiling or overhang, and
-        flipping it would punch a new hole.
-
-    Measured against the Oblivion originals (dungeons + architecture, 265
-    meshes / 64k matched triangles): 99.8% of reversed triangles repaired,
-    0.08% of already-correct triangles disturbed.  The previous heuristic
-    (near-horizontal + coplanar-conflict + nearest-visual-face arbitration)
-    scored 35.8% recall on the same corpus and left priorychapelinterior,
-    skbridgesmall and rockgreatforest645lichen unwalkable.
-
-    STEPS 1-3 ARE GATED (see collision_options); STEP 0 IS NOT.  Step 0 reads
-    a fact the file states about itself, so it is always correct to apply.
-    Steps 1-3 INFER the answer from adjacency, enclosed volume and the render
-    mesh, and inference costs false positives: step 1 seeds each welded
-    component from an arbitrary triangle and propagates that choice, so a
-    component whose seed happens to be inward inverts wholesale
-    (leyawiincastle02: 274 of 284 triangles flipped, 806 walkable raycast
-    cells lost on a vanilla mesh).  They are worth that risk only where the
-    authored normals have been destroyed and nothing else can recover the
-    orientation.
-
-    Returns (repaired_tris, n_flipped).
-    """
-    if not tris:
-        return tris, 0
-
-    # ---- Step 0: the authored normal.  Ungated -- see the docstring.
-    authored_flip = set()
-    if authored_normals and len(authored_normals) == len(tris):
-        for i, (t, an) in enumerate(zip(tris, authored_normals)):
-            if an is None:
-                continue
-            alen = math.sqrt(an[0]**2 + an[1]**2 + an[2]**2)
-            if alen < 1e-6:
-                continue
-            n = _face_normal(t)
-            if (n[0]*an[0] + n[1]*an[1] + n[2]*an[2]) / alen \
-                    < _AUTHORED_NORMAL_DOT:
-                authored_flip.add(i)
-
-    if not winding_fix_enabled():
-        if not authored_flip:
-            return tris, 0
-        out = [(t[0], t[2], t[1]) if i in authored_flip else t
-               for i, t in enumerate(tris)]
-        return out, len(authored_flip)
-
-    # Weld to shared vertex indices so adjacency is discoverable.  The packed
-    # list stores each triangle's corners independently, so without welding no
-    # two triangles ever "share" an edge and step 1 would be a no-op.
-    #
-    # Welding is scoped PER GROUP (see shape_tri_groups).  Independent pieces
-    # of a shape frequently touch — a bridge deck resting on its posts, a
-    # stair block against a landing — and welding across that seam would fuse
-    # them into one component, forcing a single orientation on both.
-    if not groups or sum(groups) != len(tris):
-        groups = [len(tris)]
-
-    vmap = {}
-    verts = []
-    idx = []
-    base = 0
-    for gsize in groups:
-        vmap.clear()
-        for t in tris[base:base + gsize]:
-            tri_i = []
-            for v in t:
-                k = (round(v[0], 4), round(v[1], 4), round(v[2], 4))
-                i = vmap.get(k)
-                if i is None:
-                    i = len(verts)
-                    vmap[k] = i
-                    verts.append(v)
-                tri_i.append(i)
-            idx.append(tuple(tri_i))
-        base += gsize
-
-    flip, comps = _orient_components(idx)
-
-    # ---- Step 2: absolute sign per component.
-    vdata = []
-    if visual_tris:
-        for t in visual_tris:
-            n = _face_normal(t)
-            if n[0] or n[1] or n[2]:
-                vdata.append((_tri_centroid(t), n))
-
-    for comp in comps:
-        if len(comp) < _SIGN_MIN_TRIS:
-            continue
-        decided = None
-        if _component_is_closed(comp, idx):
-            v = _component_volume(comp, idx, verts, flip)
-            if abs(v) > 1e-6:
-                decided = v < 0          # negative volume → inside-out
-        if decided is None and vdata:
-            ag, op, cov = _component_visual_vote(comp, idx, verts, flip,
-                                                 vdata)
-            if cov * 2 >= len(comp):     # quorum
-                if op > ag * _VIS_MARGIN:
-                    decided = True
-                elif ag > op * _VIS_MARGIN:
-                    decided = False
-        if decided:
-            for k in comp:
-                if k in flip:
-                    flip.discard(k)
-                else:
-                    flip.add(k)
-
-    # ---- Step 3: per-triangle walkable repair (localised damage).
-    # Steps 1-2 settle whole components; a small inverted patch inside a large
-    # correctly-wound component survives both.  See _repair_inverted_walkables.
-    _repair_inverted_walkables(tris, flip, verts, idx, vdata)
-
-    if not flip:
-        return tris, 0
-
-    out = [(t[0], t[2], t[1]) if i in flip else t
-           for i, t in enumerate(tris)]
-    return out, len(flip)
-
 
 def _set_packed_sub_shape(packed, num_vertices, sk_material, layer=1):
     """Write the single covering sub-shape onto a bhkPackedNiTriStripsShape.
@@ -681,7 +161,7 @@ def _ni_strips_to_packed(bhk_strips):
         packed = NifFormat.bhkPackedNiTriStripsShape()
         packed.data = hkdata
         _set_packed_sub_shape(packed, len(all_verts),
-                              _get_havok_material(bhk_strips.material))
+                              get_havok_material(bhk_strips.material))
         packed.scale.x = 1.0
         packed.scale.y = 1.0
         packed.scale.z = 1.0
@@ -704,7 +184,7 @@ def shape_tri_groups(shape):
     in space without being one surface.  _shape_tri_soup concatenates them in
     this order, so these counts partition its output.
 
-    _repair_inverted_floors needs the partition: it discovers surfaces by
+    repair_inverted_floors needs the partition: it discovers surfaces by
     welding coincident vertices, and welding ACROSS a group boundary fuses
     two independent pieces into one component.  A single orientation is then
     forced on both, which is how the sign step inverted half of vanilla's
@@ -773,9 +253,9 @@ def _shape_tri_soup(shape):
                         for a, b, c in _triangulate_strips(sd))
         if not tris:
             return None
-        material = _get_havok_material(shape.material)
+        material = get_havok_material(shape.material)
         if 0 <= material <= 31:
-            material = _OB_TO_SK_MATERIAL.get(material, 3741512247)
+            material = OB_TO_SK_MATERIAL.get(material, 3741512247)
         return tris, material
 
     if isinstance(shape, NifFormat.bhkPackedNiTriStripsShape):
@@ -794,20 +274,13 @@ def _shape_tri_soup(shape):
             return None
         material = 3741512247  # stone default
         if shape.num_sub_shapes > 0:
-            material = _get_havok_material(shape.sub_shapes[0].material)
+            material = get_havok_material(shape.sub_shapes[0].material)
             if 0 <= material <= 31:
-                material = _OB_TO_SK_MATERIAL.get(material, 3741512247)
+                material = OB_TO_SK_MATERIAL.get(material, 3741512247)
         return tris, material
 
     return None
 
-
-# A face normal and its triangle's winding must point the same way; the dot
-# product of the two is +1 when they agree and -1 when the winding is
-# reversed.  -0.3 is deliberately slack: it only has to separate "same
-# hemisphere" from "opposite hemisphere", and a normal that is merely
-# imprecise (a coarse export, a quantised value) still lands nowhere near it.
-_AUTHORED_NORMAL_DOT = -0.3
 
 # Minimum length of an averaged per-vertex normal for it to describe THIS
 # triangle.  bhkNiTriStripsShape stores normals per VERTEX, and a vertex on a
@@ -934,7 +407,7 @@ def _transform_verts(vertices, m, scale):
 
     The result is BIT-EXACT with that loop -- verified 52,159 of 52,159
     vertices across 168 real shapes, worst diff 0.  That is the contract, not
-    a nicety: this soup is the oracle for _repair_inverted_floors' nearest-face
+    a nicety: this soup is the oracle for repair_inverted_floors' nearest-face
     search, which compares against a trust radius, so a 1e-7 drift can flip a
     DIFFERENT triangle and change the collision we ship.
 
@@ -983,7 +456,7 @@ def _transform_verts(vertices, m, scale):
 def _visual_tri_soup(root, max_tris=20000):
     """Render-mesh triangles under `root`, in Havok units to match collision.
 
-    Used as the orientation oracle by _repair_inverted_floors: the artist's
+    Used as the orientation oracle by repair_inverted_floors: the artist's
     visual winding is correct by construction, so a collision face pointing
     opposite a co-located visual face is reversed.  Returns [] when the node
     has no render geometry (collision-only markers), which makes the repair
@@ -1102,12 +575,7 @@ def _rebuild_mesh_collision(rb, target_node):
     if soup is None:
         return False
     tris, sk_material = soup
-    # Independent geometry groups, kept in step with the filtering below so
-    # _repair_inverted_floors never welds two separate pieces together.
     groups = shape_tri_groups(inner)
-    # The winding each triangle was AUTHORED to have (step 0 of the repair).
-    # Filtered alongside `tris` below so the two stay index-aligned; a
-    # mismatched length makes _repair_inverted_floors ignore them entirely.
     authored_normals = _shape_tri_normals(inner)
     if authored_normals is not None and len(authored_normals) != len(tris):
         authored_normals = None
@@ -1150,10 +618,10 @@ def _rebuild_mesh_collision(rb, target_node):
             for n in authored_normals
         ]
     tris = _bake_body_transform_into_tris(rb, tris)
-    tris, n_flipped = _repair_inverted_floors(
+    tris, n_flipped = repair_inverted_floors(
         tris, _visual_tri_soup(target_node), groups, authored_normals)
     if n_flipped:
-        _INVERTED_FLOOR_FLIPS[0] += n_flipped
+        INVERTED_FLOOR_FLIPS[0] += n_flipped
     mopp = build_cms_collision(tris, sk_material, NifFormat)
     if mopp is not None:
         mopp.shape.target = target_node
@@ -1297,7 +765,7 @@ def _expand_multisphere(ms):
     here.  Returns a single wrapper for 1 sphere, a bhkListShape for several,
     or None for an empty multisphere.
     """
-    mat = _get_havok_material(ms.material)
+    mat = get_havok_material(ms.material)
     wrappers = []
     for s in ms.spheres:
         sph = NifFormat.bhkSphereShape()
@@ -1496,217 +964,6 @@ def _convert_shape(shape, root_node):
 
 
 # ---------------------------------------------------------------------------
-# Concave clutter hull decomposition
-
-_DECOMP_MAX_DEPTH = 3          # binary split tree → ≤ 8 pieces
-_DECOMP_SPLIT_GAIN = 0.90      # accept a cut only if it removes ≥10% volume
-_DECOMP_MIN_PIECE_VERTS = 8
-_DECOMP_MAX_HULL_VERTS = 64
-
-
-def _hull_volume(pts):
-    from scipy.spatial import ConvexHull
-    try:
-        return ConvexHull(pts).volume
-    except Exception:
-        return None
-
-
-def _recursive_hull_split(pts, depth):
-    """Split point cloud into pieces whose hulls waste less volume.
-
-    Returns a list of point arrays (≥1 entries).  Points near the cut plane
-    are shared by both halves so piece hulls overlap slightly (no gaps).
-    """
-    vol = _hull_volume(pts)
-    if vol is None or vol <= 0 or depth <= 0:
-        return [pts]
-
-    best = None
-    for axis in range(3):
-        lo, hi = pts[:, axis].min(), pts[:, axis].max()
-        extent = hi - lo
-        if extent * _GAME_UNITS_PER_HAVOK < 3.0:  # too thin to split
-            continue
-        eps = 0.02 * extent
-        for frac in (0.3, 0.4, 0.5, 0.6, 0.7):
-            cut = lo + frac * extent
-            coords = pts[:, axis]
-            # Each half must reach past the first vertex "ring" on the far
-            # side of the cut, otherwise sparse vertex rows leave an unfilled
-            # band of collision between the two piece hulls.
-            above = coords[coords > cut]
-            below = coords[coords < cut]
-            reach_a = (above.min() if len(above) else cut) + eps
-            reach_b = (below.max() if len(below) else cut) - eps
-            a = pts[coords <= reach_a]
-            b = pts[coords >= reach_b]
-            if len(a) < _DECOMP_MIN_PIECE_VERTS or len(b) < _DECOMP_MIN_PIECE_VERTS:
-                continue
-            va = _hull_volume(a)
-            vb = _hull_volume(b)
-            if va is None or vb is None:
-                continue
-            if best is None or va + vb < best[0]:
-                best = (va + vb, a, b)
-
-    if best is None or best[0] > vol * _DECOMP_SPLIT_GAIN:
-        return [pts]
-    return (_recursive_hull_split(best[1], depth - 1)
-            + _recursive_hull_split(best[2], depth - 1))
-
-
-def _build_piece_convex_shape(pts, radius, sk_material):
-    """Build a bhkConvexVerticesShape from a piece point cloud (Havok units)."""
-    import numpy as np
-    from scipy.spatial import ConvexHull
-
-    hull = None
-    hull_pts = None
-    # Quantise to a grid to keep hull vertex counts in the vanilla range
-    # (grid steps in Havok units: 0.28 / 0.56 / 1.05 game units).
-    for grid in (0.004, 0.008, 0.015):
-        q = np.unique(np.round(pts / grid) * grid, axis=0)
-        if len(q) < 4:
-            continue
-        try:
-            h = ConvexHull(q)
-        except Exception:
-            continue
-        hull, hull_pts = h, q[h.vertices]
-        if len(hull_pts) <= _DECOMP_MAX_HULL_VERTS:
-            break
-    if hull is None or len(hull_pts) < 4:
-        return None
-
-    # scipy facet equations are triangulated → dedupe coplanar planes.
-    # Equation convention: n·x + d <= 0 inside (n outward unit normal).
-    eqs = np.unique(np.round(hull.equations, 5), axis=0)
-
-    shape = NifFormat.bhkConvexVerticesShape()
-    set_havok_material(shape.material, sk_material)
-    shape.radius = radius
-    shape.num_vertices = len(hull_pts)
-    shape.vertices.update_size()
-    for i, (x, y, z) in enumerate(hull_pts):
-        shape.vertices[i].x = float(x)
-        shape.vertices[i].y = float(y)
-        shape.vertices[i].z = float(z)
-        shape.vertices[i].w = 0.0
-    shape.num_normals = len(eqs)
-    shape.normals.update_size()
-    for i, eq in enumerate(eqs):
-        shape.normals[i].x = float(eq[0])
-        shape.normals[i].y = float(eq[1])
-        shape.normals[i].z = float(eq[2])
-        # Face plane sits at n·x = -w.  Vanilla stores planes pushed out by
-        # the convex radius (face dist = vertex dist + radius).
-        shape.normals[i].w = float(eq[3]) - radius
-    return shape
-
-
-def _collect_visual_vertices(node):
-    """Gather all visual mesh vertices under *node* in node-frame game units."""
-    import numpy as np
-    out = []
-
-    def walk(n, M):
-        if n is None:
-            return
-        L = np.eye(4)
-        if hasattr(n, 'translation') and hasattr(n.translation, 'x'):
-            r = n.rotation
-            L[0, :3] = [r.m_11, r.m_12, r.m_13]
-            L[1, :3] = [r.m_21, r.m_22, r.m_23]
-            L[2, :3] = [r.m_31, r.m_32, r.m_33]
-            L[:3, :3] *= n.scale
-            L[3, :3] = [n.translation.x, n.translation.y, n.translation.z]
-        M2 = L @ M
-        if isinstance(n, (NifFormat.NiTriShape, NifFormat.NiTriStrips)):
-            d = n.data
-            if d is not None and getattr(d, 'num_vertices', 0) > 0:
-                verts = np.array([[v.x, v.y, v.z] for v in d.vertices])
-                out.append(verts @ M2[:3, :3] + M2[3, :3])
-        elif isinstance(n, NifFormat.NiNode):
-            for c in n.children:
-                walk(c, M2)
-
-    if isinstance(node, NifFormat.NiNode):
-        for c in node.children:
-            walk(c, np.eye(4))
-    if not out:
-        return None
-    return np.vstack(out)
-
-
-def _decompose_clutter_hull(node, hull_shape):
-    """Replace a concave-filling single convex hull with a bhkListShape of
-    tighter per-piece hulls rebuilt from the visual geometry.
-
-    Returns the new bhkListShape, or None to keep the original shape.
-    Only called for dynamic (mass>0) plain bhkRigidBody clutter, where the
-    shape frame equals the node frame.
-    """
-    try:
-        import numpy as np
-        from scipy.spatial import ConvexHull  # noqa: F401 — availability check
-    except ImportError:
-        return None
-
-    pts = _collect_visual_vertices(node)
-    if pts is None or len(pts) < 24 or len(pts) > 60000:
-        return None
-    pts_hk = pts / _GAME_UNITS_PER_HAVOK
-
-    # Frame/coverage sanity: the existing (already scaled) hull must roughly
-    # match the visual AABB, otherwise the collision was authored to cover
-    # something else (or sits in a different frame) — keep it.
-    hull_pts = np.array([[v.x, v.y, v.z] for v in hull_shape.vertices])
-    if len(hull_pts) < 4:
-        return None
-    for axis in range(3):
-        v_lo, v_hi = pts_hk[:, axis].min(), pts_hk[:, axis].max()
-        h_lo, h_hi = hull_pts[:, axis].min(), hull_pts[:, axis].max()
-        v_ext, h_ext = v_hi - v_lo, h_hi - h_lo
-        max_ext = max(v_ext, h_ext, 1e-4)
-        if abs((v_lo + v_hi) - (h_lo + h_hi)) / 2 > 0.35 * max_ext:
-            return None
-        if not (0.6 <= (v_ext + 1e-4) / (h_ext + 1e-4) <= 1.67):
-            return None
-
-    single_vol = _hull_volume(pts_hk)
-    if single_vol is None or single_vol <= 0:
-        return None
-
-    pieces = _recursive_hull_split(pts_hk, _DECOMP_MAX_DEPTH)
-    if len(pieces) < 2:
-        return None
-
-    radius = max(hull_shape.radius, 0.005)
-    sk_material = _get_havok_material(hull_shape.material)
-    piece_shapes = []
-    for piece in pieces:
-        s = _build_piece_convex_shape(piece, radius, sk_material)
-        if s is None:
-            return None
-        piece_shapes.append(s)
-
-    list_shape = NifFormat.bhkListShape()
-    set_havok_material(list_shape.material, sk_material)
-    list_shape.num_sub_shapes = len(piece_shapes)
-    list_shape.sub_shapes.update_size()
-    for i, s in enumerate(piece_shapes):
-        list_shape.sub_shapes[i] = s
-    list_shape.num_unknown_ints = len(piece_shapes)
-    list_shape.unknown_ints.update_size()
-    for i in range(len(piece_shapes)):
-        list_shape.unknown_ints[i] = 0
-    return list_shape
-
-
-# ---------------------------------------------------------------------------
-# Full collision conversion per-node
-# ---------------------------------------------------------------------------
 
 def _node_is_animated(node, actual_root):
     """True if this node's transform is driven by animation in this NIF.
@@ -1904,7 +1161,7 @@ def _convert_blend_collision(node, coll_obj):
         rb.havok_col_filter_copy.layer = 8
         rb.havok_col_filter_copy.flags_and_part_number = 0
     rb.shape = _convert_shape(rb.shape, node)
-    _convert_materials(rb.shape)
+    convert_materials(rb.shape)
 
 
 def _convert_collision(node, actual_root=None, keep_blend=False):
@@ -1941,7 +1198,7 @@ def _convert_collision(node, actual_root=None, keep_blend=False):
             node.collision_object.flags = 129
             _remap_world_filter(body)
             body.shape = _convert_shape(body.shape, node)
-            _convert_materials(body.shape)
+            convert_materials(body.shape)
         else:
             node.collision_object = None
         return
@@ -1961,7 +1218,7 @@ def _convert_collision(node, actual_root=None, keep_blend=False):
     if isinstance(rb, NifFormat.bhkSimpleShapePhantom):
         _remap_world_filter(rb)
         rb.shape = _convert_shape(rb.shape, node)
-        _convert_materials(rb.shape)
+        convert_materials(rb.shape)
         return
 
     # Scale rigid body translation.
@@ -2225,7 +1482,7 @@ def _convert_collision(node, actual_root=None, keep_blend=False):
         return
     if not rebuilt:
         rb.shape = _convert_shape(rb.shape, target_node)
-    _convert_materials(rb.shape)
+    convert_materials(rb.shape)
 
     # Dynamic clutter with a single full-object convex hull: rebuild concave
     # objects (goblets, pitchers, ewers…) as a compound of tighter hulls so
@@ -2233,7 +1490,7 @@ def _convert_collision(node, actual_root=None, keep_blend=False):
     # bhkRigidBodyT excluded — its shape frame is offset from the node frame.
     if (rb.mass > 0 and rb.__class__ is NifFormat.bhkRigidBody
             and isinstance(rb.shape, NifFormat.bhkConvexVerticesShape)):
-        decomposed = _decompose_clutter_hull(node, rb.shape)
+        decomposed = decompose_clutter_hull(node, rb.shape)
         if decomposed is not None:
             rb.shape = decomposed
 
@@ -2283,583 +1540,6 @@ def convert_all_collisions(node, actual_root=None, keep_blend=False):
     if hasattr(node, 'children'):
         for child in node.children:
             convert_all_collisions(child, actual_root, keep_blend=keep_blend)
-
-
-def _vec_cross(a, b):
-    """Cross product of two PyFFI Vector4s (xyz), returned as a tuple."""
-    return (a.y * b.z - a.z * b.y,
-            a.z * b.x - a.x * b.z,
-            a.x * b.y - a.y * b.x)
-
-
-def _vec_set_unit(dst, xyz, w=0.0):
-    """Normalise xyz and store into a PyFFI Vector4."""
-    x, y, z = xyz
-    mag = math.sqrt(x * x + y * y + z * z)
-    if mag > 1e-6:
-        x /= mag; y /= mag; z /= mag
-    dst.x = x
-    dst.y = y
-    dst.z = z
-    dst.w = w
-
-
-def _copy_struct(src, dst):
-    """Copy a PyFFI compound field-by-field (Vector4s by component)."""
-    done = set()
-    for a in dst._attrs:
-        name = a.name
-        if name in done:
-            continue
-        done.add(name)
-        try:
-            sv = getattr(src, name)
-            dv = getattr(dst, name)
-        except Exception:
-            continue
-        if hasattr(dv, 'x') and hasattr(dv, 'w'):
-            dv.x = sv.x; dv.y = sv.y; dv.z = sv.z; dv.w = sv.w
-        elif hasattr(dv, '_attrs'):
-            _copy_struct(sv, dv)
-        elif isinstance(dv, (int, float, bool)):
-            try:
-                setattr(dst, name, sv)
-            except Exception:
-                pass
-
-
-# SubConstraint.type (hkConstraintType) → (plain constraint block class name,
-# descriptor attribute name on both SubConstraint and the plain block).
-_MALLEABLE_INNER = {
-    0: ('bhkBallAndSocketConstraint', 'ball_and_socket'),
-    1: ('bhkHingeConstraint', 'hinge'),
-    2: ('bhkLimitedHingeConstraint', 'limited_hinge'),
-    6: ('bhkPrismaticConstraint', 'prismatic'),
-    7: ('bhkRagdollConstraint', 'ragdoll'),
-    8: ('bhkStiffSpringConstraint', 'stiff_spring'),
-}
-
-
-def _demote_malleable_constraints(data):
-    """Replace every bhkMalleableConstraint with a plain constraint of its inner type.
-
-    Vanilla Skyrim ships ZERO bhkMalleableConstraint meshes (0 of 17,216 —
-    binary block-type grep), so the engine path for them is untested; the
-    inner descriptor as a plain constraint is the vanilla-conformant form.
-    The malleable strength/tau/damping wrapper data is dropped.
-
-    Returns the list of newly created constraint blocks (they are referenced
-    from the rigid bodies but not yet present in data.blocks).
-    """
-    new_blocks = []
-    replacements = {}
-    for block in data.blocks:
-        if not isinstance(block, NifFormat.bhkMalleableConstraint):
-            continue
-        sub = block.sub_constraint
-        inner = _MALLEABLE_INNER.get(sub.type)
-        if inner is None:
-            continue
-        cls_name, desc_attr = inner
-        new_block = getattr(NifFormat, cls_name)()
-        # bhkConstraint header: entities + priority come from the outer block
-        # (SubConstraint's own entity list is "usually NONE").
-        new_block.num_entities = block.num_entities
-        new_block.entities.update_size()
-        for i in range(block.num_entities):
-            new_block.entities[i] = block.entities[i]
-        new_block.priority = block.priority
-        _copy_struct(getattr(sub, desc_attr), getattr(new_block, desc_attr))
-        replacements[block] = new_block
-        new_blocks.append(new_block)
-
-    if replacements:
-        # Swap references in every rigid body's constraints array.
-        for block in data.blocks:
-            constraints = getattr(block, 'constraints', None)
-            if constraints is None:
-                continue
-            for i, c in enumerate(constraints):
-                if c in replacements:
-                    constraints[i] = replacements[c]
-    return new_blocks
-
-
-def _fix_limited_hinge(d, clamp_friction=True, friction_target=0.01):
-    """Skyrim-format fixes for a LimitedHingeDescriptor (pivots already scaled).
-
-    1. Missing perp_2_axle_in_b_1: Oblivion's LimitedHingeDescriptor does not
-       have perp_2_axle_in_b_1; Skyrim does.  Leaving it zero causes the sign
-       to spawn at a wrong tilt.  Derived as: perp_b2 × axle_b (normalised).
-       Vanilla Skyrim stores w=-1 on perp_2_axle_in_a_1 and perp_2_axle_in_b_1.
-
-    2. Clamp max_friction to Skyrim range.
-       Oblivion stores max_friction=3.0; Skyrim signs use 0.01.
-       At 3.0 the hinge has enough rotational friction to lock the sign
-       at any angle against gravity, so it stops at a wrong tilt instead
-       of swinging freely back to vertical.
-    """
-    perp_b1 = getattr(d, 'perp_2_axle_in_b_1', None)
-    if perp_b1 is not None:
-        _vec_set_unit(perp_b1, _vec_cross(d.perp_2_axle_in_b_2, d.axle_b), w=-1.0)
-
-    perp_a1 = getattr(d, 'perp_2_axle_in_a_1', None)
-    if perp_a1 is not None:
-        perp_a1.w = -1.0
-
-    if clamp_friction and d.max_friction > friction_target:
-        d.max_friction = friction_target
-
-
-def _fix_ragdoll(d, clamp_friction=True, friction_target=0.01):
-    """Derive the Skyrim-only RagdollDescriptor motor axes and clamp friction.
-
-    In the Skyrim (Havok 2010) layout twist/plane/motor are the three columns
-    of an orthonormal basis — motor = twist × plane (verified on vanilla
-    desecratedimperial.nif: twist=(1,0,0), plane=(0,1,0), motor=(0,0,1)).
-    Oblivion's layout has no motor fields, so PyFFI leaves them zero, which
-    ships a singular constraint basis.
-
-    max_friction: Oblivion chain/trap ragdoll constraints store 10.0; at that
-    value the joint has enough rotational friction to lock solid — chains and
-    swinging traps LOOK fine but never move when touched.  Vanilla Skyrim prop
-    ragdoll constraints use 0.01 (desecratedimperial.nif), the same value the
-    limited-hinge clamp already uses (the tavern-sign fix).
-
-    `friction_target` selects which contract applies: 0.01 for props, and
-    **0.0 for creature blend joints** — vanilla creature skeleton.nifs are
-    89/89 constraints at exactly 0.0 (dog/wolf/sabrecat/skeever census
-    2026-08-08), matching their skeleton.hkx ragdolls.  The previous code
-    exempted creature joints from the clamp entirely on the false premise that
-    "the vanilla creature census mixes 10.0/0.5/0.01"; carrying Oblivion's 10
-    through is what stopped corpses falling over.
-    """
-    if clamp_friction and d.max_friction > friction_target:
-        d.max_friction = friction_target
-    for twist_name, plane_name, motor_name in (('twist_a', 'plane_a', 'motor_a'),
-                                               ('twist_b', 'plane_b', 'motor_b')):
-        motor = getattr(d, motor_name, None)
-        if motor is None:
-            continue
-        if math.sqrt(motor.x ** 2 + motor.y ** 2 + motor.z ** 2) > 1e-6:
-            continue  # already populated
-        _vec_set_unit(motor, _vec_cross(getattr(d, twist_name),
-                                        getattr(d, plane_name)))
-
-
-def _fix_hinge(d):
-    """Derive the Skyrim-only HingeDescriptor fields.
-
-    Oblivion stores only pivot_a, perp_a1, perp_a2, pivot_b, axle_b.  Skyrim
-    additionally needs axle_a and perp_2_axle_in_b_1/2; left zero the hinge
-    axis is degenerate.  Frame convention (per nif.xml): perp2 = axle × perp1,
-    so axle_a = perp_a1 × perp_a2.  For the B side only axle_b is known; any
-    orthonormal complement works because a plain hinge has no angle limits —
-    build perp_b1 by Gram-Schmidt from perp_a1, then perp_b2 = axle_b × perp_b1.
-    """
-    axle_a = getattr(d, 'axle_a', None)
-    if axle_a is not None:
-        L = math.sqrt(axle_a.x ** 2 + axle_a.y ** 2 + axle_a.z ** 2)
-        if L < 1e-6:
-            _vec_set_unit(axle_a, _vec_cross(d.perp_2_axle_in_a_1,
-                                             d.perp_2_axle_in_a_2))
-
-    perp_b1 = getattr(d, 'perp_2_axle_in_b_1', None)
-    perp_b2 = getattr(d, 'perp_2_axle_in_b_2', None)
-    if perp_b1 is None or perp_b2 is None:
-        return
-    L1 = math.sqrt(perp_b1.x ** 2 + perp_b1.y ** 2 + perp_b1.z ** 2)
-    L2 = math.sqrt(perp_b2.x ** 2 + perp_b2.y ** 2 + perp_b2.z ** 2)
-    if L1 > 1e-6 and L2 > 1e-6:
-        return  # already populated
-    ab = d.axle_b
-    # Reference vector not parallel to axle_b
-    ref = d.perp_2_axle_in_a_1
-    rx, ry, rz = ref.x, ref.y, ref.z
-    dot = rx * ab.x + ry * ab.y + rz * ab.z
-    px, py, pz = rx - dot * ab.x, ry - dot * ab.y, rz - dot * ab.z
-    if px * px + py * py + pz * pz < 1e-9:
-        # perp_a1 parallel to axle_b — fall back to whichever world axis isn't
-        for rx, ry, rz in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)):
-            dot = rx * ab.x + ry * ab.y + rz * ab.z
-            px, py, pz = rx - dot * ab.x, ry - dot * ab.y, rz - dot * ab.z
-            if px * px + py * py + pz * pz > 1e-9:
-                break
-    _vec_set_unit(perp_b1, (px, py, pz))
-    _vec_set_unit(perp_b2, _vec_cross(ab, perp_b1))
-
-
-def _fix_prismatic(d):
-    """Best-effort Skyrim fields for a PrismaticDescriptor.
-
-    Oblivion stores pivot_a, pivot_b, sliding_b, plane_b (+ a rotation).
-    Skyrim additionally wants sliding_a/plane_a (the same axes expressed in
-    body A's frame).  Without the body world transforms at this point, copy
-    the B-frame axes — constrained prop pairs sit at near-identity relative
-    rotation in practice.  Sliding distances are lengths → scale by 0.1.
-    NOTE: vanilla Skyrim ships zero bhkPrismaticConstraint meshes, so this
-    path is inherently untested by Bethesda.
-    """
-    for src_name, dst_name in (('sliding_b', 'sliding_a'), ('plane_b', 'plane_a')):
-        src = getattr(d, src_name, None)
-        dst = getattr(d, dst_name, None)
-        if src is None or dst is None:
-            continue
-        if math.sqrt(dst.x ** 2 + dst.y ** 2 + dst.z ** 2) < 1e-6:
-            dst.x = src.x; dst.y = src.y; dst.z = src.z; dst.w = src.w
-    for attr in ('min_distance', 'max_distance'):
-        v = getattr(d, attr, None)
-        if v is not None:
-            setattr(d, attr, v * _HAVOK_SCALE)
-
-
-def _constraint_descriptors(block):
-    """Yield (kind, descriptor) for a plain bhkConstraint block."""
-    for kind in ('limited_hinge', 'ragdoll', 'hinge', 'prismatic',
-                 'stiff_spring', 'ball_and_socket'):
-        d = getattr(block, kind, None)
-        if d is not None:
-            yield kind, d
-
-
-def strip_marker_collision_bodies(data, root):
-    """Remove Oblivion collision-TOGGLE proxies from a creature skeleton so
-    they never become ragdoll bodies (see hkx_ragdoll._is_marker_body: the
-    alit's 95%-scale duplicate capsules at mass 1e-4 and its radius-0
-    spheres -- shadow collision Oblivion could switch on and off, not limbs).
-    `plan_ragdoll_tree` excludes the same bodies from the .hkx ragdoll; the
-    engine matches the two files body-for-body, so the NIF must agree.
-
-    Runs BEFORE collision conversion so the predicate sees the same source
-    units extract_ragdoll does.  The NiNode itself is KEPT (animations bind
-    to it) -- only its collision object and any constraints naming its body
-    go.  Returns the count.
-    """
-    from asset_convert.havok.hkx_ragdoll import is_marker_body
-
-    doomed = []
-    for block in data.blocks:
-        if block.__class__.__name__ != 'NiNode':
-            continue
-        co = getattr(block, 'collision_object', None)
-        body = getattr(co, 'body', None) if co is not None else None
-        if body is None:
-            continue
-        if is_marker_body(block, body):
-            doomed.append((block, body))
-    if not doomed:
-        return 0
-
-    dead_bodies = {id(b) for _n, b in doomed}
-    # Drop constraints on the SURVIVING bodies that reference a dead one, so
-    # no constraint is left pointing at a body that no longer exists.
-    for block in data.blocks:
-        if block.__class__.__name__ not in ('bhkRigidBody', 'bhkRigidBodyT'):
-            continue
-        if id(block) in dead_bodies:
-            continue
-        cons = list(getattr(block, 'constraints', []))
-        keep = [c for c in cons
-                if not any(id(e) in dead_bodies
-                           for e in getattr(c, 'entities', []))]
-        if len(keep) != len(cons):
-            block.num_constraints = len(keep)
-            block.constraints.update_size()
-            for i, c in enumerate(keep):
-                block.constraints[i] = c
-
-    for node, _body in doomed:
-        node.collision_object = None
-    return len(doomed)
-
-
-# Descriptor fields that swap when a constraint's two ends are exchanged,
-# keyed by descriptor kind, plus the (min, max) limit pairs that negate.
-_JOINT_END_SWAPS = {
-    'ragdoll': ((('twist_a', 'twist_b'), ('plane_a', 'plane_b'),
-                 ('motor_a', 'motor_b'), ('pivot_a', 'pivot_b')),
-                (('plane_min_angle', 'plane_max_angle'),
-                 ('twist_min_angle', 'twist_max_angle'))),
-    'limited_hinge': ((('axle_a', 'axle_b'),
-                       ('perp_2_axle_in_a_1', 'perp_2_axle_in_b_1'),
-                       ('perp_2_axle_in_a_2', 'perp_2_axle_in_b_2'),
-                       ('pivot_a', 'pivot_b')),
-                      (('min_angle', 'max_angle'),)),
-    'hinge': ((('axle_a', 'axle_b'),
-               ('perp_2_axle_in_a_1', 'perp_2_axle_in_b_1'),
-               ('perp_2_axle_in_a_2', 'perp_2_axle_in_b_2'),
-               ('pivot_a', 'pivot_b')),
-              ()),
-}
-_JOINT_KIND_OF_BLOCK = {'bhkRagdollConstraint': 'ragdoll',
-                        'bhkLimitedHingeConstraint': 'limited_hinge',
-                        'bhkHingeConstraint': 'hinge'}
-_JOINT_KIND_OF_SUBTYPE = {7: 'ragdoll', 2: 'limited_hinge', 1: 'hinge'}
-
-
-def joint_descriptor(con):
-    """(kind, descriptor) of a ragdoll-tree joint block, looking through a
-    bhkMalleableConstraint wrapper; (None, None) for other kinds."""
-    name = con.__class__.__name__
-    if name == 'bhkMalleableConstraint':
-        sub = con.sub_constraint
-        kind = _JOINT_KIND_OF_SUBTYPE.get(int(sub.type))
-        return kind, (getattr(sub, kind) if kind else None)
-    kind = _JOINT_KIND_OF_BLOCK.get(name)
-    return kind, (getattr(con, kind) if kind else None)
-
-
-def _vec_is_zero(v):
-    return v is not None and v.x == 0.0 and v.y == 0.0 and v.z == 0.0
-
-
-def reverse_constraint_ends(con):
-    """Re-express a constraint block with its entities exchanged: the same
-    physical joint, now held by the other body.  Frames/pivots swap sides
-    and the relative-rotation limits negate (mirrors
-    hkx_ragdoll._swap_joint_ends).  Works on the Skyrim layout the creature
-    path reaches it in, and on an unconverted Oblivion block (whose hinge
-    descriptors lack axle_a / perp_2_axle_in_b_1 -- derived here exactly as
-    _fix_hinge / _fix_limited_hinge derive them)."""
-    kind, d = joint_descriptor(con)
-    if kind is None:
-        raise ValueError(f'cannot reverse a {con.__class__.__name__}')
-    if kind != 'ragdoll':
-        axle_a = getattr(d, 'axle_a', None)
-        if _vec_is_zero(axle_a):
-            _vec_set_unit(axle_a, _vec_cross(d.perp_2_axle_in_a_1,
-                                             d.perp_2_axle_in_a_2))
-        perp_b1 = getattr(d, 'perp_2_axle_in_b_1', None)
-        if _vec_is_zero(perp_b1):
-            _vec_set_unit(perp_b1, _vec_cross(d.perp_2_axle_in_b_2, d.axle_b),
-                          w=-1.0)
-    vec_pairs, limit_pairs = _JOINT_END_SWAPS[kind]
-    for na, nb in vec_pairs:
-        va, vb = getattr(d, na, None), getattr(d, nb, None)
-        if va is None or vb is None:
-            continue
-        ta = (va.x, va.y, va.z, getattr(va, 'w', None))
-        tb = (vb.x, vb.y, vb.z, getattr(vb, 'w', None))
-        va.x, va.y, va.z = tb[:3]
-        vb.x, vb.y, vb.z = ta[:3]
-        if ta[3] is not None and tb[3] is not None:
-            va.w, vb.w = tb[3], ta[3]
-    for lo, hi in limit_pairs:
-        l, h = float(getattr(d, lo)), float(getattr(d, hi))
-        setattr(d, lo, -h)
-        setattr(d, hi, -l)
-    con.entities[0], con.entities[1] = con.entities[1], con.entities[0]
-    sub = getattr(con, 'sub_constraint', None)
-    if sub is not None and int(getattr(sub, 'num_entities', 0)) == 2:
-        sub.entities[0], sub.entities[1] = sub.entities[1], sub.entities[0]
-
-
-def enforce_ragdoll_tree(data, root):
-    """Rebuild every creature ragdoll body's constraint list to EXACTLY the
-    joint `hkx_ragdoll.plan_ragdoll_tree` chose for it -- the tree the
-    skeleton.hkx ships -- so the NIF satisfies the engine's ragdoll-attach
-    contract (the contract, and the 2026-08-28 alit crash it explains, are
-    documented on plan_ragdoll_tree): the first body in pre-order DFS has 0
-    constraints, every later body exactly 1, its joint to an earlier body.
-
-    Per body: the chosen authored joint is kept and every other one dropped
-    (mudcrab ships bodies with 2, which shifts every later slot the engine
-    indexes); a joint authored on the parent's side (landdreugh's first
-    body is constrained to a LATER body) moves to the child with its ends
-    exchanged; an unconstrained body gets the synthetic vanilla rock joint to
-    its nearest body-carrying ancestor -- the 2026-08-08 "corpse never
-    falls over" fix: an unconstrained bhkRigidBody is not in the ragdoll's
-    constraint island, so the chain through it cannot collapse (vanilla
-    ships exactly bodies-1 constraints: dog 22/21, wolf 22/21, sabrecat
-    28/27, skeever 21/20; stormatronach/mehrunesdagon/shambles/skeleton were
-    the incomplete rigs).  Returns the number of bodies whose list changed.
-    """
-    from asset_convert.havok.hkx_ragdoll import plan_ragdoll_tree
-
-    # markers were stripped before collision conversion (source units);
-    # every body left is real, and the converted mass/radius would fool the
-    # source-unit predicate (azura's static bodies convert to mass 0)
-    plan = plan_ragdoll_tree(data, exclude_markers=False)
-    if plan is None:
-        return 0
-    body_of = {id(n): n.collision_object.body for n in plan['body_nodes']}
-    before = {nid: list(getattr(b, 'constraints', []) or [])
-              for nid, b in body_of.items()}
-
-    # decide every list first: a reversed joint is taken from the PARENT's
-    # old list, which is rebuilt in the same pass
-    new_lists = {}
-    kept = set()
-    for n in plan['body_nodes']:
-        pick = plan['edge_con'].get(id(n))
-        if pick is None:
-            new_lists[id(n)] = []
-            continue
-        con, reversed_ = pick
-        if reversed_:
-            reverse_constraint_ends(con)
-        new_lists[id(n)] = [con]
-        kept.add(id(con))
-
-    changed = 0
-    for n in plan['body_nodes']:
-        body = body_of[id(n)]
-        lst = new_lists[id(n)]
-        if [id(c) for c in before[id(n)]] != [id(c) for c in lst]:
-            changed += 1
-        body.num_constraints = len(lst)
-        body.constraints.update_size()
-        for i, c in enumerate(lst):
-            body.constraints[i] = c
-    for child, parent in plan['synthetic']:
-        _add_synth_ragdoll_constraint(data, body_of[id(child)],
-                                      body_of[id(parent)])
-        changed += 1
-
-    dead = {id(c) for lst in before.values() for c in lst} - kept
-    if dead:
-        data.blocks = [blk for blk in data.blocks if id(blk) not in dead]
-    return changed
-
-
-# Vanilla atronach rock-joint template, shared with hkx_ragdoll._SYNTH_*:
-# cone 50 deg, plane +-90 deg, twist +-5 deg, friction 0.
-_SYNTH_CONE = 0.872665
-_SYNTH_PLANE = 1.570796
-_SYNTH_TWIST = 0.087266
-
-
-def _add_synth_ragdoll_constraint(data, child_body, parent_body):
-    """Append a bhkRagdollConstraint joining child_body to parent_body.
-
-    Pivots at the child body's own centre expressed in each body's local space
-    (both bodies' `center` fields are already in Skyrim Havok units at this
-    point, so the pivot needs no further scaling).  Frames are axis-aligned:
-    twist = X, plane = Y, motor = Z — the orthonormal basis Skyrim's 2010
-    layout requires (a zero motor ships a singular basis).
-    """
-    con = NifFormat.bhkRagdollConstraint()
-    con.num_entities = 2
-    con.entities.update_size()
-    con.entities[0] = child_body
-    con.entities[1] = parent_body
-    con.priority = 1
-
-    d = con.ragdoll
-    for name, (x, y, z) in (('twist_a', (1.0, 0.0, 0.0)),
-                            ('plane_a', (0.0, 1.0, 0.0)),
-                            ('motor_a', (0.0, 0.0, 1.0)),
-                            ('twist_b', (1.0, 0.0, 0.0)),
-                            ('plane_b', (0.0, 1.0, 0.0)),
-                            ('motor_b', (0.0, 0.0, 1.0))):
-        v = getattr(d, name, None)
-        if v is not None:
-            v.x, v.y, v.z = x, y, z
-            if hasattr(v, 'w'):
-                v.w = 0.0
-    for name, src in (('pivot_a', child_body.center),
-                      ('pivot_b', child_body.center)):
-        v = getattr(d, name, None)
-        if v is not None:
-            v.x, v.y, v.z = src.x, src.y, src.z
-            if hasattr(v, 'w'):
-                v.w = 0.0
-    d.cone_max_angle = _SYNTH_CONE
-    d.plane_min_angle = -_SYNTH_PLANE
-    d.plane_max_angle = _SYNTH_PLANE
-    d.twist_min_angle = -_SYNTH_TWIST
-    d.twist_max_angle = _SYNTH_TWIST
-    d.max_friction = 0.0
-
-    # register on the child body (Havok convention: the constraint lives on
-    # entity A) and in the block list
-    n = child_body.num_constraints
-    child_body.num_constraints = n + 1
-    child_body.constraints.update_size()
-    child_body.constraints[n] = con
-    data.blocks.append(con)
-    return con
-
-
-def scale_constraint_pivots(data):
-    """Fix Havok constraint data for Oblivion → Skyrim conversion.
-
-    Applies to EVERY constraint descriptor type (limited hinge, ragdoll,
-    hinge, prismatic, stiff spring, ball-and-socket):
-
-    1. Malleable demotion: bhkMalleableConstraint (never shipped by vanilla
-       Skyrim) is replaced by a plain constraint of its inner type.
-    2. Pivot scale: pivot_a/pivot_b are Oblivion Havok-space positions and
-       must be scaled by _HAVOK_SCALE (0.1).  Axis vectors are unit vectors
-       and must NOT be scaled.  Stiff-spring length and prismatic sliding
-       distances are lengths and scale too.
-    3. Skyrim-only fields Oblivion has no source for are derived
-       (limited hinge perp_b1, hinge axle_a/perp_b1/perp_b2).
-    4. broadphaseType=10 for dynamic constrained bodies.  (Inertia is NOT
-       rescaled here — _convert_collision and _convert_blend_collision both
-       already apply the full ×0.01; an extra ×0.1 here left every
-       constrained body's inertia 10× too small.)
-
-    bhkRigidBodyT is kept as-is: Skyrim uses bhkRigidBodyT for constrained
-    sign bodies (confirmed in vanilla signfourshieldstavern01.nif).  The T
-    offset is body-local relative to the owning NiNode, which is already
-    correct after _convert_collision scales it by _HAVOK_SCALE.
-    """
-    constraint_blocks = [b for b in data.blocks
-                         if isinstance(b, NifFormat.bhkConstraint)]
-    constraint_blocks += _demote_malleable_constraints(data)
-
-    # Creature-skeleton blend bodies follow the VANILLA CREATURE contract, not
-    # the prop contract: the broadphase byte stays 0, not the dynamic-prop 10.
-    #
-    # max_friction is FORCED TO 0 on them (2026-08-08).  The old comment here
-    # claimed "vanilla skeleton.nif joints mix 10.0/0.5/0.01 so keep the
-    # authored value" — that is measurably WRONG: a census of the vanilla
-    # dog/wolf/sabrecat/skeever creature skeleton.nifs is **89/89 constraints
-    # at exactly 0.000000**, matching their skeleton.hkx ragdolls (dog 42/42
-    # `maxFrictionTorque` = 0).  Oblivion ships 10.0/12.0, and
-    # `max_friction` is an ANGULAR FRICTION TORQUE: at that magnitude the joint
-    # resists rotation hard enough that the chain through it cannot collapse
-    # under gravity, so corpses never fall over.  Fixing only the hkx side left
-    # this in place and the symptom survived — **the engine reads the NIF blend
-    # bodies**, so nif and hkx must agree.
-    _force_blend_friction_zero = True
-    blend_ids = {id(b.body) for b in data.blocks
-                 if isinstance(b, NifFormat.bhkBlendCollisionObject)
-                 and b.body is not None}
-
-    for block in constraint_blocks:
-        if isinstance(block, NifFormat.bhkMalleableConstraint):
-            continue  # replaced by its demoted inner constraint
-        is_blend = any(e is not None and id(e) in blend_ids
-                       for e in block.entities)
-        for kind, d in _constraint_descriptors(block):
-            # Scale pivot positions (xyz only; w is unused padding).
-            for pivot_attr in ('pivot_a', 'pivot_b'):
-                pivot = getattr(d, pivot_attr, None)
-                if pivot is not None:
-                    pivot.x *= _HAVOK_SCALE
-                    pivot.y *= _HAVOK_SCALE
-                    pivot.z *= _HAVOK_SCALE
-            # Blend (creature) joints clamp to 0.0, props to 0.01 — both are
-            # clamped now; only the TARGET differs.  See the census note above.
-            tgt = 0.0 if is_blend else 0.01
-            if kind == 'limited_hinge':
-                _fix_limited_hinge(d, friction_target=tgt)
-            elif kind == 'ragdoll':
-                _fix_ragdoll(d, friction_target=tgt)
-            elif kind == 'hinge':
-                _fix_hinge(d)
-            elif kind == 'prismatic':
-                _fix_prismatic(d)
-            elif kind == 'stiff_spring':
-                length = getattr(d, 'length', None)
-                if length is not None:
-                    d.length = length * _HAVOK_SCALE
-
-        for e in block.entities:
-            if e is not None and e.mass > 0.0 and id(e) not in blend_ids:
-                e.unknown_byte = 10
 
 
 # ---------------------------------------------------------------------------

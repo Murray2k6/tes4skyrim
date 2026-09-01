@@ -16,8 +16,9 @@ import struct
 import numpy as np
 import pytest
 
-from asset_convert.lod.terrain_lod import (encode_bc4_channel, encode_dxt1_quality,
-                                       fill_missing, rgb_to_565, _565_to_rgb)
+from asset_convert.lod.dds_codec import (c565_to_rgb, encode_bc4_channel,
+                                         encode_dxt1_quality, rgb_to_565)
+from asset_convert.lod.terrain_lod import fill_missing
 
 
 def _dxt1_reference(img: np.ndarray) -> bytes:
@@ -44,12 +45,12 @@ def _dxt1_reference(img: np.ndarray) -> bytes:
                 else:
                     c1 = c0 - 1
             palette = np.array([
-                _565_to_rgb(c0),
-                _565_to_rgb(c1),
-                ((2 * _565_to_rgb(c0).astype(np.int32)
-                  + _565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
-                ((_565_to_rgb(c0).astype(np.int32)
-                  + 2 * _565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
+                c565_to_rgb(c0),
+                c565_to_rgb(c1),
+                ((2 * c565_to_rgb(c0).astype(np.int32)
+                  + c565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
+                ((c565_to_rgb(c0).astype(np.int32)
+                  + 2 * c565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
             ], dtype=np.int32)
             diffs = block[:, None, :] - palette[None, :, :]
             codes = (diffs * diffs).sum(axis=2).argmin(axis=1)

@@ -33,6 +33,11 @@ from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
 from asset_convert.lod.terrain_lod_falloutnv import edid_keyed_lod_tiles, resolve_edid_keyed
 from output_layout import assets_for
+from asset_convert.lod.dds_codec import (
+    TEX_SIZE,
+    write_dds_dxt1,
+    write_normal_dds,
+)
 from tes5_import.tes5_reader import (GRP_TOP,
                                      GRP_WORLD_CHILDREN,
                                      header_end, read_group,
@@ -116,7 +121,6 @@ LOD_LEVELS  = [4, 8, 16, 32]
 # => 3GB.  Scaling with level (roughly constant texels/cell) keeps quality where
 # it's seen and cuts the total ~8x.
 TEX_SIZE_BY_LEVEL = {4: 256, 8: 512, 16: 1024, 32: 2048}
-TEX_SIZE = 512  # fallback default
 
 # Normal maps carry far less perceptible detail than diffuse at LOD distance,
 # so bake them at half the diffuse resolution (BC5 is 2x DXT1 per texel, so this
@@ -855,355 +859,6 @@ def _tile_water_quads(lands, cell_water, tile_x, tile_y, level, default_wh):
 # DDS writing (DXT1 via PIL/Pillow or pure-Python fallback)
 # ---------------------------------------------------------------------------
 
-def _write_dds_dxt1(colors_rgb: np.ndarray, path: Path, size: int = TEX_SIZE):
-    """Write a DXT1 DDS with full mipmap chain from an RGB ndarray.
-
-    Generates mipmaps down to 1×1, as vanilla Skyrim terrain LOD DDS files do.
-    size should match vanilla per LOD level (1024 for LOD4/8, 2048 for LOD16/32).
-    """
-    from PIL import Image
-    img = Image.fromarray(colors_rgb, 'RGB')
-    img = img.resize((size, size), Image.LANCZOS)
-
-    # Build mip chain: size, size/2, size/4, ... down to 1×1
-    mip_levels = []
-    mip_img = img
-    while True:
-        mip_arr = np.array(mip_img)
-        mip_levels.append(encode_dxt1_quality(mip_arr))
-        mip_w, mip_h = mip_img.size
-        if mip_w == 1 and mip_h == 1:
-            break
-        mip_img = mip_img.resize((max(1, mip_w // 2), max(1, mip_h // 2)), Image.LANCZOS)
-
-    mip_count = len(mip_levels)
-    all_data = b''.join(mip_levels)
-    hdr = _make_dds_header_dxt1(size, size, len(mip_levels[0]), mip_count=mip_count)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(hdr + all_data)
-
-
-def _make_dds_header_dxt1(w, h, linear_size, mip_count=1):
-    DDSD_CAPS        = 0x1
-    DDSD_HEIGHT      = 0x2
-    DDSD_WIDTH       = 0x4
-    DDSD_PIXELFORMAT = 0x1000
-    DDSD_LINEARSIZE  = 0x80000
-    DDSD_MIPMAPCOUNT = 0x20000
-    DDPF_FOURCC      = 0x4
-    DDSCAPS_TEXTURE  = 0x1000
-    DDSCAPS_MIPMAP   = 0x400000
-    DDSCAPS_COMPLEX  = 0x8
-
-    flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT | DDSD_LINEARSIZE
-    caps  = DDSCAPS_TEXTURE
-    if mip_count > 1:
-        flags |= DDSD_MIPMAPCOUNT
-        caps  |= DDSCAPS_MIPMAP | DDSCAPS_COMPLEX
-
-    hdr  = b'DDS '
-    hdr += struct.pack('<I', 124)             # dwSize
-    hdr += struct.pack('<I', flags)            # dwFlags
-    hdr += struct.pack('<I', h)                # dwHeight
-    hdr += struct.pack('<I', w)                # dwWidth
-    hdr += struct.pack('<I', linear_size)      # dwPitchOrLinearSize (size of top mip)
-    hdr += struct.pack('<I', 0)                # dwDepth
-    hdr += struct.pack('<I', mip_count)        # dwMipMapCount
-    hdr += b'\x00' * 44                       # dwReserved1[11]
-    # Pixel format (32 bytes)
-    hdr += struct.pack('<II', 32, DDPF_FOURCC) # size, flags
-    hdr += b'DXT1'                             # dwFourCC
-    hdr += struct.pack('<IIIII', 0,0,0,0,0)   # unused
-    hdr += struct.pack('<I', caps)             # dwCaps
-    hdr += struct.pack('<IIII', 0,0,0,0)      # remaining caps + reserved
-    assert len(hdr) == 128
-    return hdr
-
-
-def _blocks_4x4(a: np.ndarray) -> np.ndarray:
-    """Reshape a padded (ph, pw[, ch]) image into (n_blocks, 16[, ch]) in the
-    row-major block order DXT/BC formats store (block row 0 left-to-right first).
-    """
-    ph, pw = a.shape[:2]
-    tail = a.shape[2:]
-    return (a.reshape(ph // 4, 4, pw // 4, 4, *tail)
-             .transpose(0, 2, 1, 3, *range(4, 4 + len(tail)))
-             .reshape(-1, 16, *tail))
-
-
-def encode_dxt1_quality(img: np.ndarray) -> bytes:
-    """DXT1 encoder with per-block min/max color endpoints for better quality.
-
-    For each 4×4 block, finds the two most distant colors (min/max in each
-    channel) and uses them as DXT1 endpoints c0 > c1 (opaque mode).
-    Each pixel is then assigned the nearest of the 4 interpolated colors.
-
-    Fully vectorised over blocks: a 1024² tile is ~65k blocks, and the old
-    per-block Python loop made this the single hottest function in terrain LOD
-    (1.4s per LOD16 tile, ~33% of all tile time).  Output is byte-identical to
-    the per-block version — same endpoints, same palette, same index packing.
-    """
-    h, w = img.shape[:2]
-    ph = (h + 3) & ~3
-    pw = (w + 3) & ~3
-    padded = np.zeros((ph, pw, 3), dtype=np.uint8)
-    padded[:h, :w] = img
-
-    blocks = _blocks_4x4(padded).astype(np.int32)     # (N,16,3)
-
-    cmax = blocks.max(axis=1)                          # (N,3)
-    cmin = blocks.min(axis=1)
-    c0 = _rgb_to_565_vec(cmax)
-    c1 = _rgb_to_565_vec(cmin)
-
-    # Ensure c0 > c1 for opaque DXT1 (4-color mode).
-    swap = c0 < c1
-    c0, c1 = np.where(swap, c1, c0), np.where(swap, c0, c1)
-    eq = c0 == c1
-    c1 = np.where(eq & (c0 != 0), c0 - 1, c1)
-    c0 = np.where(eq & (c0 == 0), 1, c0)
-
-    # Palette: code 0 → c0, 1 → c1, 2 → (2c0+c1)/3, 3 → (c0+2c1)/3.
-    # Endpoints are re-expanded FROM 565 (matching the scalar version, which
-    # built its palette from _565_to_rgb of the quantised endpoints).
-    p0 = _565_to_rgb_vec(c0)                           # (N,3) int32
-    p1 = _565_to_rgb_vec(c1)
-    palette = np.stack([p0, p1, (2 * p0 + p1) // 3, (p0 + 2 * p1) // 3], axis=1)
-
-    # Nearest palette entry per pixel, computed in CHUNKS.
-    #
-    # The whole-array form allocates (N,16,4,3) for the differences plus an
-    # (N,16,4) reduction — and `sum` promotes int32 to int64, so a 1024² tile
-    # (65,536 blocks) transiently needs ~80 MB. That is survivable alone and
-    # fatal in parallel: with one worker per core, 29 of them peaked together
-    # and every level-16 tile died on
-    # "Unable to allocate 32.0 MiB for an array with shape (65536, 16, 4)".
-    #
-    # Chunking bounds the peak per worker regardless of tile size, and the
-    # explicit int32 accumulator halves what remains. The squared distance
-    # maxes at 3*255^2 = 195,075, so int32 cannot overflow.
-    codes = np.empty((len(blocks), 16), dtype=np.uint8)
-    step = 4096
-    for s in range(0, len(blocks), step):
-        e = min(s + step, len(blocks))
-        d = blocks[s:e, :, None, :] - palette[s:e, None, :, :]   # (n,16,4,3)
-        np.multiply(d, d, out=d)
-        codes[s:e] = d.sum(axis=3, dtype=np.int32).argmin(axis=2)
-
-    shifts = (np.arange(16, dtype=np.uint32) * 2)
-    packed = (codes.astype(np.uint32) << shifts).sum(axis=1, dtype=np.uint32)
-
-    out = np.empty(len(blocks),
-                   dtype=np.dtype([('c0', '<u2'), ('c1', '<u2'), ('p', '<u4')]))
-    out['c0'] = c0
-    out['c1'] = c1
-    out['p'] = packed
-    return out.tobytes()
-
-
-def _rgb_to_565_vec(rgb: np.ndarray) -> np.ndarray:
-    """Vectorised rgb_to_565 over an (N,3) int array."""
-    r = rgb[:, 0].astype(np.int32)
-    g = rgb[:, 1].astype(np.int32)
-    b = rgb[:, 2].astype(np.int32)
-    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-
-
-def _565_to_rgb_vec(c565: np.ndarray) -> np.ndarray:
-    """Vectorised _565_to_rgb → (N,3) int32."""
-    r = (c565 >> 11) & 0x1F
-    g = (c565 >> 5) & 0x3F
-    b = c565 & 0x1F
-    return np.stack([(r << 3) | (r >> 2),
-                     (g << 2) | (g >> 4),
-                     (b << 3) | (b >> 2)], axis=-1).astype(np.int32)
-
-
-def rgb_to_565(rgb):
-    r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
-    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-
-
-def _565_to_rgb(c565):
-    r = (c565 >> 11) & 0x1F
-    g = (c565 >> 5)  & 0x3F
-    b =  c565        & 0x1F
-    # Expand to 8 bits
-    return np.array([(r << 3) | (r >> 2),
-                     (g << 2) | (g >> 4),
-                     (b << 3) | (b >> 2)], dtype=np.uint8)
-
-
-def _encode_bc5_flat_block() -> bytes:
-    """Return one 16-byte BC5 block encoding a flat normal (X=128, Y=128).
-
-    BC5 stores two independent BC4 channels (R and G = X and Y normals).
-    Each BC4 channel: 2 endpoint bytes + 6 bytes of 3-bit indices.
-    For a flat block all pixels = 128: both endpoints = 128, all indices = 0.
-    """
-    # BC4 channel: ep0=128, ep1=128, 6 index bytes all zero
-    flat_channel = struct.pack('BB', 128, 128) + b'\x00' * 6  # 8 bytes
-    return flat_channel + flat_channel  # R channel + G channel = 16 bytes
-
-
-def _make_flat_bc5_dds(size: int) -> bytes:
-    """Build a BC5 DDS with full mipmap chain, all blocks encoding flat normal."""
-    DDSD_CAPS        = 0x1
-    DDSD_HEIGHT      = 0x2
-    DDSD_WIDTH       = 0x4
-    DDSD_PIXELFORMAT = 0x1000
-    DDSD_LINEARSIZE  = 0x80000
-    DDSD_MIPMAPCOUNT = 0x20000
-    DDPF_FOURCC      = 0x4
-    DDSCAPS_TEXTURE  = 0x1000
-    DDSCAPS_MIPMAP   = 0x400000
-    DDSCAPS_COMPLEX  = 0x8
-
-    # Count mip levels
-    mip_count = 0
-    s = size
-    while s >= 1:
-        mip_count += 1
-        if s == 1:
-            break
-        s //= 2
-
-    # Top mip linear size: BC5 = 16 bytes/block, 1 block per 4x4 pixels
-    top_blocks = max(1, size // 4) * max(1, size // 4)
-    top_linear_size = top_blocks * 16
-
-    flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT | DDSD_LINEARSIZE | DDSD_MIPMAPCOUNT
-    caps  = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX
-
-    hdr  = b'DDS '
-    hdr += struct.pack('<I', 124)
-    hdr += struct.pack('<I', flags)
-    hdr += struct.pack('<I', size)          # height
-    hdr += struct.pack('<I', size)          # width
-    hdr += struct.pack('<I', top_linear_size)
-    hdr += struct.pack('<I', 0)             # depth
-    hdr += struct.pack('<I', mip_count)
-    hdr += b'\x00' * 44
-    # Pixel format: ATI2 / BC5 FourCC
-    hdr += struct.pack('<II', 32, DDPF_FOURCC)
-    hdr += b'ATI2'                          # BC5 FourCC (same as ATI2N)
-    hdr += struct.pack('<IIIII', 0,0,0,0,0)
-    hdr += struct.pack('<I', caps)
-    hdr += struct.pack('<IIII', 0,0,0,0)
-    assert len(hdr) == 128
-
-    flat_block = _encode_bc5_flat_block()
-    pixel_data = bytearray()
-    s = size
-    while s >= 1:
-        n_blocks = max(1, s // 4) * max(1, s // 4)
-        pixel_data += flat_block * n_blocks
-        if s == 1:
-            break
-        s //= 2
-
-    return bytes(hdr) + bytes(pixel_data)
-
-
-def _make_bc5_dds_header(size: int, mip_count: int) -> bytes:
-    top_blocks = max(1, size // 4) * max(1, size // 4)
-    top_linear_size = top_blocks * 16
-    flags = 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000 | 0x20000
-    caps  = 0x1000 | 0x400000 | 0x8
-    hdr  = b'DDS '
-    hdr += struct.pack('<I', 124)
-    hdr += struct.pack('<I', flags)
-    hdr += struct.pack('<I', size)
-    hdr += struct.pack('<I', size)
-    hdr += struct.pack('<I', top_linear_size)
-    hdr += struct.pack('<I', 0)
-    hdr += struct.pack('<I', mip_count)
-    hdr += b'\x00' * 44
-    hdr += struct.pack('<II', 32, 0x4)
-    hdr += b'ATI2'
-    hdr += struct.pack('<IIIII', 0, 0, 0, 0, 0)
-    hdr += struct.pack('<I', caps)
-    hdr += struct.pack('<IIII', 0, 0, 0, 0)
-    assert len(hdr) == 128
-    return hdr
-
-
-def encode_bc4_channel(chan: np.ndarray) -> np.ndarray:
-    """Encode a whole padded single-channel (ph,pw) uint8 image as BC4.
-
-    Returns an (n_blocks, 8) uint8 array — 8 bytes per 4×4 block, in row-major
-    block order.  Vectorised over blocks; byte-identical to encoding each block
-    separately (same 8-value interpolation mode, same endpoint and index rules).
-    """
-    blocks = _blocks_4x4(chan).astype(np.int32)        # (N,16)
-    r0 = blocks.max(axis=1)
-    r1 = blocks.min(axis=1)
-    flat = r0 == r1                                     # all-equal → indices 0
-
-    i = np.arange(1, 7)
-    palette = np.empty((len(blocks), 8), np.int32)
-    palette[:, 0] = r0
-    palette[:, 1] = r1
-    palette[:, 2:] = ((7 - i)[None, :] * r0[:, None]
-                      + i[None, :] * r1[:, None]) // 7
-
-    idx = np.abs(blocks[:, :, None] - palette[:, None, :]).argmin(axis=2)
-    idx = idx.astype(np.uint64)
-    idx[flat] = 0
-
-    bits = (idx << (np.arange(16, dtype=np.uint64) * 3)).sum(axis=1,
-                                                             dtype=np.uint64)
-    out = np.empty((len(blocks), 8), np.uint8)
-    out[:, 0] = r0
-    out[:, 1] = r1
-    for k in range(6):
-        out[:, 2 + k] = ((bits >> np.uint64(8 * k)) & np.uint64(0xFF)).astype(np.uint8)
-    return out
-
-
-def _write_normal_dds(normal_rgb: np.ndarray, path: Path):
-    """Write a real BC5/ATI2 normal map from an RGB normal image.
-
-    BC5 stores two channels: R (=normal X) and G (=normal Y).  Skyrim's landscape
-    LOD shader reconstructs Z.  Full mip chain, matching vanilla format.
-    """
-    from PIL import Image
-    path.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.fromarray(normal_rgb, 'RGB')
-    size = img.size[0]
-
-    mip_data = bytearray()
-    mip_count = 0
-    s = size
-    cur = img
-    while s >= 1:
-        arr = np.asarray(cur.resize((s, s), Image.LANCZOS) if cur.size[0] != s else cur,
-                         dtype=np.uint8)
-        R = arr[:, :, 0]
-        G = arr[:, :, 1]
-        # pad to multiple of 4
-        ph = (s + 3) & ~3
-        pw = (s + 3) & ~3
-        Rp = np.zeros((ph, pw), np.uint8); Rp[:s, :s] = R
-        Gp = np.zeros((ph, pw), np.uint8); Gp[:s, :s] = G
-        # BC5 stores the two BC4 channels interleaved per block: R block then
-        # G block, repeating.  Encode each channel in bulk and weave them.
-        rb = encode_bc4_channel(Rp)                  # (N,8)
-        gb = encode_bc4_channel(Gp)
-        mip_data += np.stack([rb, gb], axis=1).reshape(-1).tobytes()
-        mip_count += 1
-        if s == 1:
-            break
-        s //= 2
-
-    hdr = _make_bc5_dds_header(size, mip_count)
-    path.write_bytes(hdr + bytes(mip_data))
-
-
-# ---------------------------------------------------------------------------
-# NIF writing via pyffi
-# ---------------------------------------------------------------------------
-
 def _build_water_node(water_quads, level: int):
     """Build the vanilla-style LOD water node for a tile.
 
@@ -1859,13 +1514,13 @@ def _process_tile(args):
             _worker_lands, tile_x, tile_y, level,
             _worker_ltex_map, _worker_tex_root,
             heights, _worker_cell_water, _worker_default_wh)
-        _write_dds_dxt1(atlas, _worker_tex_dir / f'{tag}.dds', size=tex_size)
+        write_dds_dxt1(atlas, _worker_tex_dir / f'{tag}.dds', size=tex_size)
 
         # Normal map: derive from the tile heightmap so distant terrain is lit.
         # Baked at half the diffuse resolution (BC5 is 2x DXT1/texel).
         normal_size = max(64, tex_size // NORMAL_SIZE_DIVISOR)
         normal_rgb = _heightmap_normal_rgb(heights, normal_size)
-        _write_normal_dds(normal_rgb, _worker_tex_dir / f'{tag}_n.dds')
+        write_normal_dds(normal_rgb, _worker_tex_dir / f'{tag}_n.dds')
 
         return tag, True, None
     except Exception as e:

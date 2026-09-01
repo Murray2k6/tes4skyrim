@@ -37,7 +37,7 @@ Usage:
     python tools/nif/collision_winding.py ../TESConversion/export/Oblivion.esm/meshes/dungeons
 
 See docs/commentary/asset_convert_nif.md "Inverted collision winding in Nehrim source
-meshes" for the repair (`asset_convert.collision.collision._repair_inverted_floors`).
+meshes" for the repair (`asset_convert.collision.collision.repair_inverted_floors`).
 """
 import argparse
 import math
@@ -195,6 +195,7 @@ def _scan_regress(path):
     disagreeing), so a changed triangle there is a repair, not damage.
     """
     from asset_convert.collision import collision as C
+    from asset_convert.collision import collision_winding as W
     try:
         soups = _repair_soups(path)
     except Exception:
@@ -204,13 +205,62 @@ def _scan_regress(path):
     broke = fixed = 0
     for node, tris, groups in soups:
         vis = C._visual_tri_soup(node)
-        rep, _n = C._repair_inverted_floors(list(tris), vis, groups)
+        rep, _n = W.repair_inverted_floors(list(tris), vis, groups)
         (u0, d0), (u1, d1) = _floor_state(tris), _floor_state(rep)
         if u0 and not d0 and d1 and not u1:
             broke += 1
         elif d0 and not u0 and u1 and not d1:
             fixed += 1
     return (path, fixed, broke)
+
+
+def _vertex_key(v):
+    """A triangle vertex rounded to 0.1 hu, so the two trees' floats match."""
+    return (round(v[0], 1), round(v[1], 1), round(v[2], 1))
+
+
+def _same_winding(a, b):
+    """True when `a` and `b` are the same triangle in the same cyclic order."""
+    return any((a[r], a[(r + 1) % 3], a[(r + 2) % 3]) == b for r in range(3))
+
+
+def _truth_index(soups):
+    """Vertex SET -> the cyclic orders the ground-truth tree ships for it."""
+    ref = {}
+    for _n, tris, _g in soups:
+        for t in tris:
+            ks = tuple(_vertex_key(v) for v in t)
+            ref.setdefault(frozenset(ks), []).append(ks)
+    return ref
+
+
+def _score_repair(nsoups, ref):
+    """(matched, bad, left, broke) for the repair against `ref`.
+
+    `bad` is damage present before the repair, `left` what survived it, and
+    `broke` already-correct triangles the repair reversed.
+    """
+    from asset_convert.collision import collision as C
+    from asset_convert.collision import collision_winding as W
+    matched = bad = left = broke = 0
+    for node, tris, groups in nsoups:
+        vis = C._visual_tri_soup(node)
+        rep, _n = W.repair_inverted_floors(list(tris), vis, groups)
+        for before, after in zip(tris, rep):
+            kb = tuple(_vertex_key(v) for v in before)
+            cands = ref.get(frozenset(kb))
+            if not cands:
+                continue
+            matched += 1
+            was_ok = any(_same_winding(kb, c) for c in cands)
+            ka = tuple(_vertex_key(v) for v in after)
+            now_ok = any(_same_winding(ka, c) for c in cands)
+            if not was_ok:
+                bad += 1
+                left += 0 if now_ok else 1
+            elif not now_ok:
+                broke += 1
+    return matched, bad, left, broke
 
 
 def _scan_ab(args):
@@ -222,7 +272,6 @@ def _scan_ab(args):
     much of the real damage the repair fixes) and, critically, how many
     already-correct triangles it breaks.
     """
-    from asset_convert.collision import collision as C
     rel, src, dst = args
     npath, opath = os.path.join(src, rel), os.path.join(dst, rel)
     if not (os.path.exists(npath) and os.path.exists(opath)):
@@ -233,38 +282,7 @@ def _scan_ab(args):
         return None
     if not nsoups or not osoups:
         return None
-
-    def key(v):
-        return (round(v[0], 1), round(v[1], 1), round(v[2], 1))
-
-    def same(a, b):
-        return any((a[r], a[(r+1) % 3], a[(r+2) % 3]) == b for r in range(3))
-
-    ref = {}
-    for _n, tris, _g in osoups:
-        for t in tris:
-            ks = tuple(key(v) for v in t)
-            ref.setdefault(frozenset(ks), []).append(ks)
-
-    matched = bad = left = broke = 0
-    for node, tris, groups in nsoups:
-        vis = C._visual_tri_soup(node)
-        rep, _n = C._repair_inverted_floors(list(tris), vis, groups)
-        for before, after in zip(tris, rep):
-            kb = tuple(key(v) for v in before)
-            cands = ref.get(frozenset(kb))
-            if not cands:
-                continue
-            matched += 1
-            was_ok = any(same(kb, c) for c in cands)
-            ka = tuple(key(v) for v in after)
-            now_ok = any(same(ka, c) for c in cands)
-            if not was_ok:
-                bad += 1
-                if not now_ok:
-                    left += 1
-            elif not now_ok:
-                broke += 1
+    matched, bad, left, broke = _score_repair(nsoups, _truth_index(osoups))
     if not matched:
         return None
     return (rel, matched, bad, left, broke)

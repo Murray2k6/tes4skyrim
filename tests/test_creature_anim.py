@@ -977,8 +977,8 @@ class TestCastPin:
     def _cast_bindings(self, xml):
         # variable indices as the emitted graph numbers them
         import re
-        from asset_convert.havok.hkx_behavior import (ENGINE_VARIABLES,
-                                                MAGIC_VARIABLES)
+        from asset_convert.havok.behavior_vocabulary import (
+            ENGINE_VARIABLES, MAGIC_VARIABLES)
         names = [n for n, _t, _iv in ENGINE_VARIABLES]
         names += [n for n, _t, _iv in MAGIC_VARIABLES]   # scamp: no block/swim
         binding = ('memberPath">bIsActive{slot}</hkparam>\\s*'
@@ -1008,10 +1008,10 @@ class TestCastPin:
     def test_cast_chain_allows_rotation(self):
         # pinned caster must still turn to face (falmer ranged guard)
         import re
+        from asset_convert.havok.behavior_vocabulary import ENGINE_VARIABLES
         from asset_convert.havok.hkx_behavior import (build_behavior_xml,
                                                 classify_clips,
-                                                movement_type_names,
-                                                ENGINE_VARIABLES)
+                                                movement_type_names)
         clips = classify_clips(SCAMP_DIR)
         xml = build_behavior_xml('tes4oblivion_scampbehavior', clips,
                                  movement_types=movement_type_names('scamp'))
@@ -1082,7 +1082,7 @@ class TestDirectionBlend:
 
     def test_direction_blend_anchors(self):
         import re
-        from asset_convert.havok.hkx_behavior import ENGINE_VARIABLES
+        from asset_convert.havok.behavior_vocabulary import ENGINE_VARIABLES
         xml = self._xml()
         # one direction blend per gait family (scamp has walk + run)
         for fam in ('Walk', 'Run'):
@@ -1410,10 +1410,13 @@ class TestRagdollBijection:
 
     @needs_alit
     def test_nif_side_lists_match_the_plan(self):
-        # collision.enforce_ragdoll_tree rebuilds every body's constraint
-        # list to exactly its planned joint: first body bare, every other
-        # body ONE joint to an earlier body -- the list the engine indexes.
-        from asset_convert.collision.collision import enforce_ragdoll_tree
+        """Every body's list is exactly its planned joint.
+
+        First body bare, every other body ONE joint to an earlier body --
+        the list the engine indexes.
+        """
+        from asset_convert.collision.collision_constraints import (
+            enforce_ragdoll_tree)
         from asset_convert.havok.hkx_ragdoll import plan_ragdoll_tree, decode_name
         from pyffi.formats.nif import NifFormat
         d = NifFormat.Data()
@@ -1441,9 +1444,12 @@ class TestRagdollBijection:
 
     @needs_mudcrab
     def test_nif_side_drops_second_constraints(self):
-        # mudcrab authors three bodies with TWO constraints each, which
-        # shifts every later slot the engine indexes by body order
-        from asset_convert.collision.collision import enforce_ragdoll_tree
+        """The mudcrab's three bodies with TWO constraints each are trimmed.
+
+        An extra constraint shifts every later slot the engine indexes.
+        """
+        from asset_convert.collision.collision_constraints import (
+            enforce_ragdoll_tree)
         from asset_convert.havok.hkx_ragdoll import plan_ragdoll_tree
         from pyffi.formats.nif import NifFormat
         d = NifFormat.Data()
@@ -1460,9 +1466,8 @@ class TestRagdollBijection:
 
     @needs_landdreugh
     def test_nif_side_reverses_a_forward_joint_in_place(self):
-        from asset_convert.collision.collision import (enforce_ragdoll_tree,
-                                             joint_descriptor,
-                                             reverse_constraint_ends)
+        from asset_convert.collision.collision_constraints import (
+            enforce_ragdoll_tree, joint_descriptor, reverse_constraint_ends)
         from asset_convert.havok.hkx_ragdoll import plan_ragdoll_tree, decode_name
         from pyffi.formats.nif import NifFormat
         d = NifFormat.Data()

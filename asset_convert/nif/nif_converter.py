@@ -71,9 +71,9 @@ from asset_convert.character.skyrim_overrides import (
     WEAPON_INV_MARKER_ZOOM,
 )
 from asset_convert.collision.collision import (bake_node_transform_into_body, convert_all_collisions,
-                        enforce_ragdoll_tree, hoist_collision,
-                        remove_empty_collision_nodes, scale_constraint_pivots,
-                        strip_marker_collision_bodies)
+                        hoist_collision, remove_empty_collision_nodes)
+from asset_convert.collision.collision_constraints import (enforce_ragdoll_tree,
+                        scale_constraint_pivots, strip_marker_collision_bodies)
 from asset_convert.nif.tri_reconstruct import (clear_match_groups, fix_missing_triangles,
                               UnreconstructibleGeometry)
 

@@ -1,6 +1,6 @@
 """Single source of truth for the collision winding-repair toggle.
 
-``asset_convert.collision.collision._repair_inverted_floors`` rewinds collision triangles
+``asset_convert.collision.collision.repair_inverted_floors`` rewinds collision triangles
 whose winding was reversed at the source (the "I fall through the floor"
 symptom).  It has two halves, and **only the second one is what this toggle
 controls**:
