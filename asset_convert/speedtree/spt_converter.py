@@ -42,6 +42,7 @@ from asset_convert.nif.pyffi_monkey_patch import apply_patches
 from asset_convert.speedtree.spt_parser import parse_spt, SptTree
 from asset_convert.speedtree.spt_generator import build_tree, TreeGeometry
 from asset_convert.collision.collision_material import set_havok_material
+from asset_convert.nif.bsx_flags import BSX_FLAGS_STATIC
 from output_layout import assets_for
 
 apply_patches()
@@ -55,7 +56,6 @@ except ImportError:
 _WORKER_COUNT = worker_count()
 
 NIF_FLAGS = 14
-BSX_FLAGS = 130            # 0x82: complex + havok (vanilla flora value)
 # Generated tree geometry is in game/render units (Size*10).  Skyrim Havok
 # collision is game_units / 69.9904 (1 havok unit = 69.9904 game units) —
 # verified against vanilla wrtempletree01.nif (Gildergreen): its CMS collision
@@ -324,7 +324,7 @@ def build_tree_nif(geo: TreeGeometry, name: str,
 
     bsx = NifFormat.BSXFlags()
     bsx.name = b'BSX'
-    bsx.integer_data = BSX_FLAGS
+    bsx.integer_data = BSX_FLAGS_STATIC
     root.num_extra_data_list = 1
     root.extra_data_list.update_size()
     root.extra_data_list[0] = bsx

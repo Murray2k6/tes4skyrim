@@ -42,8 +42,8 @@ pipeline.
 Grass NIFs are identified from the export's GRAS.txt Model.MODL fields.
 
 CLI:
-    python -m asset_convert.lod.grass_profile <export_dir> <output_meshes_root>
-    # e.g. python -m asset_convert.lod.grass_profile export/Oblivion.esm \
+    python -m asset_convert.nif.grass_profile <export_dir> <output_meshes_root>
+    # e.g. python -m asset_convert.nif.grass_profile export/Oblivion.esm \
     #          output/Oblivion.esm/meshes
 """
 import shutil

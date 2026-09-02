@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert.lod import dds_codec as T
+from asset_convert.texture import dds_codec as T
 
 
 def _reference(img):

@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 
 from asset_convert.sources import bsa_extract
-from asset_convert.lod import grass_profile
+from asset_convert.nif import grass_profile
 from asset_convert.character import hair_pipeline
 from asset_convert.texture import landscape_normals
 from asset_convert.texture import luminance_textures

@@ -33,7 +33,7 @@ from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
 from asset_convert.lod.terrain_lod_falloutnv import edid_keyed_lod_tiles, resolve_edid_keyed
 from output_layout import assets_for
-from asset_convert.lod.dds_codec import (
+from asset_convert.texture.dds_codec import (
     TEX_SIZE,
     write_dds_dxt1,
     write_normal_dds,

@@ -141,13 +141,6 @@ ARMOR_GEOMETRY_BODY_PARTS: list[tuple[str, int, list[int] | None]] = [
 ARMOR_DEFAULT_BODY_PART = SBP_32_BODY  # fallback for unrecognised geometry names
 
 # ---------------------------------------------------------------------------
-# BSXFlags
-BSX_FLAGS_STATIC      = 0x82   # 130 — static objects with collision
-BSX_FLAGS_DYNAMIC     = 0xC2   # 194 — dynamic clutter (mass > 0)
-BSX_FLAGS_ANIMATED    = 0x8B   # 139 — animated objects (doors, display cases, activators)
-BSX_FLAGS_CONSTRAINED = 0xCA   # 202 — dynamic constrained objects (swinging signs)
-
-# ---------------------------------------------------------------------------
 # Weapon blood textures (BSEffectShaderProperty.source_texture)
 BLOOD_TEXTURE_EDGE  = r'textures\blood\BloodEdge01.dds'
 BLOOD_TEXTURE_BLUNT = r'textures\blood\BloodHitDecals01.dds'

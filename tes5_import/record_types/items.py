@@ -511,7 +511,7 @@ def convert_GRAS(rec: dict) -> bytes:
     Grass is engine-instanced from LAND texture layers, not placed, so it
     skips the normal object treatment.
     """
-    from asset_convert.lod.grass_profile import grass_model_dest
+    from asset_convert.nif.grass_profile import grass_model_dest
     subs = b''
     edid = get_str(rec, 'EditorID')
     if edid:

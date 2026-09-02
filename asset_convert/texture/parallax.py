@@ -43,6 +43,8 @@ import struct
 
 import numpy as np
 
+from asset_convert.texture.dds_codec import encode_bc4_channel
+
 # Oblivion's parallax switch on NiTexturingProperty.
 APPLY_HILIGHT2 = 4
 
@@ -344,35 +346,6 @@ def decode_alpha_plane(data: bytes) -> 'tuple[int, int, bytearray] | None':
     return w, h, out
 
 
-def _encode_bc4_block(vals) -> bytes:
-    """One 4x4 BC4 block.
-
-    Byte-for-byte the same layout as a DXT5 ALPHA block: two 8-bit endpoints
-    plus sixteen 3-bit indices.  That is why no external encoder is needed —
-    the format is already understood from the decoding side.
-
-    The palette index is COMPUTED, not searched.  With a0 = hi and a1 = lo the
-    eight entries are hi, lo, then six evenly spaced steps from hi down to lo,
-    so the nearest entry to v is found by quantising (hi - v) onto sevenths:
-    step 0 is the endpoint hi (index 0), step 7 is the endpoint lo (index 1),
-    and everything between is index step+1.  Searching all eight instead cost
-    8x the inner-loop work — 0.34 s for one 512x512 texture, and this runs
-    inside the mesh workers for every height map in the plugin.
-    """
-    lo, hi = min(vals), max(vals)
-    if hi == lo:
-        return bytes((lo, lo, 0, 0, 0, 0, 0, 0))
-    d = hi - lo
-    half = d >> 1
-    bits = 0
-    shift = 0
-    for v in vals:
-        step = ((hi - v) * 7 + half) // d          # 0..7, nearest
-        bits |= (0 if step == 0 else 1 if step == 7 else step + 1) << shift
-        shift += 3
-    return bytes((hi, lo)) + bits.to_bytes(6, 'little')
-
-
 # --------------------------------------------------------------------------
 # Output conditioning: half size, then blur, then the tone curve.
 # --------------------------------------------------------------------------
@@ -487,28 +460,37 @@ def _downsample(w, h, plane):
     return nw, nh, out
 
 
+def _blocks_clamped(w: int, h: int, plane) -> "np.ndarray":
+    """The plane as a (ph, pw) uint8 array padded to whole 4x4 blocks.
+
+    Short edges repeat the last real texel rather than zero-filling: a black
+    pad would drag the block's endpoints down and band the edge of every map
+    whose side is not a multiple of 4.
+    """
+    a = np.frombuffer(bytes(plane), dtype=np.uint8).reshape(h, w)
+    ph, pw = (h + 3) & ~3, (w + 3) & ~3
+    if (ph, pw) == (h, w):
+        return a
+    return np.pad(a, ((0, ph - h), (0, pw - w)), mode='edge')
+
+
 def encode_bc4_dds(w: int, h: int, plane, mipmaps: bool = True) -> bytes:
     """A single-channel BC4 DDS, with a full mip chain.
 
     BC4 is what Community Shaders recommends for height maps: one channel at
     the file size of BC1, without BC1's banding on grey gradients.  ENB reads
     it too.
+
+    Block encoding is shared with the terrain codec, which picks each texel's
+    palette entry by nearest value; the blurred, narrow-range blocks a height
+    field is made of are where that matters most.
+    See: docs/commentary/asset_convert_terrain.md#bc4-index-selection
     """
     levels = []
     cw, ch, cp = w, h, plane
     while True:
-        blocks = bytearray()
-        bx, by = (cw + 3) // 4, (ch + 3) // 4
-        for byi in range(by):
-            for bxi in range(bx):
-                vals = []
-                for ty in range(4):
-                    y = min(byi * 4 + ty, ch - 1)
-                    for tx in range(4):
-                        x = min(bxi * 4 + tx, cw - 1)
-                        vals.append(cp[y * cw + x])
-                blocks += _encode_bc4_block(vals)
-        levels.append(bytes(blocks))
+        levels.append(
+            encode_bc4_channel(_blocks_clamped(cw, ch, cp)).tobytes())
         if not mipmaps or (cw == 1 and ch == 1):
             break
         cw, ch, cp = _downsample(cw, ch, cp)

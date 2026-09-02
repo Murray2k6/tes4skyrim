@@ -43,6 +43,9 @@ from worker_budget import worker_count
 
 from asset_convert.texture import landscape_normals
 from asset_convert import paths
+from asset_convert.nif.bsx_flags import (BSX_FLAGS_ANIMATED,
+                                         BSX_FLAGS_CONSTRAINED,
+                                         BSX_FLAGS_DYNAMIC, BSX_FLAGS_STATIC)
 from asset_convert.character.skyrim_overrides import (
     ARMOR_DEFAULT_BODY_PART,
     ARMOR_GEOMETRY_BODY_PARTS,
@@ -52,10 +55,6 @@ from asset_convert.character.skyrim_overrides import (
     ARMOR_GND_INV_MARKER_ZOOM,
     ARMOR_PIECE_OFFSETS,
     ARMOR_PIECE_OFFSETS_PRN,
-    BSX_FLAGS_ANIMATED,
-    BSX_FLAGS_CONSTRAINED,
-    BSX_FLAGS_DYNAMIC,
-    BSX_FLAGS_STATIC,
     OBLIVION_TO_SKYRIM_BONE_MAP,
     SHIELD_INV_MARKER_ROT_X,
     SHIELD_INV_MARKER_ROT_Y,

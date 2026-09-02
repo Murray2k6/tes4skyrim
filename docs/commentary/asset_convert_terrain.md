@@ -1,6 +1,6 @@
-# asset_convert/lod/terrain_lod.py — terrain, LOD and grass
+# asset_convert/lod/terrain_lod.py — terrain and LOD
 
-**Code:** `asset_convert/lod/terrain_lod.py`, `asset_convert/lod/dds_codec.py`, `asset_convert/lod/lod_gen.py`, `asset_convert/lod/lod_far_gen.py`, `asset_convert/lod/grass_profile.py`, `asset_convert/lava_surface.py`
+**Code:** `asset_convert/lod/terrain_lod.py`, `asset_convert/texture/dds_codec.py`, `asset_convert/lod/lod_gen.py`, `asset_convert/lod/lod_far_gen.py`, `asset_convert/lava_surface.py`
 
 ## Contents
 
@@ -19,7 +19,7 @@
 - **Grass CTD root cause #3 — intermediate NiNode wrapper on rotated sources (SOLVED 2026-07-10)**: Skyrim's grass instancer (`AddCellGrassTask` → `BSMultiStreamInstanceTriShape`) requires grass geometry as a **direct child of the BSFadeNode root** — every working grass NIF (vanilla + converted `gcgorsegrass`/`gclonggrass`) is flat `BSFadeNode → NiTriShape`. But the generic converter's Pass-6c wraps geometry in an inner NiNode whenever the **source root carries a non-identity rotation** (it bakes the rotation into a child NiNode because Skyrim honors child-NiNode rotation but ignores BSFadeNode root rotation for statics). The grass path never traverses that inner node → dereferences garbage (`rdi=0x0001000100010001`, `movzx ecx,[rdi+0x32]`) → **CTD** on any cell spawning the type. Hit TES4 **BWCattail01/02/03** (their source roots are rotated; the crash object was `BWCattail02` with a nested `NiNode "BWCattail02"`). Fix: `grass_profile._flatten_grass_root()` (runs inside `apply_grass_profile`) bakes each plain NiNode wrapper's transform into its geometry's verts+normals and re-parents the geometry onto the root, dropping the empty NiNode — world-space geometry preserved (verified: Z height extent unchanged). Only collapses bare NiNode wrappers holding pure geometry (no collision/controller/extra-data). Diagnosis: crash log named `tes4_bwcattail02.nif` + `BSFadeNode`/`NiNode` both named "BWCattail02"; block dump vs a working converted grass NIF showed the extra nesting; source root rotation identity=False (vs gcgorsegrass identity=True, which stayed flat).
 - Known remaining grass-NIF oddities (not crash-related, grass renders): most grass tex[1] `_n.dds` normal maps don't exist (vanilla grass points tex[1] at `textures\effects\HighFrequencyNormals.dds` or the literal string `NOR`); bwcattail03 references BWCatTail02.dds which is absent from the extracted BSAs.
 - **BSHeartland.esm is the best reference for "custom worldspace + custom grass records that provably work"** — compare against it before vanilla when a worldspace-scoped feature is dead.
-- Grass NIFs additionally get the vanilla grass shader profile (`asset_convert/lod/grass_profile.py`, run by `asset_pipeline.convert_meshes`; models identified from the export's `GRAS.txt`): NiAlphaProperty alpha-test only (blend bit clear), SLSF1 OwnEmit+VertexAlpha set / Specular clear (Specular + glossiness 0 = pow(NdotH,0)=1 white-out), emissive ×1.0, gloss 80, spec white/1.0, lighting effects 0.3/2.0, clamp 0 — matching every vanilla LE grass mesh in `references/Skyrim Meshes/meshes/landscape/grass/`. Geometry/UVs/vertex-color alpha (wind weight) preserved.
+- Grass NIFs additionally get the vanilla grass shader profile (`asset_convert/nif/grass_profile.py`, run by `asset_pipeline.convert_meshes`; models identified from the export's `GRAS.txt`): NiAlphaProperty alpha-test only (blend bit clear), SLSF1 OwnEmit+VertexAlpha set / Specular clear (Specular + glossiness 0 = pow(NdotH,0)=1 white-out), emissive ×1.0, gloss 80, spec white/1.0, lighting effects 0.3/2.0, clamp 0 — matching every vanilla LE grass mesh in `references/Skyrim Meshes/meshes/landscape/grass/`. Geometry/UVs/vertex-color alpha (wind weight) preserved.
 - 8 Shivering Isles grass models (Plants\Dementia\*, Plants\Mania\*) are absent from the extracted BSAs — their GRAS records exist but have no mesh until SI assets are extracted.
 
 ## Terrain/LOD/LAND-adjacent asset notes
@@ -657,10 +657,11 @@ proportionally more vertices, which is what it needs to still read as itself.
 ## The DDS block codec
 <a id="dds-block-codec"></a>
 
-**Code:** `asset_convert/lod/dds_codec.py`
+**Code:** `asset_convert/texture/dds_codec.py`
 
 Split out of `terrain_lod.py`: nothing in it knows about terrain, every entry
-point takes a pixel array and returns bytes.
+point takes a pixel array and returns bytes.  It lives under `texture/` because
+the parallax height-map writer shares its BC4 encoder.
 
 ### <a id="dxt1-is-vectorised-over-blocks"></a>DXT1 is vectorised over blocks
 
@@ -685,6 +686,36 @@ level-16 tile died** on `Unable to allocate 32.0 MiB for an array with shape
 Chunking bounds the peak per worker regardless of tile size, and the explicit
 int32 accumulator halves what remains. The squared distance maxes at
 `3 × 255² = 195,075`, so int32 cannot overflow.
+
+### <a id="bc4-index-selection"></a>BC4 picks each index by NEAREST VALUE, not by arithmetic
+
+`encode_bc4_channel` argmins over the eight palette entries. The obvious
+cheaper form — quantise `hi - v` onto sevenths of the range and use the step as
+the index — is **wrong**, and `parallax.py` shipped it until it was measured
+against the format's own decode rule.
+
+The palette entries are integer **floors** of `((7-i)*hi + i*lo)/7`, so the true
+midpoint between adjacent entries sits slightly *below* the exact seventh
+boundary. Rounding onto exact sevenths therefore picks the lower entry for any
+value just under a boundary.
+
+Measured over 4,000 random blocks: argmin hits the theoretical optimum on
+**4000/4000**; the computed index misses on **293** and is never better on any
+block. The error scales inversely with the endpoint range — for endpoints
+108/100 it is wrong on **3 of the 9** representable values.
+
+That regime is exactly a parallax height field, which is downscaled 2× and
+blurred (radius 20/1000) before encoding. On a simulated blurred field
+**64.8% of blocks encoded differently and the computed index carried 73.4% more
+error**; pure gradients were unaffected, which is why it went unnoticed. There
+were no BC4 tests in `tests/test_parallax.py`.
+
+The arithmetic index existed to avoid the cost of searching eight entries in a
+per-texel Python loop, which was a real constraint. Vectorising over blocks
+removes the tradeoff rather than trading against it: on one machine, one
+512² level, the same input, the scalar computed index takes **0.062 s** and the
+vectorised search **0.009 s** — 6.7× faster *and* optimal. (The 0.34 s in the
+original note was a different machine and is not comparable to either.)
 
 ### <a id="one-dds-header-builder"></a>One header builder, three formats
 

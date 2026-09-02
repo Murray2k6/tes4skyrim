@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from asset_convert.lod import grass_profile
+from asset_convert.nif import grass_profile
 from asset_convert.texture import landscape_normals
 from asset_convert.nif.flipbook import decode_dxt
 from asset_convert.nif.nif_converter import NifFormat, convert_nif

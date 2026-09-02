@@ -16,7 +16,7 @@ import struct
 import numpy as np
 import pytest
 
-from asset_convert.lod.dds_codec import (c565_to_rgb, encode_bc4_channel,
+from asset_convert.texture.dds_codec import (c565_to_rgb, encode_bc4_channel,
                                          encode_dxt1_quality, rgb_to_565)
 from asset_convert.lod.terrain_lod import fill_missing
 
