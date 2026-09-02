@@ -64,7 +64,7 @@ including arm openings that shift ~20 z units.
 ## Prn attachment: shields, torches and weapons
 <a id="shield-attachment"></a>
 
-**Code:** `_convert_prn` in `asset_convert/nif/nif_converter.py`
+**Code:** `_convert_prn` in `asset_convert/nif/equipment_rig.py`
 
 The authored `Prn` string names the skeleton node a mesh hangs off. It is
 remapped to the Skyrim node and re-written onto the new root; gear that the
@@ -78,6 +78,38 @@ both skeletons, so the shield sits on the forearm at the handle exactly as it
 did in Oblivion — no per-mesh bbox heuristics. The wrapper pass then detects the
 non-identity rotation and bakes it into an inner NiNode.
 
+### <a id="shield-forearm-clearance"></a>The forearm-clearance correction
+
+**Code:** `shield_attach_transform` in `asset_convert/nif/equipment_rig.py`
+
+The base mapping is built from the same three landmarks on each skeleton — hand
+joint, middle-finger base, thumb base — giving an anatomical hand frame per
+game:
+
+```
+T = W_obForearmTwist @ F_ob^-1 @ F_sk @ W_SHIELD^-1
+```
+
+(row-vector convention, matching `skeleton_bones_*.json`.)
+
+That preserves the shield's pose relative to the **Oblivion** forearm, which is
+not where the Skyrim forearm is: the two leave the hand at different angles,
+measured at **~16°** out of the strap plane, with the elbow at SHIELD-local
+**z = +7.2** against a shield back face at **z ≈ +2**. The arm pokes through the
+shield.
+
+The fix rotates about the grip (the origin) so the mapped Oblivion forearm axis
+lands on the actual Skyrim forearm axis — the shield lies along the real arm and
+the hand position is unchanged. The Rodrigues construction is transposed from
+the standard column form, because everything here is row-vector.
+
+Validated against vanilla `ironshield.nif`: the result lands on the Skyrim
+convention (face in the XY plane, dome toward -Z, grip near the origin) within a
+few units.
+
+The whole thing degrades to `None` when the skeleton JSONs are unavailable, and
+the shield then keeps its Oblivion orientation rather than getting a guess.
+
 **A TORCH also hangs off the SHIELD node** — Skyrim carries it in the off-hand —
 **but it is not a shield and must NOT get that transform.** A torch is authored
 at the grip in BOTH games: vanilla `meshes\weapons\torch\torch.nif` is
@@ -87,6 +119,35 @@ read as a torch at a completely wrong orientation. It still needs its own
 `BSInvMarker`, because `SHIELD` is in `_EQUIPPED_PRN_VALUES` and the per-mesh
 inventory pass skips it — vanilla's values are rot (4712, 0, 0), zoom 0.82: a
 shield's orientation, pulled back slightly.
+
+### <a id="prn-remap-table"></a>The Prn remap table is authored, not derived
+
+**Code:** `_PRN_REMAP`, `_WEAPON_FILENAME_PRN`, `_remap_prn` in
+`asset_convert/nif/equipment_rig.py`
+
+Oblivion node names do not map onto Skyrim's by any rule, so the table is data:
+
+| Oblivion `Prn` | Skyrim node | Why |
+|---|---|---|
+| `BackWeapon` | `WeaponBack` | 2H weapons; bows refine to `WeaponBow` |
+| `SideWeapon` | `WeaponSword` | all Oblivion 1H; refined by filename |
+| `Quiver` | `QUIVER` | case differs |
+| `Shield` | `SHIELD` | case differs |
+| `Bip01 L ForearmTwist` | `SHIELD` | Oblivion uses the forearm bone |
+| `Bip01 Head` | `NPC Head [Head]` | helmets |
+| `Torch` | `SHIELD` | Skyrim carries the torch off-hand |
+
+**The 1H refinement is by filename keyword** because Oblivion has one node for
+every 1H weapon while Skyrim has one per type: `dagger`→`WeaponDagger`,
+`mace`/`club`/`hammer`→`WeaponMace`, `waraxe`/`axe`→`WeaponAxe`,
+`staff`→`WeaponStaff`, everything else staying on `WeaponSword`.
+
+**Shortswords are deliberately absent from that list.** The record converter
+maps TES4 `Blade1H` to Skyrim `OneHandSword`, and the draw animation only finds
+the weapon at the node matching the record's `AnimationType` — so
+`Prn=WeaponDagger` on a Sword-type record renders the weapon INVISIBLE while
+held. The same keyword refinement therefore runs on both sides, keyed on the
+same model basename so the two can never diverge.
 
 ### <a id="weapon-attachment"></a>Side-carried weapons flip 180° about Y
 

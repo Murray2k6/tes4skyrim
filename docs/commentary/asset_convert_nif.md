@@ -1222,7 +1222,7 @@ immediately after it.
 ## Geometry preparation
 <a id="geometry-preparation"></a>
 
-**Code:** `_prepare_geometry_data` in `asset_convert/nif/nif_converter.py`
+**Code:** `_prepare_geometry_data` in `asset_convert/nif/geometry_shader.py`
 
 Four repairs run on the mesh data before any shader exists.
 

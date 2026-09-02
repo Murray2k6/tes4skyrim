@@ -4821,7 +4821,7 @@ class TestSkyMeshShaders:
     """
 
     def test_sky_meshes_are_classified_by_type(self):
-        from asset_convert.nif.nif_converter import (
+        from asset_convert.nif.geometry_shader import (
             sky_object_type_for, SKY_STARS, SKY_CLOUDS, SKY_BASE)
         assert sky_object_type_for('export/x/meshes/sky/stars.nif') == SKY_STARS
         assert sky_object_type_for('export/x/meshes/sky/clouds.nif') == SKY_CLOUDS
@@ -4829,7 +4829,7 @@ class TestSkyMeshShaders:
         assert sky_object_type_for(r'export\x\meshes\Sky\Stars.NIF') == SKY_STARS
 
     def test_non_sky_meshes_are_not_misclassified(self):
-        from asset_convert.nif.nif_converter import sky_object_type_for
+        from asset_convert.nif.geometry_shader import sky_object_type_for
         assert sky_object_type_for('meshes/clutter/barrel01.nif') is None
         # must key on the sky/ DIRECTORY, not just the basename
         assert sky_object_type_for('meshes/architecture/sky/wall.nif') is None

@@ -1,11 +1,44 @@
 # asset_convert/nif/nif_converter.py - shader values
 
-**Code:** `asset_convert/nif/shaders.py`, `asset_convert/nif/nif_converter.py`, `asset_convert/texture/spec_mask.py`, `asset_convert/texture/luminance_textures.py`
+**Code:** `asset_convert/nif/shaders.py`, `asset_convert/nif/geometry_shader.py`, `asset_convert/nif/nif_converter.py`, `asset_convert/texture/spec_mask.py`, `asset_convert/texture/luminance_textures.py`
+
+## Sky geometry takes the sky shader, not a world one
+<a id="sky-object-types"></a>
+
+**Code:** `sky_object_type_for`, `_build_sky_shader` in `asset_convert/nif/geometry_shader.py`
+
+Skyrim draws the sky in a dedicated pass BEFORE the world: unlit, unfogged, with
+the horizon blend the weather record drives. `BSSkyShaderProperty.sky_object_type`
+tells that pass which layer a shape is. Routing these through
+`BSLightingShaderProperty` made the stars ordinary world geometry, which drew
+over the terrain.
+
+The pass does its own blending and vanilla sky meshes carry **no**
+`NiAlphaProperty`, so Oblivion's is dropped rather than carried across.
+
+**The mapping cannot be derived from the NIF.** Oblivion has no equivalent enum
+— it identifies sky geometry by WHICH SLOT of the climate/weather record
+references the mesh — so the table keyed by lowercase basename is the mapping
+between the two models, and is authored data.
+
+Eligibility is by DIRECTORY, not basename: only meshes under a `sky/` folder
+qualify, because names like `clouds.nif` and `sky.nif` collide with ordinary
+clutter elsewhere in the tree.
+
+| Oblivion mesh | sky object type |
+|---|---|
+| `stars.nif`, `stars_oblivion.nif`, `sestars.nif` | `SKY_STARS` (5) |
+| `clouds.nif`, `clouds_oblivion.nif` | `SKY_CLOUDS` (3) |
+| `atmosphere.nif`, `sky.nif` | `SKY_BASE` (2) |
+| `sunbeam01-03.nif` | `SKY_SUNGLARE` (1) |
+
+`SKY_TEXTURE` (0) and `SKY_MOON_STARS_MASK` (7) complete the engine's enum; no
+Oblivion mesh maps onto either.
 
 ## Lit or unlit: choosing the Effect shader
 <a id="fx-shader-discriminator"></a>
 
-**Code:** `_is_fx_surface` in `asset_convert/nif/nif_converter.py`
+**Code:** `_is_fx_surface` in `asset_convert/nif/geometry_shader.py`
 
 `BSLightingShaderProperty` is a LIT material: it shades every pixel against the
 normal map in texture slot 1. Oblivion's FX textures ship no `_n` companion at
@@ -149,6 +182,21 @@ mesh data actually carries, so the flag is set from `has_vertex_colors` rather
 than assumed. Vertex alpha rides along with it, which is what dims layered flame
 quads correctly.
 
+### <a id="effect-shader-emissive"></a>The effect emissive is carried, not forced white
+
+**Code:** `_effect_emissive` in `asset_convert/nif/geometry_shader.py`
+
+Oblivion dims an FX surface through `NiMaterialProperty.emissive_color` —
+`fxmist01` ships **(0.47, 0.47, 0.47)**. Forcing white DOUBLED every such
+effect, and on an additive quad that accumulates once per layer.
+
+White is used only as the fallback when the authored colour is (0,0,0), which
+would otherwise render the surface black.
+
+The material alpha rides in the emissive ALPHA channel, because that is what the
+engine multiplies the sampled texel by. `emissive_multiple` is held at 1.0:
+vanilla's value on **852 of 1164** blended FX shapes.
+
 ### <a id="flame-brightness-is-authored"></a>Flame brightness: the authored emissive, never the filename
 
 An earlier revision matched `fire`/`flame`/`torch` in the diffuse path (minus a
@@ -239,7 +287,7 @@ the resolver falls back through the master roots in order.
 ## Material defaults come from vanilla, not from Oblivion
 <a id="shader-material-defaults"></a>
 
-**Code:** `_set_material_defaults` in `asset_convert/nif/nif_converter.py`
+**Code:** `_set_material_defaults` in `asset_convert/nif/geometry_shader.py`
 
 These were once never assigned at all, so every shape shipped at pyffi's
 defaults — glossiness 0.0 with a BLACK specular colour and the specular flag
@@ -261,10 +309,30 @@ Specular strength is uniform on purpose: the modulation belongs in the normal
 map's alpha, not here. The spec-mask check still runs, because its per-category
 counters are what tell the texture stage how much it had to synthesise.
 
+## The emissive colour, and when `own_emit` is cleared
+<a id="emissive-own-emit"></a>
+
+**Code:** `_set_emissive` in `asset_convert/nif/geometry_shader.py`
+
+Skyrim **multiplies** the emissive colour by `emissive_multiple`, so a zero
+there leaves the surface black no matter what an animation does to the colour.
+Vanilla shapes carrying an emissive colour controller set `own_emit` in
+**133 of 133** cases and never pair it with a 0 multiple, so the multiple is
+stamped to 1.0 whenever the flag goes on.
+
+The flag is CLEARED on a shape with no emissive colour and no emissive
+animation. The default preset turns `slsf_1_own_emit` on for every shape, and
+leaving it on for ordinary geometry costs overdraw for a contribution that is
+always (0,0,0).
+
+The animation test matters independently of the colour: a shape whose emissive
+is driven by a controller can author (0,0,0) as its FIRST key and still light up
+later, so the flag must survive an all-zero starting colour.
+
 ## Texture slots are never left empty
 <a id="texture-slots-never-empty"></a>
 
-**Code:** `_fill_texture_slots` in `asset_convert/nif/nif_converter.py`
+**Code:** `_fill_texture_slots` in `asset_convert/nif/geometry_shader.py`
 
 **Slot 0, the diffuse.** A shape with no `NiTexturingProperty` at all is legal
 in Oblivion, which renders it with the flat `NiMaterialProperty` colour. Skyrim
@@ -475,7 +543,7 @@ out all of it came from one goblin ragdoll skeleton with 18 bodies.
 ## Dropping the alpha property on a parallax shape
 <a id="hilight2-alpha-dropped"></a>
 
-**Code:** `process_geometry` in `asset_convert/nif/nif_converter.py`
+**Code:** `process_geometry` in `asset_convert/nif/geometry_shader.py`
 
 Oblivion's `APPLY_HILIGHT2` (4) is its PARALLAX switch: the diffuse's alpha
 channel is a HEIGHT FIELD, not a transparency mask. Skyrim reads that same
