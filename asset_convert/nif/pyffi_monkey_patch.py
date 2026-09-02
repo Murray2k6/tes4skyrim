@@ -628,6 +628,8 @@ def _install_sse_layouts(NifFormat):
 # Patch 4 implementation: correct Skyrim NiPSysData binary layout
 
 _SKYRIM_VER = 0x14020007
+#: BSVER (user_version_2) of Skyrim; FO3/FNV share _SKYRIM_VER but report 34.
+_SKYRIM_BSVER = 83
 
 
 def _install_skyrim_psysdata_serializer(NifFormat):
@@ -636,7 +638,9 @@ def _install_skyrim_psysdata_serializer(NifFormat):
     PSysData = NifFormat.NiPSysData
 
     def _is_skyrim(data):
-        return data is not None and getattr(data, 'version', 0) == _SKYRIM_VER
+        return (data is not None
+                and getattr(data, 'version', 0) == _SKYRIM_VER
+                and getattr(data, 'user_version_2', 0) >= _SKYRIM_BSVER)
 
     def _use_handroll(self, data):
         """Hand-roll the NiPSysData layout whenever writing a Skyrim NIF.
