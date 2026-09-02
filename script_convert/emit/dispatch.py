@@ -29,7 +29,14 @@ _GLOBAL_CALL_RE = re.compile(r'^(?:Game|Utility|Debug|Math)\.')
 
 
 def emit_command(conv, ref_name, func_name: str, extends: str, args=()) -> str:
-    """Convert one TES4 command invocation."""
+    """Convert one TES4 command invocation.
+
+    A name with no row, handler or prefix family -- and a handler-only command
+    that fell past its handler -- becomes an inert `;TODO:` line rather than a
+    call: the spelling is TES4's, so emitting it would name an undefined
+    Papyrus function and fail the whole script.
+    See: docs/commentary/script_convert.md#unknown-commands-must-be-inert
+    """
     call = Call(conv, ref_name, func_name, extends, args)
     conv._arg_nodes = call.args
 
@@ -58,14 +65,19 @@ def emit_command(conv, ref_name, func_name: str, extends: str, args=()) -> str:
             out = f'{crow.emit}({args_txt})'
             return f'{out}  {crow.note}' if crow.note else out
 
-    # A command only a dedicated handler converts, reaching here, has fallen
-    # past that handler -- the receiver form of a bare-only command, say.  It
-    # must NOT become `ref.<name>()`: the name is TES4's, not Papyrus's, so the
-    # call would be an undefined function and take the whole script down.
-    if call.name in HANDLED_COMMANDS:
+    if call.name in HANDLED_COMMANDS or not _is_known(call.name):
         return f';TODO: {call.written()}'
 
     return _emit_mapped(conv, call, ref_name, func_name, extends)
+
+
+def _is_known(name: str) -> bool:
+    """True when a row or handler defines this command's Papyrus spelling.
+
+    See: docs/commentary/script_convert.md#unknown-commands-must-be-inert
+    """
+    return (name in COMMAND_ROWS or name in _commands.REGISTRY
+            or command_prefix_row(name) is not None)
 
 
 def _promote_receiver(conv, call):

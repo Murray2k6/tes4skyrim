@@ -1,7 +1,8 @@
 """TES4→Papyrus script conversion package."""
 
+from script_convert.blocks import BLOCK_MAP
 from script_convert.constants import (
-    BLOCK_MAP, TYPE_MAP, ACTOR_VALUE_MAP, KNOWN_GLOBALS,
+    TYPE_MAP, ACTOR_VALUE_MAP, KNOWN_GLOBALS,
     COMMAND_ROWS,
 )
 from script_convert.cross_ref import CrossRefGraph

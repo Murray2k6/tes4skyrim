@@ -23,93 +23,6 @@ import re
 # ScriptConverter._implicit_self and tes5_import.object_scripts.
 PLAYER_ALIAS_EXTENDS = 'ReferenceAlias'
 
-# Oblivion block type -> Papyrus event mapping
-# (event_signature, end_keyword)
-BLOCK_MAP = {
-    'gamemode':           ('Event OnUpdate()', 'EndEvent'),
-    'menumode':           ('Event OnUpdate()', 'EndEvent'),
-    'onactivate':         ('Event OnActivate(ObjectReference akActionRef)', 'EndEvent'),
-    'onadd':              ('Event OnContainerChanged(ObjectReference akNewContainer, ObjectReference akOldContainer)', 'EndEvent'),
-    'ondrop':             ('Event OnContainerChanged(ObjectReference akNewContainer, ObjectReference akOldContainer)', 'EndEvent'),
-    'onequip':            ('Event OnEquipped(Actor akActor)', 'EndEvent'),
-    'onunequip':          ('Event OnUnequipped(Actor akActor)', 'EndEvent'),
-    'ondeath':            ('Event OnDeath(Actor akKiller)', 'EndEvent'),
-    'onhit':              ('Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile, bool abPowerAttack, bool abSneakAttack, bool abBashAttack, bool abHitBlocked)', 'EndEvent'),
-    'onhitwith':          ('Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile, bool abPowerAttack, bool abSneakAttack, bool abBashAttack, bool abHitBlocked)', 'EndEvent'),
-    'onload':             ('Event OnLoad()', 'EndEvent'),
-    'onreset':            ('Event OnReset()', 'EndEvent'),
-    'onsell':             ('Event OnSell(Actor akSeller)', 'EndEvent'),
-    # TES4 `Begin OnTrigger` runs EVERY FRAME an object is inside the volume,
-    # not once on entry — Nehrim's Magieverbot (magic-ban) scripts count 25 and
-    # 100 *executions* in it, which is only meaningful under repeat semantics.
-    # Skyrim keeps the same three-way split (all three are distinct engine
-    # events in SkyrimSE.exe): OnTrigger = "trigger is tripped", sent
-    # repeatedly while inside; OnTriggerEnter/Leave are the edges.  Mapping
-    # OnTrigger -> OnTriggerEnter froze every such state machine on its first
-    # state, which left the Erothin bell latch stuck and re-ringing.
-    'ontrigger':          ('Event OnTrigger(ObjectReference akActionRef)', 'EndEvent'),
-    'ontriggerenter':     ('Event OnTriggerEnter(ObjectReference akActionRef)', 'EndEvent'),
-    'ontriggerleave':     ('Event OnTriggerLeave(ObjectReference akActionRef)', 'EndEvent'),
-    'onmagiceffectapply': ('Event OnMagicEffectApply(ObjectReference akCaster, MagicEffect akEffect)', 'EndEvent'),
-    'oninit':             ('Event OnInit()', 'EndEvent'),
-    'onpackagestart':     ('Event OnPackageStart(Package akNewPackage)', 'EndEvent'),
-    'onpackagedone':      ('Event OnPackageEnd(Package akOldPackage)', 'EndEvent'),
-    'onpackageend':       ('Event OnPackageEnd(Package akOldPackage)', 'EndEvent'),
-    'onpackagechange':    ('Event OnPackageChange(Package akOldPackage)', 'EndEvent'),
-    # OnTriggerActor/OnTriggerMob differ from OnTrigger only in WHAT trips them
-    # (any actor / any creature), not in edge-vs-repeat — they are per-frame
-    # too, so they take the repeating event as well.  Skyrim has no
-    # actor-vs-creature split, so the filter is left to the block body.
-    'ontriggeractor':     ('Event OnTrigger(ObjectReference akActionRef)', 'EndEvent'),
-    'ontriggermob':       ('Event OnTrigger(ObjectReference akActionRef)', 'EndEvent'),
-    'onmagiceffecthit':   ('Event OnMagicEffectApply(ObjectReference akCaster, MagicEffect akEffect)', 'EndEvent'),
-    'onactorequip':       ('Event OnEquipped(Actor akActor)', 'EndEvent'),
-    # OnAlarm (actor noticed a crime/attack) has no Papyrus event; entering
-    # combat/search via OnCombatStateChanged is the closest trigger.  The block
-    # loop adds an aeCombatState guard per block type (alarm: != 0, start
-    # combat: == 1) so the two merge cleanly into one event.
-    'onalarm':            ('Event OnCombatStateChanged(Actor akTarget, int aeCombatState)', 'EndEvent'),
-    'onstartcombat':      ('Event OnCombatStateChanged(Actor akTarget, int aeCombatState)', 'EndEvent'),
-    # Signatures are fixed by ActiveMagicEffect.psc — an invented one fails to
-    # compile ("the parameter types of function oneffectstart ... do not match
-    # the parent script activemagiceffect").
-    'scripteffectstart':  ('Event OnEffectStart(Actor akTarget, Actor akCaster)', 'EndEvent'),
-    'scripteffectfinish': ('Event OnEffectFinish(Actor akTarget, Actor akCaster)', 'EndEvent'),
-    'scripteffectupdate': ('Event OnUpdate()', 'EndEvent'),
-}
-
-# Oblivion block filters (`begin OnEquip player`, `begin OnTrigger player`,
-# `begin OnPackageDone SomePackage`) restrict the block to fire only for that
-# object.  Papyrus has no such filter, so the block body must be wrapped in an
-# equivalent guard on the event parameter that carries the filtered object.
-#
-# Maps block type -> (event parameter name, Papyrus type of that parameter).
-# A block type absent from this table has no parameter to filter on, so its
-# filter cannot be expressed and is dropped (with a TODO).
-BLOCK_FILTER_PARAM = {
-    'onactivate':         ('akActionRef', 'ObjectReference'),
-    'onadd':              ('akNewContainer', 'ObjectReference'),
-    'ondrop':             ('akOldContainer', 'ObjectReference'),
-    'onequip':            ('akActor', 'Actor'),
-    'onactorequip':       ('akActor', 'Actor'),
-    'onunequip':          ('akActor', 'Actor'),
-    'onsell':             ('akSeller', 'Actor'),
-    'ontrigger':          ('akActionRef', 'ObjectReference'),
-    'ontriggerenter':     ('akActionRef', 'ObjectReference'),
-    'ontriggerleave':     ('akActionRef', 'ObjectReference'),
-    'ontriggeractor':     ('akActionRef', 'ObjectReference'),
-    'ontriggermob':       ('akActionRef', 'ObjectReference'),
-    'onhit':              ('akAggressor', 'ObjectReference'),
-    'onhitwith':          ('akSource', 'Form'),
-    'ondeath':            ('akKiller', 'Actor'),
-    'onstartcombat':      ('akTarget', 'Actor'),
-    'onmagiceffecthit':   ('akEffect', 'MagicEffect'),
-    'onmagiceffectapply': ('akEffect', 'MagicEffect'),
-    'onpackagestart':     ('akNewPackage', 'Package'),
-    'onpackagedone':      ('akOldPackage', 'Package'),
-    'onpackageend':       ('akOldPackage', 'Package'),
-    'onpackagechange':    ('akOldPackage', 'Package'),
-}
 
 # Oblivion type -> Papyrus type mapping
 TYPE_MAP = {
@@ -602,6 +515,21 @@ def _canonical_global(name: str) -> str:
 def _record_type_to_papyrus(rtype: str) -> str:
     """Map a TES4 record type to a Papyrus property type."""
     return _RECORD_TYPE_PAPYRUS.get(rtype, 'ObjectReference')
+
+
+def record_type_to_papyrus(rtype: str) -> str:
+    """Map a TES4 record type to a Papyrus property type."""
+    return _record_type_to_papyrus(rtype)
+
+
+def safe_property_name(name: str) -> str:
+    """Return a Papyrus-safe property name, renaming reserved words."""
+    return _safe_property_name(name)
+
+
+def is_base_object_type(ptype: str) -> bool:
+    """True when `ptype` is a base-object class, not a placed reference."""
+    return ptype in _BASE_OBJECT_PAPYRUS
 
 
 # Record types whose Papyrus class is a BASE OBJECT (Armor, Weapon, Potion,
@@ -2339,9 +2267,6 @@ _BOOL_VALUED_FUNCTIONS = _BARE_BOOL_FUNCTIONS | _COMPARISON_BOOL_FUNCTIONS
 #: TES4 block types whose body becomes the OnUpdate poll.
 POLL_BLOCKS = ('gamemode', 'scripteffectupdate')
 
-#: TES4 block type -> the Papyrus combat-state test its filter stood for.
-COMBAT_STATE_GUARDS = {'onalarm': 'aeCombatState != 0',
-                       'onstartcombat': 'aeCombatState == 1'}
 
 #: Reference types, WIDEST first: the later one is the more specific.
 REF_SPECIFICITY = ('Form', 'ObjectReference', 'Actor')

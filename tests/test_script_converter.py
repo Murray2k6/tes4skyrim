@@ -13,8 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from script_convert.cross_ref import CrossRefGraph
 from script_convert.converter import ScriptConverter
+from script_convert.blocks import BLOCK_MAP, block_filter_guard
+from script_convert.emit.dispatch import emit_command
 from script_convert.constants import (
-    BLOCK_MAP,
     TYPE_MAP,
     ACTOR_VALUE_MAP,
     TES4_ATTRIBUTES,
@@ -89,8 +90,26 @@ def conv_line(converter, source, extends='ObjectReference'):
         # goes to `tree.variables` and a block closer belongs to the walk.
         stripped = source.strip()
         return stripped if stripped.startswith(';') else ''
+
     lines = _S.emit_stmt(converter, body[0], extends, 0)
     return lines[0].strip() if lines else ''
+
+
+# ------------------------------------------------------------------------
+# Multi-line statement shim
+# ------------------------------------------------------------------------
+def conv_lines(converter, source, extends='ObjectReference'):
+    """Every line one TES4 STATEMENT emits, newline-joined.
+
+    A Say assignment emits the pre-charge AND the SayLine call, so a
+    first-line-only view of it is blind to the call itself.
+    """
+    tree = _parse(source)
+    body = [st for st in tree.body if not isinstance(st, N.Blank)]
+    if not body:
+        return ''
+    lines = _S.emit_stmt(converter, body[0], extends, 0)
+    return '\n'.join(ln.strip() for ln in lines) if lines else ''
 
 
 def _parse(source):
@@ -275,13 +294,13 @@ class TestExpressionConversion:
         assert result == 'x == 1'
 
     def test_comparison_with_function(self, converter_with_quests):
-        result = conv_expr(converter_with_quests, 
+        result = conv_expr(converter_with_quests,
             'getstage MQ01 == 10', 'Quest')
         assert 'MQ01.GetStage()' in result
         assert '== 10' in result
 
     def test_logical_or(self, converter_with_quests):
-        result = conv_expr(converter_with_quests, 
+        result = conv_expr(converter_with_quests,
             'getstage MQ01 == 10 || getstage MQ01 == 15', 'Quest')
         assert '||' in result
         assert 'MQ01.GetStage()' in result
@@ -295,12 +314,14 @@ class TestExpressionConversion:
         assert '!=' in result
 
     def test_isactionref_eq_1(self, converter):
+        converter._current_event = 'Event OnActivate(ObjectReference akActionRef)'
         result = conv_expr(converter, 'IsActionRef player == 1', 'ObjectReference')
         assert 'akActionRef' in result
         assert 'Game.GetPlayer()' in result
         assert '((' not in result  # No double parens
 
     def test_isactionref_eq_0(self, converter):
+        converter._current_event = 'Event OnActivate(ObjectReference akActionRef)'
         result = conv_expr(converter, 'IsActionRef player == 0', 'ObjectReference')
         assert '!' in result or 'not' in result.lower()
         assert 'akActionRef' in result
@@ -376,7 +397,7 @@ def convert_args(conv, args_src, func_name, extends):
     from script_convert.tes4.parser import Parser
     call = Parser(tokenize('%s %s' % (func_name, args_src))).parse_expression()
     conv._arg_nodes = tuple(getattr(call, 'args', ()) or ())
-    return conv._convert_args(args_src, func_name, extends)
+    return emit_command(conv, None, func_name, extends, args=conv._arg_nodes)
 
 
 def emit_function(conv, ref_name, func_name, args_src, extends):
@@ -387,7 +408,7 @@ def emit_function(conv, ref_name, func_name, args_src, extends):
     if args_src.strip():
         call = Parser(tokenize(f'{func_name} {args_src}')).parse_expression()
         args = tuple(getattr(call, 'args', ()) or ())
-    return conv._emit_function(ref_name, func_name, extends, args=args)
+    return emit_command(conv, ref_name, func_name, extends, args=args)
 
 
 # ===========================================================================
@@ -471,11 +492,13 @@ class TestFunctionConversion:
         assert 'TODO' in result
 
     def test_isactionref(self, converter):
+        converter._current_event = 'Event OnActivate(ObjectReference akActionRef)'
         result = emit_function(converter, None, 'IsActionRef', 'player', 'ObjectReference')
         assert 'akActionRef' in result
         assert 'Game.GetPlayer()' in result
 
     def test_getactionref(self, converter):
+        converter._current_event = 'Event OnActivate(ObjectReference akActionRef)'
         result = emit_function(converter, None, 'GetActionRef', '', 'ObjectReference')
         assert result == 'akActionRef'
 
@@ -523,7 +546,7 @@ class TestActorValueMap:
 
     def test_attribute_read_is_stubbed_open(self, converter):
         """A read of a removed attribute yields a value that passes the gate."""
-        result = conv_expr(converter, 
+        result = conv_expr(converter,
             'Player.GetAV Strength >= 30 && Player.GetAV Endurance >= 30',
             'Quest')
         assert result == '100.0 >= 30 && 100.0 >= 30'
@@ -1770,11 +1793,13 @@ class TestSingletonFixes:
         assert 'TES4Polyfill.HasVampireFed()' in result
 
     def test_setfactionreaction_mixed_separators(self, converter):
-        # Must NOT emit SetReaction: that writes the XNAM 'Modifier' field,
-        # which Skyrim ignores (1,035 of 1,036 vanilla relations store 0).
-        # Combat is gated on the Group Combat Reaction enum, written by
-        # SetAlly/SetEnemy.
-        result = conv_line(converter, 
+        """SetAlly, never SetReaction, whatever separators are used.
+
+        SetReaction writes XNAM's 'Modifier', which Skyrim ignores
+        (1,035 of 1,036 vanilla relations store 0); combat is gated on
+        the Group Combat Reaction enum that SetAlly/SetEnemy write.
+        """
+        result = conv_line(converter,
             'setfactionreaction FacA, FacB 20', 'ObjectReference')
         assert 'FacA.SetAlly(FacB, true, true)' in result
         assert 'SetReaction' not in result
@@ -1787,13 +1812,13 @@ class TestSingletonFixes:
         FactionWar member-pairing push was removed: it sampled actors
         probabilistically and paired them with relationship ranks that
         silently no-op between non-unique actors."""
-        result = conv_line(converter, 
+        result = conv_line(converter,
             'setfactionreaction FacA FacB -100', 'ObjectReference')
         assert 'FacA.SetEnemy(FacB, false, false)' in result
         assert 'FactionWar' not in result
 
     def test_setfactionreaction_strong_positive_becalms(self, converter):
-        result = conv_line(converter, 
+        result = conv_line(converter,
             'setfactionreaction FacA FacB 100', 'ObjectReference')
         assert 'FacA.SetAlly(FacB, true, true)' in result
         assert 'FactionPeace' not in result
@@ -1806,19 +1831,19 @@ class TestSingletonFixes:
         mirror too (CharacterGen stage 23 stands the assassins down from
         hunting the player with `setfactionreaction MythicDawnCG
         PlayerFaction 0`)."""
-        result = conv_line(converter, 
+        result = conv_lines(converter,
             'setfactionreaction FacA PlayerFaction -100', 'ObjectReference')
         assert 'TES4Polyfill.MirrorPlayerFactionRelation(FacA, 1)' in result
-        result = conv_line(converter, 
+        result = conv_lines(converter,
             'setfactionreaction FacA PlayerFaction 0', 'ObjectReference')
         assert 'TES4Polyfill.MirrorPlayerFactionRelation(FacA, 0)' in result
-        result = conv_line(converter, 
+        result = conv_lines(converter,
             'setfactionreaction FacA PlayerFaction 100', 'ObjectReference')
         assert 'TES4Polyfill.MirrorPlayerFactionRelation(FacA, 2)' in result
 
     def test_setfactionreaction_variable_amount_branches(self, converter):
         """A non-literal amount still has to reach a real enum tier."""
-        result = conv_line(converter, 
+        result = conv_lines(converter,
             'setfactionreaction FacA FacB someVar', 'ObjectReference')
         assert 'SetEnemy' in result and 'SetAlly' in result
         assert 'SetReaction' not in result
@@ -2111,7 +2136,7 @@ class TestSayTimerConversion:
         poll tick cannot start a duplicate.
         """
         converter._property_refs['ThadonRef'] = 'Actor'
-        result = conv_line(converter, 
+        result = conv_lines(converter,
             'set timer to ThadonRef.Say DeathSpeech01', 'Quest')
         lines = [l.strip() for l in result.split('\n')]
         assert lines[0].startswith('timer = 1.75')       # pre-charge
@@ -2124,7 +2149,7 @@ class TestSayTimerConversion:
         saved = ScriptConverter.say_durations
         ScriptConverter.say_durations = {'chargentaunt2': 14.63}
         try:
-            result = conv_line(converter, 
+            result = conv_lines(converter,
                 'set timer to SayTo player CharGenTaunt2 1', 'Actor')
         finally:
             ScriptConverter.say_durations = saved
@@ -2278,16 +2303,16 @@ class TestSayTimerConversion:
 
     def test_authored_offset_survives(self, converter):
         converter._property_refs['ThadonRef'] = 'Actor'
-        result = conv_line(converter, 
+        result = conv_lines(converter,
             'set timer to (ThadonRef.Say DeathSpeech01) + 2', 'Quest')
         assert 'TES4Polyfill.SayLine(ThadonRef, DeathSpeech01, 3) + 2' in result
 
     def test_short_timer_rounds_the_length_up(self, converter):
         """A TES4 `short` holding a Say length truncates in Papyrus; ceil so
         the tail that covers the End fragment's latency survives."""
-        converter._var_types['saylen'] = 'Int'
+        converter.sc.var_types['saylen'] = 'Int'
         converter._property_refs['ThadonRef'] = 'Actor'
-        result = conv_line(converter, 
+        result = conv_lines(converter,
             'set saylen to ThadonRef.Say DeathSpeech01', 'Quest')
         assert 'saylen = Math.Ceiling(TES4Polyfill.SayLine(ThadonRef, DeathSpeech01, 3))' in result
 
@@ -2295,12 +2320,11 @@ class TestSayTimerConversion:
         """Oblivion's `set L to ref.Say T` / `ref.Say T` idiom: SayLine both
         measures and delivers, so the bare delivery is dropped."""
         converter._property_refs['ArmandRef'] = 'Actor'
-        lines = [
-            conv_line(converter, 'set InfoLength to ArmandRef.Say TG01Armand1', 'Quest'),
-            conv_line(converter, 'ArmandRef.SayTo Player TG01Armand1', 'Quest'),
-        ]
-        out = converter._postprocess_lines(lines)
-        joined = '\n'.join(out)
+        src = ('Scriptname T\n\nshort InfoLength\n\nbegin gamemode\n'
+               'set InfoLength to ArmandRef.Say TG01Armand1\n'
+               'ArmandRef.SayTo Player TG01Armand1\n'
+               'end\n')
+        joined = converter.convert_standalone('T', src, 'Quest', 'T')
         assert joined.count('SayLine(') == 1
         assert '.Say(' not in joined
 
@@ -2375,8 +2399,8 @@ class TestFilterGuardTes4Type:
         xref.edid_to_formid['cgassassin01ref'] = '00012345'
         xref.record_type['00012345'] = 'ACHR'
         conv = ScriptConverter(xref)
-        conv._property_refs['CGAssassin01Ref'] = 'TES4_CGAssassinScript'
-        guard = conv._block_filter_guard('onhit', 'CGAssassin01Ref')
+        conv.sc.property_refs['CGAssassin01Ref'] = 'TES4_CGAssassinScript'
+        guard = block_filter_guard(conv, 'onhit', 'CGAssassin01Ref')
         assert guard == 'akAggressor == CGAssassin01Ref'
 
 
@@ -2394,7 +2418,7 @@ class TestGameHourFractional:
             == 'GameHour.GetValue()'
 
     def test_hour_boundary_window_survives(self, converter):
-        out = conv_expr(converter, 
+        out = conv_expr(converter,
             '( GameHour >= 23.98 ) || ( GameHour <= 0.02 )', 'ObjectReference')
         assert 'as Int' not in out
         assert '23.98' in out and '0.02' in out
@@ -2428,7 +2452,7 @@ class TestEnumActorValues:
     """
 
     def test_aggression_100_becomes_tier(self, converter):
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'SetActorValue Aggression, 100', 'ObjectReference')
         assert 'SetActorValue("Aggression", 2)' in out
 
@@ -2449,32 +2473,32 @@ class TestEnumActorValues:
         directly: "a guard would attack the whole town if their aggression were
         sufficiently raised."
         """
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'SetActorValue Aggression, 10', 'ObjectReference')
         assert 'SetActorValue("Aggression", 1)' in out
 
     def test_high_aggression_still_attacks_on_sight(self, converter):
         """The real "now attack anyone" beats (90/100) must keep tier 2."""
         for value in (70, 90, 100):
-            out = conv_line(converter, 
+            out = conv_line(converter,
                 f'SetActorValue Aggression, {value}', 'ObjectReference')
             assert 'SetActorValue("Aggression", 2)' in out, value
 
     def test_aggression_five_never_initiates(self, converter):
         """<=5 is Oblivion's "never attack" floor."""
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'SetActorValue Aggression, 5', 'ObjectReference')
         assert 'SetActorValue("Aggression", 0)' in out
 
     def test_frenzy_range_attacks_everyone(self, converter):
         """>=106 is Frenzy: attacks anyone, including allies."""
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'SetActorValue Aggression, 110', 'ObjectReference')
         assert 'SetActorValue("Aggression", 3)' in out
 
     def test_in_range_value_passes_through(self, converter):
         """An already-legal tier is a deliberate value, not re-bucketed."""
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'SetActorValue Aggression, 0', 'ObjectReference')
         assert 'SetActorValue("Aggression", 0)' in out
 
@@ -2482,25 +2506,25 @@ class TestEnumActorValues:
         """Oblivion 100 = fearless → Foolhardy (4), the only tier that never
         flees.  Mapping it to Brave (3) left actors with a nonzero flee score
         and made them run away constantly."""
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'SetActorValue Confidence, 100', 'ObjectReference')
         assert 'SetActorValue("Confidence", 4)' in out
 
     def test_confidence_tiers_span_full_range(self, converter):
         """Must mirror _convert_aidt: all five tiers are reachable."""
         for raw, tier in ((100, 4), (75, 3), (50, 2), (20, 1), (5, 0)):
-            out = conv_line(converter, 
+            out = conv_line(converter,
                 f'SetActorValue Confidence, {raw}', 'ObjectReference')
             assert f'SetActorValue("Confidence", {tier})' in out, (raw, out)
 
     def test_non_enum_actor_value_untouched(self, converter):
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'SetActorValue Health, 100', 'ObjectReference')
         assert 'SetActorValue("Health", 100)' in out
 
     def test_variable_operand_left_alone(self, converter):
         """A non-literal cannot be bucketed at conversion time."""
-        conv_out = conv_line(converter, 
+        conv_out = conv_line(converter,
             'SetActorValue Aggression, myVar', 'ObjectReference')
         assert 'myVar' in conv_out
 
@@ -2546,14 +2570,14 @@ class TestLocalVariableShadowsPlayer:
     """
 
     def test_local_wins_in_value_position(self, converter):
-        converter._local_vars = {'player'}
-        converter._var_types = {'player': 'Int'}
+        converter.sc.local_vars = {'player'}
+        converter.sc.var_types = {'player': 'Int'}
         assert converter._convert_ref('Player', 'ObjectReference') == 'Player'
 
     def test_keyword_wins_as_receiver(self, converter):
         """A Short has no methods, so `Player.GetDistance` is the keyword."""
-        converter._local_vars = {'player'}
-        converter._var_types = {'player': 'Int'}
+        converter.sc.local_vars = {'player'}
+        converter.sc.var_types = {'player': 'Int'}
         assert converter._convert_ref('Player', 'ObjectReference',
                                       as_receiver=True) == 'Game.GetPlayer()'
 
@@ -2629,7 +2653,7 @@ End
     def test_value_returning_function_untouched(self, converter):
         """`Return <value>` belongs to an OBSE user function, not a GameMode
         early-out, and must not have a poll re-arm spliced in front of it."""
-        converter._udf_returns = True
+        converter.sc.udf_returns = True
         assert conv_line(converter, 'return', 'Quest') == 'Return 0'
 
 
@@ -2676,7 +2700,7 @@ class TestChargenMenus:
 
     def test_menu_emission(self, converter):
         converter.chargen_menus = self.PLAN
-        out = conv_line(converter, 'ShowBirthsignMenu', 'Quest')
+        out = conv_lines(converter, 'ShowBirthsignMenu', 'Quest')
         assert 'TES4Msg_ChargenBirthsign_01.Show()' in out
         # page chaining: "More ..." is button 9, global index = 9*page+button
         assert 'If TES4_menuPick1 == 9' in out
@@ -2708,7 +2732,7 @@ class TestChargenMenus:
         """
         converter.chargen_menus = self.PLAN
         converter._current_event = 'Event OnUpdate()'
-        out = conv_line(converter, 'ShowBirthsignMenu', 'Quest')
+        out = conv_lines(converter, 'ShowBirthsignMenu', 'Quest')
         assert 'If TES4_ChargenMenuBusy' in out
         assert 'TES4_ChargenMenuBusy = True' in out
         assert 'TES4_ChargenMenuBusy = False' in out
@@ -2717,7 +2741,7 @@ class TestChargenMenus:
         assert out.index('Return') < out.index('.Show()')
         # ...and the latch is only taken once the guard has passed.
         assert out.index('TES4_ChargenMenuBusy = True') < out.index('.Show()')
-        assert converter._uses_chargen_menus
+        assert converter.sc.uses_chargen_menus
 
     def test_oneshot_menu_site_falls_through(self, converter):
         """A ONE-SHOT site (quest-stage fragment, OnActivate) must NOT
@@ -2729,7 +2753,7 @@ class TestChargenMenus:
         the menu twice."""
         converter.chargen_menus = self.PLAN
         converter._current_event = 'Function Fragment_Stage_0087_Item_0()'
-        out = conv_line(converter, 'ShowBirthsignMenu', 'Quest')
+        out = conv_lines(converter, 'ShowBirthsignMenu', 'Quest')
         assert 'If !TES4_ChargenMenuBusy' in out
         assert 'Return' not in out
         assert out.rstrip().endswith('EndIf')
@@ -2745,7 +2769,7 @@ class TestChargenMenus:
         plan = {'birthsign': dict(self.PLAN['birthsign'],
                                   choice_global='TES4ChargenBirthsignChoice')}
         converter.chargen_menus = plan
-        out = conv_line(converter, 'ShowBirthsignMenu', 'Quest')
+        out = conv_lines(converter, 'ShowBirthsignMenu', 'Quest')
         assert 'TES4ChargenBirthsignChoice.SetValue(TES4_menuPick1 + 1)' in out
         assert out.index('If TES4_menuPick1 >= 0') \
             < out.index('.SetValue(TES4_menuPick1 + 1)')
@@ -2758,14 +2782,14 @@ class TestChargenMenus:
         authored Goodbye closes the conversation).  The emission retries
         briefly instead of swallowing the player's choice."""
         converter.chargen_menus = self.PLAN
-        out = conv_line(converter, 'ShowBirthsignMenu', 'Quest')
+        out = conv_lines(converter, 'ShowBirthsignMenu', 'Quest')
         assert 'While TES4_menuPick1 < 0 && TES4_menuRetry1 < 20' in out
         assert 'Utility.Wait(0.5)' in out
 
     def test_no_plan_stays_noop(self, converter):
         """A plugin without BSGN records keeps the inert conversion."""
         converter.chargen_menus = {}
-        out = conv_line(converter, 'ShowBirthsignMenu', 'Quest')
+        out = conv_lines(converter, 'ShowBirthsignMenu', 'Quest')
         assert 'Show()' not in out
         assert ';NE: ShowBirthsignMenu' in out
 
@@ -2979,7 +3003,7 @@ class TestGetDetectionLevelIsDetection:
     def test_receiver_and_argument_swap(self, converter):
         """`Player` converts to Game.GetPlayer(); what matters is that the
         TARGET became the receiver and the OBSERVER the argument."""
-        out = conv_line(converter, 
+        out = conv_line(converter,
             'if GuardRef.GetDetectionLevel Player == 3', 'Quest')
         assert '.IsDetectedBy(GuardRef)' in out, \
             'observer/target must swap, as for GetDetected'
@@ -2989,7 +3013,7 @@ class TestGetDetectionLevelIsDetection:
         """`true as Int` is 1, so a raw Bool would make every `>= 2` / `>= 3`
         site permanently false — trading one dead form for another."""
         for op, num in (('==', 3), ('>=', 2), ('>=', 3)):
-            out = conv_line(converter, 
+            out = conv_line(converter,
                 f'if GuardRef.GetDetectionLevel Player {op} {num}', 'Quest')
             assert '* 3)' in out, f'{op} {num} must be rescaled'
 
@@ -3249,7 +3273,7 @@ class TestPlayerControlsShadow:
         lines = [ln.strip() for ln in out.splitlines()]
         i = next(i for i, ln in enumerate(lines)
                  if ln.startswith('Game.DisablePlayerControls()'))
-        assert lines[i + 1] == 'TES4ControlsDisabled.SetValue(1)'
+        assert lines[i + 1].startswith('TES4ControlsDisabled.SetValue(1)')
 
 
 # ===========================================================================
@@ -3366,10 +3390,13 @@ class TestQuotedEditorIds:
         assert conv_line(converter, line, 'Quest') == expected
 
     def test_dotted_member_access_unquotes_both_sides(self, converter):
-        # 1AlmanachDerBeschwoerungSCN: the assignment TARGET went through
-        # _convert_ref (mangling the quotes) while the VALUE went through
-        # _convert_expression (leaving them), emitting un-parseable Papyrus.
-        out = conv_line(converter, 
+        """Both sides of a dotted assignment lose their quotes.
+
+        1AlmanachDerBeschwoerungSCN: the TARGET went through
+        _convert_ref (mangling the quotes) while the VALUE went through
+        _convert_expression (leaving them), emitting unparseable Papyrus.
+        """
+        out = conv_line(converter,
             'Set "NQ16"."NQ16CountBooksVar" to "NQ16"."NQ16CountBooksVar" +1',
             'Quest')
         assert out == 'NQ16.NQ16CountBooksVar = NQ16.NQ16CountBooksVar + 1'
@@ -4071,7 +4098,7 @@ class TestObjectReferenceMethodsDoNotPromoteToActor:
     """
 
     def test_say_does_not_promote_receiver(self, converter):
-        result = conv_line(converter, 
+        result = conv_line(converter,
             'ArenaMatchPlayerRef.Say Announcer 1 ArenaMouth 1', 'Quest')
         assert 'ArenaMatchPlayerRef.Say(' in result
         assert converter._property_refs.get('ArenaMatchPlayerRef') != 'Actor'
@@ -4082,25 +4109,25 @@ class TestObjectReferenceMethodsDoNotPromoteToActor:
         assert converter._property_refs['ArenaGalleryMarkerRef'] == 'ObjectReference'
 
     def test_cast_source_does_not_promote(self, converter):
-        result = conv_line(converter, 
+        result = conv_line(converter,
             'SEHaskillSummonMarker.Cast SummonSpell Player', 'Quest')
         assert '.Cast(SEHaskillSummonMarker' in result
         assert converter._property_refs.get('SEHaskillSummonMarker') != 'Actor'
 
     def test_pms_subject_does_not_promote(self, converter):
-        result = conv_line(converter, 
+        result = conv_line(converter,
             'SEXedPuzStatue1.pms effectSoulTrap', 'Quest')
         assert '.Play(SEXedPuzStatue1' in result
         assert converter._property_refs.get('SEXedPuzStatue1') != 'Actor'
 
     def test_getangle_does_not_promote(self, converter):
-        result = conv_line(converter, 
+        result = conv_line(converter,
             'set x to SEXedPuzStatue2.GetAngle Z', 'Quest')
         assert 'SEXedPuzStatue2.GetAngleZ()' in result
         assert converter._property_refs.get('SEXedPuzStatue2') != 'Actor'
 
     def test_moveto_does_not_promote_subject(self, converter):
-        result = conv_line(converter, 
+        result = conv_line(converter,
             'SEHaskillSummonMarker.MoveTo SEHaskillSummonReturnMarker', 'Quest')
         assert 'SEHaskillSummonMarker.MoveTo(' in result
         assert converter._property_refs.get('SEHaskillSummonMarker') != 'Actor'
@@ -4536,7 +4563,7 @@ class TestTypeOf:
     """The one property/local type lookup the coercion passes share."""
 
     def test_locals_win_over_properties(self, converter):
-        converter._var_types = {'x': 'Int'}
+        converter.sc.var_types = {'x': 'Int'}
         converter._property_refs = {'x': 'ObjectReference'}
         assert converter.type_of('x') == 'Int'
         assert converter.type_of('x', locals_first=False) == 'ObjectReference'
@@ -4567,7 +4594,7 @@ class TestTypeOf:
 
     def test_undeclared_name_has_no_type(self, converter):
         converter._property_refs = {}
-        converter._var_types = {}
+        converter.sc.var_types = {}
         assert converter.type_of('nothing') == ''
 
 

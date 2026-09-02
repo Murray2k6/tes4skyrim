@@ -156,6 +156,140 @@ actually want. Two rules fall out:
 Settings with no actor-value equivalent keep a `;TODO` marker — a call that
 compiles and silently does nothing is the dangerous outcome, not the honest one.
 
+## FO3/FNV script blocks
+<a id="fo3fnv-script-blocks"></a>
+
+**Code:** `script_convert/constants_falloutnv.py`
+
+`assemble` looks a block type up in `BLOCK_MAP` and, on a miss, `continue`s --
+dropping the block **body and all**, silently. Oblivion's vocabulary covers
+Oblivion, so a FO3/FNV-only block type was pure data loss.
+
+Measured over `export/FalloutNV.esm/SCPT.txt`: 2,581 scripts, **3,876 `begin`
+blocks**, of which 183 are types Oblivion never emits.
+
+| FO3/FNV block | blocks | Papyrus |
+|---|---:|---|
+| `saytodone` | 133 | none -- no dialogue-complete event |
+| `oncombatend` | 26 | `OnCombatStateChanged`, guard `aeCombatState == 0` |
+| `ondestructionstagechange` | 11 | `OnDestructionStageChanged(int, int)` |
+| `ongrab` | 4 | `OnGrab()` |
+| `onrelease` | 3 | `OnRelease()` |
+| `onfire` | 3 | none -- FNV weapon-fire hook |
+| `onopen` | 2 | `OnOpen(ObjectReference akActionRef)` |
+| `onclose` | 1 | `OnClose(ObjectReference akActionRef)` |
+
+Signatures are taken verbatim from
+`references/SkyrimCKWiki_210522/skyrim/<Event>_-_ObjectReference.html`, never
+invented. `oncombatend` reuses the existing `COMBAT_STATE_GUARDS` mechanism
+that already merges `onalarm` and `onstartcombat` into the one event.
+
+`saytodone` and `onfire` have no Skyrim equivalent: 136 blocks whose bodies
+still reach the script, now as an inert `;TODO:` rather than vanishing.
+
+## Block type mapping
+<a id="block-type-mapping"></a>
+
+**Code:** `script_convert/blocks.py`
+
+`BLOCK_MAP` is the vocabulary of what survives conversion: `assemble` looks the
+block type up and, on a miss, drops the block body and all. The rationale that
+used to sit as comments beside the table:
+
+**`OnTrigger` is per-frame, not an edge.** TES4 `Begin OnTrigger` runs EVERY
+FRAME an object is inside the volume -- Nehrim's Magieverbot (magic-ban)
+scripts count 25 and 100 *executions* in it, which is only meaningful under
+repeat semantics. Skyrim keeps the same three-way split (all three are distinct
+engine events in SkyrimSE.exe): `OnTrigger` is sent repeatedly while inside,
+`OnTriggerEnter`/`OnTriggerLeave` are the edges. Mapping `OnTrigger` ->
+`OnTriggerEnter` froze every such state machine on its first state, which left
+the Erothin bell latch stuck and re-ringing.
+
+**`OnTriggerActor` / `OnTriggerMob`** differ from `OnTrigger` only in WHAT trips
+them (any actor / any creature), not in edge-vs-repeat, so they take the
+repeating event too. Skyrim has no actor-vs-creature split, so the filter is
+left to the block body.
+
+**`OnAlarm`** (actor noticed a crime/attack) has no Papyrus event; entering
+combat/search via `OnCombatStateChanged` is the closest trigger. The block loop
+adds an `aeCombatState` guard per block type so several block types merge
+cleanly into the one event -- that is what `COMBAT_STATE_GUARDS` is for.
+
+**The `scripteffect*` signatures are fixed by `ActiveMagicEffect.psc`** -- an
+invented one fails to compile ("the parameter types of function oneffectstart
+... do not match the parent script activemagiceffect").
+
+**Block filters** (`begin OnEquip player`) restrict a block to one object;
+Papyrus has no such filter, so the body is wrapped in a guard on the event
+parameter that carries the filtered object. A block type absent from
+`BLOCK_FILTER_PARAM` has no such parameter, so its filter is dropped with a
+TODO.
+
+## Block filter guards
+<a id="block-filter-guards"></a>
+
+**Code:** `block_filter_guard` in `script_convert/blocks.py`
+
+`begin OnEquip player` fires the block ONLY when the player equips the item;
+`begin OnPackageDone SomePkg` only when that package ends. Papyrus events carry
+no filter, so the restriction becomes an `If` around the body testing the event
+parameter that holds the filtered object. Without it the block runs for every
+actor / container / package -- which is how an item's "you can't equip this"
+message ended up firing for NPCs the moment they loaded in.
+
+**A block type with no parameter naming an object cannot be guarded.**
+MenuMode's argument is a menu ID and OnAlarm's a crime type, so neither is in
+`BLOCK_FILTER_PARAM` and their filters are dropped.
+
+**The comparison has to typecheck against the event parameter.** On an ACTOR
+script `begin OnEquip SomePotion` filters the ITEM equipped, not the equipper --
+but Skyrim's `OnEquipped` only hands us the actor, so there is nothing to test
+the item against. Emitting the comparison anyway gives
+`akActor == SomePotion`, which does not compile; the filter is lost instead.
+
+**A property already bound at another type is not automatically a conflict.**
+A `TES4_*` script type extends Actor/ObjectReference, so the comparison still
+compiles and the existing binding is kept -- dropping the guard there ran
+CGRenote's `begin onHit CGAssassin01Ref` bodies on EVERY hit, so any stray arrow
+killed her and jumped CharacterGen's stages out of order. A base record likewise
+compares to a `Form` parameter perfectly well, and the body converts BEFORE the
+guard, so the property is normally already bound at its own narrow type.
+
+Genuinely incomparable (bound as Faction/GlobalVariable, say) returns None: an
+unguarded body is WRONG for every event the filter excluded, so the caller keeps
+the body but does not execute it.
+
+## Unknown commands must be inert
+<a id="unknown-commands-must-be-inert"></a>
+
+**Code:** `_is_known` / `emit_command` in `script_convert/emit/dispatch.py`
+
+`_emit_mapped` renders a call under its **TES4** spelling when no row matches.
+For a name Papyrus does not define that is an undefined function, and the
+compiler rejects the whole script -- which then cascades, because one bad
+script disables every script naming its type.
+
+A name with no row, no handler and no prefix family therefore becomes a
+`;TODO:` line instead of a call. The same rule already covered
+`HANDLED_COMMANDS` (a handler-only command that fell past its handler); it now
+covers genuinely unknown names too, which is what a non-TES4 source hits.
+
+Measured over `export/FalloutNV.esm/SCPT.txt` -- 2,581 scripts, 3,876 `begin`
+blocks -- **116 distinct unknown commands across 3,956 call sites**, none of
+which has a Papyrus spelling. Highest-frequency, with their real equivalents:
+
+| TES4 command | sites | Papyrus |
+|---|---:|---|
+| `setobjectivedisplayed` | 777 | `Quest.SetObjectiveDisplayed` |
+| `setobjectivecompleted` | 404 | `Quest.SetObjectiveCompleted` |
+| `setenemy` | 159 | `Faction.SetEnemy` |
+| `setreputation` | 127 | none (FNV reputation) |
+| `setquestdelay` | 110 | none (Papyrus has no poll delay) |
+| `rewardxp` | 87 | `Game.AdvanceSkill` (approximate) |
+
+Making the fallthrough inert is what lets those rows land incrementally: the
+corpus compiles at every step instead of only once the last row is written.
+
 ## Silent mis-conversion — the unmarked loss
 <a id="silent-mis-conversion-unmarked-loss"></a>
 

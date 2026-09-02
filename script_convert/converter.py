@@ -5,8 +5,9 @@ import re
 from script_convert.emit import expr as _expr
 from script_convert.emit import script as _script
 from script_convert.tes4 import nodes as _tes4_nodes
+from script_convert.blocks import BLOCK_FILTER_PARAM
 from script_convert.constants import (
-    BLOCK_FILTER_PARAM, COMMAND_ROWS, DISPATCH_EVENTS, ENUM_ACTOR_VALUES,
+    COMMAND_ROWS, DISPATCH_EVENTS, ENUM_ACTOR_VALUES,
     LOOSE_OPS,
     ENUM_AV_LADDERS, GMST_TO_ACTOR_VALUE, KNOWN_COMMANDS, KNOWN_GLOBALS,
     PAPYRUS_BOOL_FUNCTIONS, PLACED_REF_SIGS, PLAYER_ALIAS_EXTENDS,
@@ -1605,80 +1606,6 @@ class ScriptConverter:
         return consumes
 
 
-    def _block_filter_guard(self, block_type: str,
-                            block_filter: str) -> 'str | None':
-        """Compile a TES4 block filter into a Papyrus condition, or '' if none.
-        Returns None when a real filter exists but CANNOT be expressed — the
-        caller must then keep the body commented out rather than run it
-        unconditionally for every event.
-
-        `begin OnEquip player` fires the block ONLY when the player equips the
-        item; `begin OnPackageDone SomePkg` only when that package ends.  Papyrus
-        events carry no filter, so the restriction becomes an `If` around the
-        body, testing the event parameter that holds the filtered object (see
-        BLOCK_FILTER_PARAM).  Without this the block runs for every actor /
-        container / package, which is how an item's "you can't equip this"
-        message ended up firing for NPCs the moment they loaded in.
-        """
-        if not block_filter:
-            return ''
-        target = BLOCK_FILTER_PARAM.get(block_type)
-        if not target:
-            # MenuMode's argument is a menu ID and OnAlarm's is a crime type —
-            # neither names an object, and neither block has a parameter to
-            # filter on.  Nothing to guard.
-            return ''
-        param, param_type = target
-
-        name = block_filter.strip()
-        if name.lower() == 'player':
-            return f'{param} == Game.GetPlayer()'
-
-        # Anything else is a form EditorID. Bind it as a property and compare.
-        if not re.match(r'^\w+$', name) or not self.xref:
-            return ''
-        fid = self.xref.edid_to_formid.get(name.lower(), '')
-        if not fid:
-            return ''
-        rtype = _record_type_to_papyrus(self.xref.record_type.get(fid, ''))
-
-        # The comparison has to typecheck against the event parameter.  On an
-        # ACTOR script `begin OnEquip SomePotion` filters the ITEM equipped, not
-        # the equipper — but Skyrim's OnEquipped only hands us the actor, so
-        # there is nothing to test the item against.  Emitting the comparison
-        # anyway gives `akActor == SomePotion`, which will not compile.
-        param_is_actor = param_type == 'Actor'
-        filter_is_actor = rtype in ('Actor', 'ObjectReference')
-        if param_is_actor and not filter_is_actor:
-            # (no Papyrus parameter carries the item; the filter is lost)
-            return ''
-        if param_type in ('ObjectReference', 'Actor', 'Form'):
-            ptype = rtype if filter_is_actor else param_type
-        else:
-            ptype = param_type
-        safe = _safe_property_name(name)
-        existing = self.sc.property_refs.get(safe)
-        if existing and existing != ptype:
-            # Already bound at a TES4_* script type: those extend Actor/
-            # ObjectReference, so the comparison against the event parameter
-            # still compiles — keep the existing binding and emit the guard.
-            # (Dropping it here ran CGRenote's `begin onHit CGAssassin01Ref`
-            # bodies on EVERY hit: any stray arrow killed her and jumped
-            # CharacterGen's stages out of order.)
-            if (existing.startswith('TES4_')
-                    and ptype in ('Actor', 'ObjectReference', 'Form')):
-                return f'{param} == {safe}'
-            # A base record compares to a `Form` parameter perfectly well, and
-            # the body converts BEFORE the guard, so the property is normally
-            # already bound at its own narrow type by the time we get here.
-            if param_type == 'Form' and existing in _BASE_OBJECT_PAPYRUS:
-                return f'{param} == {safe}'
-            # Genuinely incomparable (e.g. bound as Faction/GlobalVariable).
-            # An unguarded body is WRONG for every event the filter excluded —
-            # signal the caller to keep the body but not execute it.
-            return None
-        self.sc.property_refs[safe] = ptype
-        return f'{param} == {safe}'
 
 
     #: Statement kinds the node path owns.  Everything else -- the OBSE

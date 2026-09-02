@@ -802,6 +802,10 @@ def faction_reaction(ctx, call) -> str:
 
     Skyrim replaced it with faction RELATIONS, which Papyrus reaches through
     the polyfill; the two factions and the amount are the payload.
+
+    A non-literal amount cannot be bucketed at conversion time, so it is
+    bucketed at RUNTIME on the same sign -- a scripted variable still lands
+    on a real enum tier instead of a dead modifier.
     """
     if len(call) < 2:
         return ctx.note(f'{call.raw_name} needs two factions')
@@ -809,9 +813,18 @@ def faction_reaction(ctx, call) -> str:
         name = call.source(n).strip()
         if name:
             ctx.sc.property_refs[_safe_property_name(name)] = 'Faction'
-    return ctx._faction_reaction_call(
-        call.arg(0), call.arg(1), call.source(2, '0'),
+    f1, f2 = call.arg(0), call.arg(1)
+    tiered = ctx._faction_reaction_call(
+        f1, f2, call.source(2, '0'),
         is_mod=call.name.startswith('mod'), extends=call.extends)
+    if tiered is not None:
+        return tiered
+    amount = call.arg(2)
+    return (f'if ({amount}) < 0\n'
+            f'  {f1}.SetEnemy({f2}, false, false)\n'
+            f'else\n'
+            f'  {f1}.SetAlly({f2}, true, true)\n'
+            f'endif')
 
 
 @command('getincell')

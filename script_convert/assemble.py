@@ -10,8 +10,10 @@ A phase reads the `ScriptContext` and returns lines; it never reaches into a
 later phase's state.
 """
 
+from script_convert.blocks import (BLOCK_MAP, COMBAT_STATE_GUARDS,
+                                   block_filter_guard)
 from script_convert.constants import (
-    BLOCK_MAP, COMMAND_ROWS, COMBAT_STATE_GUARDS, POLL_BLOCKS,
+    COMMAND_ROWS, POLL_BLOCKS,
     REF_SPECIFICITY, _ACTOR_ONLY_FUNCTIONS,
     _OBJREF_SHARED_FUNCTIONS, TYPE_MAP, _safe_property_name, papyrus_script_name,
 )
@@ -893,7 +895,7 @@ def _guarded(conv, block, body: list) -> list:
     the moment they loaded in.
     """
     btype = block.btype.lower()
-    guard = conv._block_filter_guard(btype, block.filter or '')
+    guard = block_filter_guard(conv, btype, block.filter or '')
     state = COMBAT_STATE_GUARDS.get(btype)
     if state and guard is not None:
         guard = f'{state} && {guard}' if guard else state
