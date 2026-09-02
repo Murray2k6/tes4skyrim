@@ -100,7 +100,7 @@ def _convert_creature(creature_dir: str, name: str, out_meshes_dir: str,
     from asset_convert.havok.hkx_behavior import generate_creature_project
     from asset_convert.havok.hkx_xml import convert_hkx_to_amd64
     from asset_convert.nif.nif_converter import convert_nif
-    from asset_convert.nif.creature_mesh import (
+    from asset_convert.havok.creature_mesh import (
         extract_death_pile, merge_creature_body, source_attachment_node,
         source_hidden_attachment_nodes)
 

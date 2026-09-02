@@ -20,6 +20,14 @@ import numpy as np
 from asset_convert import paths
 from asset_convert.character.body_wrap import wrap_available, wrap_has_head
 from asset_convert.character.bow_rig import add_bow_rig
+from asset_convert.character.head_gear import (fit_prn_head_blocks,
+                                               remap_bone_names)
+from asset_convert.character.prn_skin import (BODY_PART_FALLBACK_PRN_BONE,
+                                              add_prn_skin,
+                                              bake_node_transforms_into_verts,
+                                              bake_root_transform_into_verts,
+                                              get_prn_bone,
+                                              upgrade_skin_instances)
 from asset_convert.character.skin_replacement import (apply_armor_offset,
                                                       collect_skin_info,
                                                       strip_body_skin_geometry)
@@ -47,15 +55,9 @@ from asset_convert.collision.collision_constraints import (
     enforce_ragdoll_tree, scale_constraint_pivots,
     strip_marker_collision_bodies)
 from asset_convert.havok.hkx_skeleton import BONE_RENAMES
-from asset_convert.nif.head_gear import fit_prn_head_blocks, remap_bone_names
 from asset_convert.nif.inv_marker import compute_inv_rotation
 from asset_convert.nif.nif_flags import NIF_FLAGS
 from asset_convert.nif.nif_passes import add_bsx_flags
-from asset_convert.nif.prn_skin import (BODY_PART_FALLBACK_PRN_BONE,
-                                        add_prn_skin,
-                                        bake_node_transforms_into_verts,
-                                        bake_root_transform_into_verts,
-                                        get_prn_bone, upgrade_skin_instances)
 
 from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()

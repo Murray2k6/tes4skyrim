@@ -58,10 +58,9 @@ from asset_convert.character.skin_replacement import (apply_armor_offset,
                                                      collect_skin_info,
                                                      splice_body_geometry,
                                                      strip_body_skin_geometry)
-from asset_convert.nif.head_gear import (fit_prn_head_blocks,
-                                         is_ground_model,
-                                         remap_bone_names,
-                                         strip_gnd_skin)
+from asset_convert.character.head_gear import (is_ground_model,
+                                               strip_gnd_skin)
+from asset_convert.character.prn_skin import get_prn_bone
 from asset_convert.nif.nif_passes import (add_animobject_bged,
                                           add_bsx_flags,
                                           collect_sequence_names,
@@ -69,12 +68,6 @@ from asset_convert.nif.nif_passes import (add_animobject_bged,
                                           fix_controller_flags,
                                           resolve_palette_strings,
                                           strip_empty_text_keys)
-from asset_convert.nif.prn_skin import (BODY_PART_FALLBACK_PRN_BONE,
-                                       add_prn_skin,
-                                       bake_node_transforms_into_verts,
-                                       bake_root_transform_into_verts,
-                                       get_prn_bone,
-                                       upgrade_skin_instances)
 from asset_convert.nif.morphs import (emulate_morphs,
                                       normalize_blend_interpolators)
 from asset_convert.nif.sequences import (apply_rest_visibility,
@@ -92,18 +85,18 @@ from asset_convert.nif.particles import (convert_particle_system,
                                         skyrimize_billboard,
                                         wrap_in_billboard)
 from asset_convert.nif.nif_flags import NIF_FLAGS
-from asset_convert.nif.equipment_rig import (add_bow_bend_rig,
-                                             add_inv_marker,
-                                             convert_prn,
-                                             convert_root_collision,
-                                             destripify_skin_partitions,
-                                             finalise_inv_markers,
-                                             prepare_armor_root,
-                                             prepare_creature_rig,
-                                             prepare_worn_armor,
-                                             regen_creature_skins,
-                                             retarget_worn_armor,
-                                             rigid_skin_creature_parts)
+from asset_convert.character.equipment_rig import (add_bow_bend_rig,
+                                                   add_inv_marker,
+                                                   convert_prn,
+                                                   convert_root_collision,
+                                                   destripify_skin_partitions,
+                                                   finalise_inv_markers,
+                                                   prepare_armor_root,
+                                                   prepare_creature_rig,
+                                                   prepare_worn_armor,
+                                                   regen_creature_skins,
+                                                   retarget_worn_armor,
+                                                   rigid_skin_creature_parts)
 from asset_convert.nif.geometry_shader import (process_geometry,
                                                sky_object_type_for)
 from asset_convert.character.skyrim_overrides import (

@@ -64,7 +64,7 @@ including arm openings that shift ~20 z units.
 ## Prn attachment: shields, torches and weapons
 <a id="shield-attachment"></a>
 
-**Code:** `_convert_prn` in `asset_convert/nif/equipment_rig.py`
+**Code:** `_convert_prn` in `asset_convert/character/equipment_rig.py`
 
 The authored `Prn` string names the skeleton node a mesh hangs off. It is
 remapped to the Skyrim node and re-written onto the new root; gear that the
@@ -80,7 +80,7 @@ non-identity rotation and bakes it into an inner NiNode.
 
 ### <a id="shield-forearm-clearance"></a>The forearm-clearance correction
 
-**Code:** `shield_attach_transform` in `asset_convert/nif/equipment_rig.py`
+**Code:** `shield_attach_transform` in `asset_convert/character/equipment_rig.py`
 
 The base mapping is built from the same three landmarks on each skeleton — hand
 joint, middle-finger base, thumb base — giving an anatomical hand frame per
@@ -123,7 +123,7 @@ shield's orientation, pulled back slightly.
 ### <a id="prn-remap-table"></a>The Prn remap table is authored, not derived
 
 **Code:** `_PRN_REMAP`, `_WEAPON_FILENAME_PRN`, `_remap_prn` in
-`asset_convert/nif/equipment_rig.py`
+`asset_convert/character/equipment_rig.py`
 
 Oblivion node names do not map onto Skyrim's by any rule, so the table is data:
 
@@ -225,7 +225,7 @@ where the skinned vertex mass sits.
 ## Rigid Prn skinning
 <a id="rigid-prn-skinning"></a>
 
-**Code:** `_add_prn_skin` in `asset_convert/nif/nif_converter.py`
+**Code:** `add_prn_skin` in `asset_convert/character/prn_skin.py`
 
 Oblivion attaches some armor pieces — helmets above all — rigidly to a bone
 through a `Prn` NiStringExtraData on the root, instead of skeleton skinning.
