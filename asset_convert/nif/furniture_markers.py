@@ -261,8 +261,7 @@ def furniture_model_info(nif_path):
     roots = list(data.roots)
     for root in roots:
         for ed in getattr(root, 'extra_data_list', []) or []:
-            if (isinstance(ed, NifFormat.BSFurnitureMarker)
-                    and not isinstance(ed, NifFormat.BSFurnitureMarkerNode)):
+            if _is_superseded_marker(ed):
                 marker_blocks.append(ed)
     entries = extract_entries(marker_blocks)
     if not entries:
@@ -320,3 +319,24 @@ def furniture_model_info_job(args):
         return key, furniture_model_info(nif_path), None
     except Exception as exc:
         return key, None, f'{type(exc).__name__}: {exc}'
+
+def _is_superseded_marker(ed):
+    """True for a source BSFurnitureMarker, excluding the Skyrim Node form."""
+    from pyffi.formats.nif import NifFormat
+    return (isinstance(ed, NifFormat.BSFurnitureMarker)
+            and not isinstance(ed, NifFormat.BSFurnitureMarkerNode))
+
+def drop_superseded_markers(root):
+    """Remove the source BSFurnitureMarker once its Node form is written.
+
+    Vanilla Skyrim furniture ships only BSFurnitureMarkerNode, so leaving the
+    superseded block behind gives the engine two competing marker lists.
+    """
+    keep = [ed for ed in root.extra_data_list
+            if not _is_superseded_marker(ed)]
+    if len(keep) == root.num_extra_data_list:
+        return
+    root.num_extra_data_list = len(keep)
+    root.extra_data_list.update_size()
+    for i, ed in enumerate(keep):
+        root.extra_data_list[i] = ed

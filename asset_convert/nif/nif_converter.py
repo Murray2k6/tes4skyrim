@@ -203,6 +203,7 @@ from asset_convert.nif.furniture_markers import (
     ENTRY_LEFT as _ENTRY_LEFT,
     ENTRY_RIGHT as _ENTRY_RIGHT,
     cluster_seats as _cluster_seats,
+    drop_superseded_markers,
     extract_entries as _extract_furniture_entries,
     geometry_center_xy as _geometry_center_xy,
     origin_shift as _furniture_origin_shift,
@@ -1049,6 +1050,20 @@ def _to_fade_node(data, i, root, stats, src_path, wants_gnd_marker):
     return fade
 
 
+def _normalise_fade_root(root, stats, src_path):
+    """Apply the root-normalisation passes to an already-BSFadeNode root.
+
+    The NiNode->BSFadeNode swap carries these across; a root that is already
+    a BSFadeNode never reaches it.
+    See: docs/commentary/asset_convert_nif.md#already-a-bsfadenode
+    """
+    if not hasattr(root, 'extra_data_list'):
+        return
+    _carry_furniture_markers(root, root, stats)
+    drop_superseded_markers(root)
+    convert_prn(root, root, src_path)
+
+
 def _convert_one_root(data, i, root, stats, fix_textures, src_path, creature,
                       nif_basename, has_skin, is_worn_armor, wants_gnd_marker):
     """Convert one root in place.
@@ -1065,6 +1080,8 @@ def _convert_one_root(data, i, root, stats, fix_textures, src_path, creature,
         root = _to_fade_node(data, i, root, stats, src_path, wants_gnd_marker)
     elif type(root).__name__ == 'NiNode' and is_worn_armor:
         prepare_armor_root(root)
+    elif not is_worn_armor and not is_sky:
+        _normalise_fade_root(root, stats, src_path)
 
     if isinstance(getattr(root, 'controller', None),
                   NifFormat.NiControllerManager):
