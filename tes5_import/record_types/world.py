@@ -11,6 +11,7 @@ from ..constants import (
 )
 from ..locations import WORLD_NAMES
 from ..skyrim_overrides import TES4_MARKER_FORMID_TO_SKYRIM
+from .world_falloutnv import marker_substitute
 from .items import get_base_origin_shift
 from ..text_reader import get_hex_bytes, remap_formid
 from .common import (
@@ -849,6 +850,22 @@ def map_marker_flags(rec: dict) -> int:
     return flags
 
 
+# -------------------------------------------------------------------------
+# REFR base object
+# -------------------------------------------------------------------------
+def _refr_base_formid(rec: dict, name_raw: int) -> int:
+    """The REFR's NAME target, substituting Skyrim's invisible markers.
+
+    A substituted marker is already a Skyrim.esm FormID, so it takes no
+    master offset.
+    See: docs/commentary/tes4_export_falloutnv.md#marker-base-objects
+    """
+    marker = TES4_MARKER_FORMID_TO_SKYRIM.get(name_raw)
+    if marker is None:
+        marker = marker_substitute(name_raw)
+    return marker if marker is not None else get_formid(rec, 'NAME')
+
+
 def convert_REFR(rec: dict) -> bytes:
     """REFR — placed object reference.
 
@@ -865,11 +882,7 @@ def convert_REFR(rec: dict) -> bytes:
     # For invisible marker base objects, substitute the Skyrim.esm equivalent
     # so REFRs point into Skyrim.esm (index 0) rather than our remapped copy.
     name_raw = int(rec.get('NAME', '0') or '0', 16)
-    skyrim_marker = TES4_MARKER_FORMID_TO_SKYRIM.get(name_raw)
-    if skyrim_marker is not None:
-        name_fid = skyrim_marker  # Already a Skyrim.esm FormID — no offset
-    else:
-        name_fid = get_formid(rec, 'NAME')
+    name_fid = _refr_base_formid(rec, name_raw)
     # Oblivion.esm ships 6 refs on the MapMarker base with no XMRK marker
     # data at all (campsite/battle position markers). Skyrim's map code
     # treats every 0x10-based ref as a map marker and the CK flags them

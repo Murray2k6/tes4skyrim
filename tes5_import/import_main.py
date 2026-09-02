@@ -1082,6 +1082,9 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     from .record_types.common import reset_emitted_regions
     reset_emitted_regions()
 
+    from .record_types.world_falloutnv import register_fallout_source
+    register_fallout_source(by_type)
+
     from .creature_races import (build_creature_races,
                                  build_creature_death_piles)
     build_creature_races(by_type, writer, export_dir,
