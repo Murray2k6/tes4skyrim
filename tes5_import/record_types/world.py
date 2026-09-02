@@ -276,9 +276,7 @@ def convert_LTEX(rec: dict, writer=None) -> tuple:
         txst_edid = f"TES4_{edid}_TXST" if edid else f"TES4_LTEX_{get_formid(rec, 'FormID'):08X}_TXST"
         txst_subs += pack_string_subrecord('EDID', txst_edid)
         txst_subs += pack_obnd()
-        # Oblivion LTEX ICON is relative to Textures\Landscape\ — prepend landscape\
-        full_icon = 'landscape\\' + icon_path
-        diffuse = _prefix_path(full_icon)
+        diffuse = _prefix_path(_landscape_icon(icon_path))
         base_no_ext = diffuse.rsplit('.', 1)[0] if '.' in diffuse else diffuse
         txst_subs += pack_string_subrecord('TX00', diffuse)
         # Normal map (TX01): derive from diffuse with _n suffix
@@ -673,19 +671,7 @@ def convert_WRLD(rec: dict) -> bytes:
     if wnam:
         subs += pack_formid_subrecord('WNAM', wnam)
 
-    # CNAM — Climate.  57 of 84 TES4 worldspaces author no CNAM at all —
-    # including Tamriel itself, every Imperial City district and every walled
-    # city.  Oblivion resolves those at RUNTIME rather than at load: verified
-    # in Oblivion.exe (GOG/Steam 1.2.0.416), the sky setup at 0x667688 calls
-    # the worldspace's get-climate (0x4CAF90) and, when it returns null, falls
-    # through to 0x543200, which does LookupForm(0x15F) — the engine-created
-    # 'DefaultClimate' form (bootstrap at 0x44CCE9 pushes 0x15F and names it
-    # from the string at 0xA37CA0).  Skyrim has no such fallback, so TES4's
-    # DefaultClimate is written explicitly and the worldspace keeps Cyrodiil's
-    # sun, moons and weather list.  SNAM is omitted; it references a TES4
-    # record we skip.
-    cnam = get_formid(rec, 'CNAM.Climate') or remap_formid(_TES4_DEFAULT_CLIMATE)
-    subs += pack_formid_subrecord('CNAM', cnam)
+    subs += pack_formid_subrecord('CNAM', _world_climate(rec))
 
     # Water: NAM2 (water type) and NAM3 (LOD water type).  WATR is converted
     # (convert_WATR), so the authored TES4 pointer is honoured when there is
@@ -1224,6 +1210,45 @@ def build_land_layers(rec: dict) -> bytes:
                 subs += pack_subrecord('VTXT', bytes(vtxt_data))
 
     return subs
+
+
+# ---------------------------------------------------------------------------
+# LTEX diffuse path
+# ---------------------------------------------------------------------------
+def _landscape_icon(icon_path: str) -> str:
+    """An LTEX ICON made relative to Textures\\, whatever the source game.
+
+    Oblivion names a bare file relative to Textures\\Landscape\\, so the
+    folder is prepended. Morrowind's is already a full path under Textures\\
+    and must be left alone -- prefixing it invented a landscape\\ folder that
+    does not exist, and all 107 terrain textures resolved to nothing.
+    See: docs/commentary/tes4_export_morrowind.md#land-terrain
+    """
+    lowered = icon_path.lower().replace('/', '\\')
+    if lowered.startswith('textures\\') or lowered.startswith('landscape\\'):
+        return icon_path
+    return 'landscape\\' + icon_path
+
+
+# ---------------------------------------------------------------------------
+# WRLD climate
+# ---------------------------------------------------------------------------
+def _world_climate(rec: dict) -> int:
+    """The CNAM climate FormID: authored, vanilla-verbatim, or TES4's default.
+
+    `CNAM.Vanilla` is read WITHOUT load-order remapping, so an export can name
+    a Skyrim.esm climate for a source game that has no DefaultClimate to
+    inherit. SNAM is omitted; it references a TES4 record we skip.
+    See: docs/commentary/tes5_import_landscape.md#wrld-climate
+    """
+    vanilla = rec.get('CNAM.Vanilla')
+    if vanilla:
+        try:
+            return int(vanilla, 16)
+        except (ValueError, TypeError):
+            pass
+    return (get_formid(rec, 'CNAM.Climate')
+            or remap_formid(_TES4_DEFAULT_CLIMATE))
 
 
 # ---------------------------------------------------------------------------

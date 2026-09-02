@@ -70,6 +70,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()  # TESConversion root
 # pathlib, so this is safe at module scope despite convert.py being the entry
 # point every package imports from.
 from output_layout import record_dir, plugin_out_root
+from tes4_export.tes3_reader import is_tes3
+from plugin_masters import get_masters_from_binary, topological_order
 import run_log
 
 
@@ -167,14 +169,12 @@ def resolve_plugin_path(file_name: str, tes4_data: str,
                         export_dir: str = None) -> str:
     """Absolute path to a plugin's TES4 binary.
 
-    A plugin imported from a mod archive (see `asset_convert/sources/mod_ingest.py`)
-    keeps its binary at `export/<plugin>/_source/<plugin>` and is registered in
-    `export/sources.json`; anything else lives in the Oblivion Data directory
-    exactly as it always has.
+    Checked in order: a mod archive's retained binary under
+    `export/<plugin>/_source/`, any other registered Data directory (a
+    Morrowind install, say), then the Oblivion Data directory.
 
     EVERY place that used to build `os.path.join(tes4_data, name)` must go
-    through here -- one missed call site and an imported mod half-works
-    (exported but not extracted, or listed but not convertible).
+    through here -- one missed call site and an imported mod half-works.
     """
     export_dir = export_dir or str(SCRIPT_DIR / "export")
     try:
@@ -182,6 +182,9 @@ def resolve_plugin_path(file_name: str, tes4_data: str,
         imported = source_registry.plugin_binary(export_dir, file_name)
         if imported:
             return str(imported)
+        registered = source_registry.directory_for(export_dir, file_name)
+        if registered:
+            return os.path.join(registered, file_name)
     except Exception:
         # A broken/absent registry must never stop a normal Data-directory
         # conversion -- that is the whole additive guarantee.
@@ -504,72 +507,21 @@ def _missing_master_exports(results, export_dir: str, tes4_data: str) -> dict:
     return missing
 
 
-def get_masters_from_binary(filepath: str) -> list:
-    """Read the master list from a TES4/FO3/FNV binary file header.
-
-    FO3/FNV carry 4 more header bytes than TES4; HEDR marks the boundary.
-    """
-    import struct as st
-    masters = []
-    with open(filepath, 'rb') as f:
-        sig = f.read(4)
-        if sig != b'TES4':
-            return masters
-        data_size = st.unpack('<I', f.read(4))[0]
-        f.seek(20 if f.read(16)[12:16] == b'HEDR' else 24)
-        data = f.read(data_size)
-        pos = 0
-        while pos + 6 <= len(data):
-            sub_sig = data[pos:pos+4].decode('ascii', errors='replace')
-            sub_size = st.unpack_from('<H', data, pos+4)[0]
-            pos += 6
-            if pos + sub_size > len(data):
-                break
-            if sub_sig == 'MAST':
-                masters.append(data[pos:pos+sub_size].decode('latin-1').rstrip('\0'))
-            pos += sub_size
-    return masters
-
-
-def topological_order(files: list, tes4_data: str) -> list:
-    """Sort files in dependency order (masters first)."""
-    # Files can be strings or dicts with 'name' key
-    file_names = []
-    for f in files:
-        if isinstance(f, str):
-            file_names.append(f)
-        else:
-            file_names.append(f['name'])
-
-    # Build dependency graph from binary headers
-    deps = {}
-    for name in file_names:
-        source = resolve_plugin_path(name, tes4_data)
-        if os.path.isfile(source):
-            deps[name] = get_masters_from_binary(source)
-        else:
-            deps[name] = []
-
-    visited = {}
-    order = []
-
-    def visit(name):
-        if name in visited:
-            return
-        visited[name] = True
-        for master in deps.get(name, []):
-            if master in deps:  # Only visit if it's in our file list
-                visit(master)
-        order.append(name)
-
-    for name in file_names:
-        visit(name)
-    return order
-
-
 # ===========================================================================
 # Phase 1: Export TES4 RECORDS
 # ===========================================================================
+
+def _plugins_to_convert(args, config: dict, tes4_data: str,
+                        export_dir: str) -> list:
+    """The plugins to convert, masters first.
+
+    Files always come from -f/--files, which is also how the GUI passes the
+    selected plugins; `config["files"]` is a legacy fallback only.
+    """
+    return topological_order(
+        args.files or config.get("files", []),
+        lambda name: resolve_plugin_path(name, tes4_data, export_dir))
+
 
 def phase_export(file_name: str, tes4_data: str, export_dir: str,
                  config: dict):
@@ -585,6 +537,10 @@ def phase_export(file_name: str, tes4_data: str, export_dir: str,
     if not os.path.isfile(source):
         print(f"[{file_name}] ERROR: Source file not found: {source}")
         return False
+
+    if is_tes3(source):
+        from tes4_export.export_morrowind import run_export
+        return run_export(file_name, source, export_dir)
 
     print(f"[{file_name}] Exporting...")
     t0 = time.time()
@@ -627,8 +583,8 @@ def phase_extract(file_name: str, tes4_data: str, config: dict,
     Two sources, one output shape:
       * a plugin imported from a mod archive re-runs its ingest (which already
         produced the same tree the BSA extractor would have);
-      * everything else extracts the BSAs beside it in the Oblivion Data dir,
-        exactly as before.
+      * everything else extracts the BSAs sitting beside the plugin, in
+        whichever registered Data directory holds it.
     """
     extract_dir = str(SCRIPT_DIR / "export")
 
@@ -648,10 +604,22 @@ def phase_extract(file_name: str, tes4_data: str, config: dict,
     print(f"[{file_name}] Extracting BSA archives...")
     extract_bsas(
         source_file=file_name,
-        data_path=tes4_data,
+        data_path=_plugin_data_dir(file_name, tes4_data, extract_dir),
         extract_dir=extract_dir,
     )
     return True
+
+
+def _plugin_data_dir(file_name: str, tes4_data: str, export_dir: str) -> str:
+    """The Data directory holding this plugin, and therefore its archives.
+
+    A plugin from a registered install -- Morrowind, say -- keeps its BSAs
+    beside itself, not in the Oblivion Data directory.
+    """
+    source = resolve_plugin_path(file_name, tes4_data, export_dir)
+    if os.path.isfile(source):
+        return os.path.dirname(source)
+    return tes4_data
 
 # ===========================================================================
 # Phase 3: CONVERT MESHES AND TEXTURES
@@ -1603,10 +1571,7 @@ def _run_pipeline():
     print(f"  {describe_limit()}")
     print()
 
-    # Files to process always come from -f/--files (CLI) or the GUI, which
-    # passes the selected plugins via -f. conversion_config.json no longer
-    # carries a "files" list; config.get("files") is only a legacy fallback.
-    order = topological_order(args.files or config.get("files", []), tes4_data)
+    order = _plugins_to_convert(args, config, tes4_data, export_dir)
     if not order and not args.modify_body_meshes:
         # "10. Patch Skyrim" is the one step that converts no plugin: it patches
         # the user's SKYRIM load order and writes a single shared

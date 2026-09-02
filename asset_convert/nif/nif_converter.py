@@ -39,6 +39,9 @@ import numpy as np
 
 from asset_convert import paths
 from asset_convert.nif.geometry_sanitize import sanitize_geometry_data
+from asset_convert.nif.nif_converter_morrowind import (build_skin_partitions,
+                                                       is_morrowind,
+                                                       run_morrowind_fixups)
 from asset_convert.nif.tex_paths import rewrite_tex_path
 from asset_convert.nif.shaders import (ALPHA_BLEND_ENABLED,
                                        ALPHA_DST_ONE, ALPHA_DST_SHIFT,
@@ -166,6 +169,7 @@ _SUPPORTED_VERSIONS = {
     0x0a010065,  # Gamebryo 10.1.0.101
     0x0a000100,  # NetImmerse 10.0.1.0
     0x0a000102,  # NetImmerse 10.0.1.2
+    0x04000002,  # NetImmerse 4.0.0.2 - Morrowind
 }
 
 #: Already-Skyrim (version, user_version_2), copied out unchanged.
@@ -914,7 +918,7 @@ def _hoist_root_collision(root, wrapped, root_is_animated, has_constraints,
         remove_empty_collision_nodes(root)
 
 
-def _run_source_fixups(data):
+def _run_source_fixups(data, stats=None):
     """Repair the source tree before the version upgrade changes how it reads.
 
     See: docs/commentary/asset_convert_nif.md#pre-upgrade-source-fixups
@@ -924,6 +928,8 @@ def _run_source_fixups(data):
     convert_sound_text_keys(data)
     fix_controller_flags(data)
     sanitize_geometry_data(data)
+    if is_morrowind(data):
+        run_morrowind_fixups(data, stats)
 
 
 def _classify_wearable(src_path, nif_basename, worn, biped_flags):
@@ -1090,6 +1096,23 @@ def _convert_one_root(data, i, root, stats, fix_textures, src_path, creature,
                             has_constraints)
 
 
+def _upgrade_version(data, stats=None) -> None:
+    """Stamp the Skyrim version, then run the fixups that need it.
+
+    A Morrowind skin partition is built HERE, not with the other source
+    fixups: the 4.0.0.2 schema has no `skin_partition` ref, so one built
+    earlier is unreachable and the writer drops it.
+    See: docs/commentary/asset_convert_nif.md#morrowind-skin-partitions
+    """
+    was_morrowind = is_morrowind(data)
+    data.version = OUTPUT_VERSION
+    data.user_version = OUTPUT_USER_VERSION
+    data.user_version_2 = OUTPUT_USER_VERSION_2
+    data.header.endian_type = ENDIAN_LITTLE
+    if was_morrowind:
+        build_skin_partitions(data, stats)
+
+
 def _convert_nif(data, fix_textures=True, src_path='', weight=0,
                  creature=False, worn=False, parallax=False, biped_flags=0,
                  tex_fallback=(), hair=False, race=None):
@@ -1117,7 +1140,7 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
         '_sky_type': sky_object_type_for(src_path),
     }
 
-    _run_source_fixups(data)
+    _run_source_fixups(data, stats)
     has_skin = _has_skin(data)
 
     nif_basename = os.path.basename(src_path).lower()
@@ -1149,10 +1172,7 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
         has_skin = prepare_worn_armor(data, has_skin, _is_shield,
                                       _authored_bp, _has_skin)
 
-    data.version = OUTPUT_VERSION
-    data.user_version = OUTPUT_USER_VERSION
-    data.user_version_2 = OUTPUT_USER_VERSION_2
-    data.header.endian_type = ENDIAN_LITTLE
+    _upgrade_version(data, stats)
 
     _is_creature_body = creature and has_skin
     _is_worn_armor = (not _is_gnd and _in_armor_dir and not _is_shield) \

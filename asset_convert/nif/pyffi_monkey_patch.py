@@ -58,6 +58,7 @@ Summary of patches
 """
 
 import os
+import struct
 import sys
 import time as _time
 
@@ -125,6 +126,11 @@ def _apply_nifformat_patches(NifFormat):
     # Patch 8: Skyrim SE (BSStream 100) read support
     # ------------------------------------------------------------------
     _install_sse_layouts(NifFormat)
+
+    # ------------------------------------------------------------------
+    # Patch 11: Morrowind (4.0.0.2) NiGeometryData UV-set count
+    # ------------------------------------------------------------------
+    _install_morrowind_layouts(NifFormat)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +458,68 @@ def _decode_sse_vertex_block(raw, num_vertices, vdesc):
     if bit_x is not None and bit_y is not None and bit_z is not None:
         out['sse_bitangents'] = np.stack([bit_x, bit_y, bit_z], axis=1)
     return out
+
+
+#: Last version storing NiGeometryData's UV-set count as a ushort.
+_V4_2_2_0 = 0x04020200
+
+
+def _install_morrowind_layouts(NifFormat):
+    """Make NiGeometryData.num_uv_sets width-aware so Morrowind NIFs read.
+
+    nif.xml declares 'Num UV Sets' twice with different widths AND positions:
+    a byte before Has Normals since 10.0.1.0, and a ushort after Vertex Colors
+    until 4.2.2.0. StructBase keeps one value object per attribute NAME and
+    skips duplicates, so the byte always wins; at 4.0.0.2 the version filter
+    yields the ushort attribute but the read consumes one byte and every later
+    field shifts by one.
+
+    See: docs/commentary/asset_convert_nif.md#morrowind-num-uv-sets
+    """
+    geometry = NifFormat.NiGeometryData
+    declarations = [a for a in geometry._attrs if a.name == 'num_uv_sets']
+    modern = [a for a in declarations if a.ver2 is None]
+    legacy = [a for a in declarations if a.ver2 == _V4_2_2_0]
+    if not (modern and legacy):
+        return
+    shared = _num_uv_sets_type(modern[0].type_)
+    for attr in declarations:
+        attr.type_ = shared
+    _refresh_attribute_caches(NifFormat, (geometry,))
+
+
+def _num_uv_sets_type(base):
+    """A UV-set count that reads one byte, or two before 4.2.2.0."""
+
+    class NumUVSets(base):
+        """UByte since 10.0.1.0, UShort until 4.2.2.0 (the Morrowind era)."""
+
+        def get_size(self, data=None):
+            """Two bytes for a Morrowind-era file, otherwise one."""
+            return 2 if _is_legacy_uv(data) else 1
+
+        def read(self, stream, data):
+            """Consume the count at this version's width."""
+            wide = _is_legacy_uv(data)
+            self._value, = struct.unpack(
+                data._byte_order + ('H' if wide else 'B'),
+                stream.read(2 if wide else 1))
+
+        def write(self, stream, data):
+            """Emit the count at this version's width."""
+            wide = _is_legacy_uv(data)
+            stream.write(struct.pack(
+                data._byte_order + ('H' if wide else 'B'),
+                int(self._value) & (0xFFFF if wide else 0xFF)))
+
+    NumUVSets.__name__ = 'NumUVSets'
+    return NumUVSets
+
+
+def _is_legacy_uv(data) -> bool:
+    """Whether this file stores the UV-set count as a ushort."""
+    version = getattr(data, 'version', -1) if data is not None else -1
+    return 0 < version <= _V4_2_2_0
 
 
 def _install_sse_layouts(NifFormat):

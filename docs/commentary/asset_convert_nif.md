@@ -1775,3 +1775,172 @@ The Skyrim equivalent is a frame-strip atlas texture plus a
 (`CONST`) keys. The converter composes the source frames into a
 horizontal-strip DDS and emits that controller, so the animation survives with
 no `NiFlipController` in the output.
+
+<a id="morrowind-num-uv-sets"></a>
+
+## Morrowind (4.0.0.2): the duplicated `Num UV Sets`
+
+**Code:** `asset_convert/nif/pyffi_monkey_patch.py` Patch 11.
+
+pyffi read **0 of 60** Morrowind meshes before this patch. The cause is not the
+version gate and not the boolean width -- 4.0.0.2 booleans genuinely are four
+bytes, and forcing them to one only moves the failure.
+
+`nif.xml` declares `Num UV Sets` on `NiGeometryData` **twice**, with different
+widths *and* different positions:
+
+- a `byte` before `Has Normals`, since 10.0.1.0
+- a `ushort` after `Vertex Colors`, until 4.2.2.0
+
+`StructBase.__init__` keeps one value object per attribute NAME and skips
+duplicates -- its own comment requires duplicates to share a type, which these
+do not -- so the stored object is always the `UByte`. At 4.0.0.2 the version
+filter correctly yields the *ushort* attribute, but the read goes through the
+byte object and consumes one byte where the file has two. Measured: pyffi read
+the count at 2489->2490 where the file ends it at 2491, shifting every later
+field by one and overrunning the block.
+
+The fix gives BOTH declarations one shared version-aware type rather than
+renaming either. Renaming is not viable: two candidate patches that renamed a
+declaration read Morrowind 60/60 but broke **80/80** Oblivion and Skyrim files.
+
+Measured after the patch: **60/60** sampled Morrowind meshes read (5798/5798
+over the full corpus), 29,852 `NiTriShapeData` blocks structurally consistent,
+and Oblivion/Skyrim round-trips byte-identical to before.
+
+<a id="morrowind-collision"></a>
+
+## Morrowind collision: `RootCollisionNode` (2026-09-01)
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py`, called from
+`_run_source_fixups`.
+
+Morrowind ships no Havok data whatsoever. Collision is an ordinary triangle
+mesh parked under a `RootCollisionNode`, which the engine consumes and never
+draws. Left alone that node ships to Skyrim as *visible* geometry and the
+object gets no collision at all -- both halves wrong at once.
+
+### Detection is by BLOCK TYPE, never by name
+
+The 217 collision nodes found in a strided sample of the corpus **all carry an
+empty name string**, so the `_STRIPPED_NODE_PREFIXES` name idiom silently
+matches nothing -- a name-based census returned 0 and looked like proof that
+Morrowind does not use the node at all. pyffi reads it as its own
+`RootCollisionNode` class, exactly as the engine registers it
+(`references/openmw/components/nif/niffile.cpp:68`), so `type(b).__name__` is
+the reliable test.
+
+### What the engine actually does
+
+`references/openmw/components/nifbullet/bulletnifloader.cpp:170-177`:
+
+- a `RootCollisionNode` is found -> its triangles ARE the collision
+- **no** node -> `mGenerateCollision = true`; collision comes from the RENDER
+  mesh
+- an EMPTY node -> camera collision only, generated from render geometry
+
+`findRootCollisionNode` (`node.cpp:209`) searches **direct children only, in
+reverse**; recursion is opt-in through an `RCN` string extra.
+
+### Measured corpus split (strided sample, 484 of 5,798 meshes)
+
+| | count |
+|---|---|
+| has `RootCollisionNode` | 217 (45%) |
+| ...as a direct child of the root | 217 (100%) |
+| ...holding real geometry | 217 (100%) |
+| no node -> engine builds from render mesh | 267 (55%) |
+
+Collision meshes are small: 2 triangles minimum, **48 median**, 2,219 maximum.
+
+### The scale is bare, not `/7`
+
+`collision.py::_visual_tri_soup` uses `_HAVOK_SCALE / 7.0` because Oblivion
+pre-divides its collision data by 7. Morrowind authors the collision mesh in
+plain render units, so it takes `_HAVOK_SCALE` (0.1) alone. Verified on
+`in_dae_hall_ruin_l_01.nif`: a 512-unit interior piece spans +/-25.34 havok
+units, exactly x0.1.
+
+The rigid body is the vanilla static block already established by the
+SpeedTree generator -- identity transform, mass 0, layer 1 (`SKYL_STATIC`),
+motion system 5 -- and the triangles go through the real Havok bridge
+(`cms_builder.build_cms_collision`), so the result is a genuine
+`bhkMoppBvTreeShape` + CMS rather than an approximation. Material is
+`SKY_HAV_MAT_STONE`, the same fallback `convert_materials` uses for an unknown
+material: Morrowind records no havok material, so nothing finer is recoverable.
+
+The node is stripped whether or not a shape was built -- it must never render.
+
+### Still missing
+
+The 55% with no collision node currently ship with **no collision**, where the
+engine would generate it from the render mesh. Doing that here means feeding
+render geometry through the same bridge, and it is a separate change.
+
+
+## Morrowind triangle flag
+<a id="morrowind-triangle-flag"></a>
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py::raise_triangle_flags`
+
+`Has Triangles` does not exist in NIF 4.0.0.2. Morrowind writes the index array
+unconditionally, so pyffi reads the triangles correctly but leaves
+`has_triangles = False` on every shape. The field DOES exist at the Skyrim version
+we upgrade to, where pyffi writes the array only when the flag is set — so the
+converted mesh kept `Num Triangles` and shipped no indices at all.
+
+Measured on the first build: **294 of 300 output meshes (98%)** had at least one
+shape with `num_triangles > 0` and `len(triangles) == 0`. `base_anim.nif` alone had
+26. The same scanner reported 0 mismatches on vanilla Skyrim meshes and on
+Oblivion-converted meshes, so the reader was never in question.
+
+The engine aborts the process on this. Captured with
+`tools/live/crash_capture.py`: `c0000409` / `FAST_FAIL_INVALID_ARG`, subcode 5, from
+`ucrtbase!invalid_parameter` — an `errno = 0x22` (EINVAL) bounds check in
+`SkyrimSE+0x109a4e`. The caller copies `count * 2` bytes (u16 indices) into a
+buffer sized from the real data, with a sibling `count * 3` stride for triangle
+points: `rbx = 0x30` (48 bytes declared) against `r12 = 0x18` (24 vertices). No
+CrashLogger log is produced, because a fast-fail bypasses the exception filter.
+
+Emptiness is judged on the ARRAY, never on the flag — the same rule
+`tri_reconstruct.py` already states in its docstring. A shape whose array is
+genuinely empty is left to that module to rebuild or drop.
+
+
+## Morrowind skin partitions
+<a id="morrowind-skin-partitions"></a>
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py::build_skin_partitions`
+
+`NiSkinPartition` postdates NIF 4.0.0.2, so no Morrowind mesh has one. Skyrim's
+renderer walks the partition for its bone and vertex mapping and dereferences
+the null when it is absent:
+
+`EXCEPTION_ACCESS_VIOLATION` at `SkyrimSE+0E552FA`, `mov r13, [rax+0x18]` with
+`rax = 0`, on `furn_bannerd_wa_shop_01.nif` (an `NiSkinInstance` over `Bone02` /
+`Bone03`). The call chain is the SAME one the earlier triangle-flag fast-fail
+took — `+0E561B3`, `+0E53D52`, `+0E03602`, `+0206790` — so fixing the indices
+simply moved the failure one step deeper into the same mesh load.
+
+Measured, at the point of the crash:
+
+| corpus | skinned instances | with partition |
+|---|---|---|
+| vanilla Skyrim | 246 | 246 (100%) |
+| Oblivion output (works in game) | 1,630 | 1,630 (100%) |
+| Morrowind output | 325 | **0** |
+
+Oblivion meshes already ship partitions, which is why nothing in
+`asset_convert/` ever built one.
+
+**Two contracts, both measured, both easy to get wrong:**
+
+1. **The partition hangs off the `NiSkinInstance`, not the `NiSkinData`.** In 146
+   vanilla skinned instances it is on the instance and in 0 on the data.
+   pyffi's `update_skin_partition` writes it to the DATA block, so it is moved.
+2. **It must be built AFTER the version upgrade.** `Data.write` rebuilds
+   `self.blocks` from the roots via `_makeBlockList`, following `get_refs()`;
+   at 4.0.0.2 the schema has no `skin_partition` ref on the instance, so a
+   partition built pre-upgrade is unreachable and silently never written.
+   Appending it to `data.blocks` by hand does not help — the writer discards
+   that list. `num_weights_per_vertex = 4` in 300 of 300 vanilla partitions.
