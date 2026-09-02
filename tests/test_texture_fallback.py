@@ -13,6 +13,7 @@ A mod with a plugin names its masters in `_HEADER.txt`; an asset-only mod has
 no plugin and no header, so the base is recorded at import time.
 """
 
+from asset_convert.nif import shaders
 import sys
 from pathlib import Path
 
@@ -36,7 +37,7 @@ def _tree(root, name, textures=(), header_masters=None, base=None):
     if base is not None:
         s = d / '_source'
         s.mkdir(parents=True, exist_ok=True)
-        (s / nc.BASE_PLUGINS_FILE).write_text('\n'.join(base) + '\n',
+        (s / shaders.BASE_PLUGINS_FILE).write_text('\n'.join(base) + '\n',
                                               encoding='utf-8')
     return d
 
@@ -46,7 +47,7 @@ class TestMasterTextureRoots:
     def test_a_plugin_mod_finds_its_masters_from_the_header(self, tmp_path):
         _tree(tmp_path, 'Base.esm', textures=['rock/stone.dds'])
         mod = _tree(tmp_path, 'Mod.esp', header_masters=['Base.esm'])
-        roots = nc.master_texture_roots(mod / 'meshes')
+        roots = shaders.master_texture_roots(mod / 'meshes')
         assert len(roots) == 1
         assert roots[0].endswith(str(Path('Base.esm') / 'textures'))
 
@@ -54,16 +55,16 @@ class TestMasterTextureRoots:
         # no plugin means no _HEADER.txt, so --base is the only carrier
         _tree(tmp_path, 'Base.esm', textures=['rock/stone.dds'])
         mod = _tree(tmp_path, 'TexturePack', base=['Base.esm'])
-        roots = nc.master_texture_roots(mod / 'meshes')
+        roots = shaders.master_texture_roots(mod / 'meshes')
         assert len(roots) == 1
 
     def test_no_base_means_no_fallback(self, tmp_path):
         mod = _tree(tmp_path, 'Lonely')
-        assert nc.master_texture_roots(mod / 'meshes') == ()
+        assert shaders.master_texture_roots(mod / 'meshes') == ()
 
     def test_a_base_without_an_export_is_skipped(self, tmp_path):
         mod = _tree(tmp_path, 'Mod.esp', header_masters=['Absent.esm'])
-        assert nc.master_texture_roots(mod / 'meshes') == ()
+        assert shaders.master_texture_roots(mod / 'meshes') == ()
 
 
 class TestResolutionThroughTheFallback:
@@ -72,9 +73,9 @@ class TestResolutionThroughTheFallback:
         base = _tree(tmp_path, 'Base.esm', textures=['rock/stone.dds'])
         mod = _tree(tmp_path, 'Mod.esp', textures=['rock/stone.dds'],
                     header_masters=['Base.esm'])
-        got = nc.resolve_source_texture(
+        got = shaders.resolve_source_texture(
             'textures\\tes4\\rock\\stone.dds', str(mod / 'meshes' / 'a.nif'),
-            nc.master_texture_roots(mod / 'meshes'))
+            shaders.master_texture_roots(mod / 'meshes'))
         assert got is not None
         assert str(mod) in got and str(base / 'textures') not in got
 
@@ -84,19 +85,19 @@ class TestResolutionThroughTheFallback:
         mod = _tree(tmp_path, 'Mod.esp', header_masters=['Base.esm'])
         args = ('textures\\tes4\\rock\\stone.dds',
                 str(mod / 'meshes' / 'a.nif'))
-        assert nc.resolve_source_texture(*args) is None, \
+        assert shaders.resolve_source_texture(*args) is None, \
             'no fallback should still miss it'
-        got = nc.resolve_source_texture(
-            *args, nc.master_texture_roots(mod / 'meshes'))
+        got = shaders.resolve_source_texture(
+            *args, shaders.master_texture_roots(mod / 'meshes'))
         assert got is not None and str(base) in got
 
     def test_a_texture_nobody_has_is_still_unresolved(self, tmp_path):
         _tree(tmp_path, 'Base.esm')
         mod = _tree(tmp_path, 'Mod.esp', header_masters=['Base.esm'])
-        assert nc.resolve_source_texture(
+        assert shaders.resolve_source_texture(
             'textures\\tes4\\rock\\absent.dds',
             str(mod / 'meshes' / 'a.nif'),
-            nc.master_texture_roots(mod / 'meshes')) is None
+            shaders.master_texture_roots(mod / 'meshes')) is None
 
 
 class TestWearablePlanThroughTheBase:
@@ -159,13 +160,13 @@ class TestNormalForVariantDiffuse:
     @staticmethod
     def _stats(mod):
         return {'_src_path': str(mod / 'meshes' / 'a.nif'),
-                '_tex_fallback': nc.master_texture_roots(mod / 'meshes')}
+                '_tex_fallback': shaders.master_texture_roots(mod / 'meshes')}
 
     def test_own_normal_wins(self, tmp_path):
         mod = _tree(tmp_path, 'Mod.esp',
                     textures=['w/post_dark.dds', 'w/post_dark_n.dds',
                               'w/post_n.dds'])
-        got = nc._resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
+        got = shaders.resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
                                      self._stats(mod))
         assert got == r'Textures\tes4\w\post_dark_n.dds'
 
@@ -173,14 +174,14 @@ class TestNormalForVariantDiffuse:
         """The BrumaWoodPost case."""
         mod = _tree(tmp_path, 'Mod.esp',
                     textures=['w/post_dark.dds', 'w/post_n.dds'])
-        got = nc._resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
+        got = shaders.resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
                                      self._stats(mod))
         assert got == r'Textures\tes4\w\post_n.dds'
 
     def test_nothing_anywhere_returns_none(self, tmp_path):
         """None means the caller falls back to the shared flat stand-in."""
         mod = _tree(tmp_path, 'Mod.esp', textures=['w/post_dark.dds'])
-        assert nc._resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
+        assert shaders.resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
                                       self._stats(mod)) is None
 
     def test_only_one_separator_is_stripped(self, tmp_path):
@@ -192,12 +193,12 @@ class TestNormalForVariantDiffuse:
         """
         mod = _tree(tmp_path, 'Mod.esp',
                     textures=['w/wall_stone_red.dds', 'w/wall_n.dds'])
-        assert nc._resolve_normal_for(r'Textures\tes4\w\wall_stone_red.dds',
+        assert shaders.resolve_normal_for(r'Textures\tes4\w\wall_stone_red.dds',
                                       self._stats(mod)) is None
 
     def test_a_name_without_a_separator_never_borrows(self, tmp_path):
         mod = _tree(tmp_path, 'Mod.esp', textures=['w/post.dds', 'w/_n.dds'])
-        assert nc._resolve_normal_for(r'Textures\tes4\w\post.dds',
+        assert shaders.resolve_normal_for(r'Textures\tes4\w\post.dds',
                                       self._stats(mod)) is None
 
     def test_the_base_normal_may_live_in_the_master(self, tmp_path):
@@ -205,7 +206,7 @@ class TestNormalForVariantDiffuse:
         base = _tree(tmp_path, 'Base.esm', textures=['w/post_n.dds'])
         mod = _tree(tmp_path, 'Mod.esp', textures=['w/post_dark.dds'],
                     header_masters=['Base.esm'])
-        got = nc._resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
+        got = shaders.resolve_normal_for(r'Textures\tes4\w\post_dark.dds',
                                      self._stats(mod))
         assert got == r'Textures\tes4\w\post_n.dds', \
             f'base normal not found through the master fallback ({base})'
@@ -222,12 +223,12 @@ class TestTheRuleIsNotNormalSpecific:
     @staticmethod
     def _stats(mod):
         return {'_src_path': str(mod / 'meshes' / 'a.nif'),
-                '_tex_fallback': nc.master_texture_roots(mod / 'meshes')}
+                '_tex_fallback': shaders.master_texture_roots(mod / 'meshes')}
 
     def test_glow_uses_the_base_name_too(self, tmp_path):
         mod = _tree(tmp_path, 'Mod.esp',
                     textures=['w/lamp_blue.dds', 'w/lamp_g.dds'])
-        got = nc._resolve_map_for(r'Textures\tes4\w\lamp_blue.dds', '_g',
+        got = shaders._resolve_map_for(r'Textures\tes4\w\lamp_blue.dds', '_g',
                                   self._stats(mod))
         assert got == r'Textures\tes4\w\lamp_g.dds'
 
@@ -235,14 +236,14 @@ class TestTheRuleIsNotNormalSpecific:
         mod = _tree(tmp_path, 'Mod.esp',
                     textures=['w/lamp_blue.dds', 'w/lamp_blue_g.dds',
                               'w/lamp_g.dds'])
-        got = nc._resolve_map_for(r'Textures\tes4\w\lamp_blue.dds', '_g',
+        got = shaders._resolve_map_for(r'Textures\tes4\w\lamp_blue.dds', '_g',
                                   self._stats(mod))
         assert got == r'Textures\tes4\w\lamp_blue_g.dds'
 
     def test_absent_everywhere_is_none(self, tmp_path):
         """No stand-in for a glow map: absence of glow IS the neutral state."""
         mod = _tree(tmp_path, 'Mod.esp', textures=['w/lamp_blue.dds'])
-        assert nc._resolve_map_for(r'Textures\tes4\w\lamp_blue.dds', '_g',
+        assert shaders._resolve_map_for(r'Textures\tes4\w\lamp_blue.dds', '_g',
                                    self._stats(mod)) is None
 
 
@@ -265,19 +266,19 @@ class TestGlowBeatsParallax:
 
     def _stats(self, mod):
         return {'_src_path': str(mod / 'meshes' / 'a.nif'),
-                '_tex_fallback': nc.master_texture_roots(mod / 'meshes')}
+                '_tex_fallback': shaders.master_texture_roots(mod / 'meshes')}
 
     def test_glow_sets_type_slot_and_flag(self, tmp_path):
         mod = _tree(tmp_path, 'Mod.esp', textures=['w/lamp_g.dds'])
         shader, ts = self._shader_and_set()
         stats = self._stats(mod)
-        assert nc._apply_glow(shader, ts, b'textures\\w\\lamp_g.dds',
+        assert shaders.apply_glow(shader, ts, b'textures\\w\\lamp_g.dds',
                               stats) is True
-        assert int(shader.skyrim_shader_type) == nc.SHADER_TYPE_GLOWMAP
+        assert int(shader.skyrim_shader_type) == shaders.SHADER_TYPE_GLOWMAP
         assert int(shader.shader_flags_2.slsf_2_glow_map) == 1
         assert int(shader.shader_flags_1.slsf_1_environment_mapping) == 0, \
             'AU: the environment shader is incompatible with glow mapping'
-        assert ts.textures[nc.GLOW_SLOT]
+        assert ts.textures[shaders.GLOW_SLOT]
         assert stats['glow_applied'] == 1
 
     def test_a_named_but_missing_glow_is_not_invented(self, tmp_path):
@@ -285,16 +286,16 @@ class TestGlowBeatsParallax:
         mod = _tree(tmp_path, 'Mod.esp')
         shader, ts = self._shader_and_set()
         stats = self._stats(mod)
-        assert nc._apply_glow(shader, ts, b'textures\\w\\lamp_g.dds',
+        assert shaders.apply_glow(shader, ts, b'textures\\w\\lamp_g.dds',
                               stats) is False
-        assert int(shader.skyrim_shader_type) != nc.SHADER_TYPE_GLOWMAP
+        assert int(shader.skyrim_shader_type) != shaders.SHADER_TYPE_GLOWMAP
         assert stats['glow_unresolved'] == 1
 
     def test_no_glow_path_leaves_the_shader_alone(self, tmp_path):
         mod = _tree(tmp_path, 'Mod.esp')
         shader, ts = self._shader_and_set()
         before = int(shader.skyrim_shader_type)
-        assert nc._apply_glow(shader, ts, b'', self._stats(mod)) is False
+        assert shaders.apply_glow(shader, ts, b'', self._stats(mod)) is False
         assert int(shader.skyrim_shader_type) == before
 
 
@@ -320,7 +321,7 @@ class TestGlowIsDerivedNotOnlyNamed:
 
     def _stats(self, mod):
         return {'_src_path': str(mod / 'meshes' / 'a.nif'),
-                '_tex_fallback': nc.master_texture_roots(mod / 'meshes')}
+                '_tex_fallback': shaders.master_texture_roots(mod / 'meshes')}
 
     def test_derived_from_the_diffuse_when_nothing_is_named(self, tmp_path):
         """The rune-stone case: no glow slot, `_g` sits beside the diffuse."""
@@ -328,8 +329,8 @@ class TestGlowIsDerivedNotOnlyNamed:
                     textures=['r/stone.dds', 'r/stone_g.dds'])
         shader, ts = self._shader_and_set(r'Textures\tes4\r\stone.dds')
         stats = self._stats(mod)
-        assert nc._apply_glow(shader, ts, b'', stats) is True
-        assert int(shader.skyrim_shader_type) == nc.SHADER_TYPE_GLOWMAP
+        assert shaders.apply_glow(shader, ts, b'', stats) is True
+        assert int(shader.skyrim_shader_type) == shaders.SHADER_TYPE_GLOWMAP
         assert stats['glow_derived'] == 1
 
     def test_no_glow_texture_means_no_glow_shader(self, tmp_path):
@@ -337,7 +338,7 @@ class TestGlowIsDerivedNotOnlyNamed:
         mod = _tree(tmp_path, 'Mod.esp', textures=['r/plain.dds'])
         shader, ts = self._shader_and_set(r'Textures\tes4\r\plain.dds')
         before = int(shader.skyrim_shader_type)
-        assert nc._apply_glow(shader, ts, b'', self._stats(mod)) is False
+        assert shaders.apply_glow(shader, ts, b'', self._stats(mod)) is False
         assert int(shader.skyrim_shader_type) == before
 
     def test_a_named_glow_wins_over_the_derived_one(self, tmp_path):
@@ -346,9 +347,9 @@ class TestGlowIsDerivedNotOnlyNamed:
                               'r/authored_g.dds'])
         shader, ts = self._shader_and_set(r'Textures\tes4\r\stone.dds')
         stats = self._stats(mod)
-        assert nc._apply_glow(shader, ts, rb'textures\r\authored_g.dds',
+        assert shaders.apply_glow(shader, ts, rb'textures\r\authored_g.dds',
                               stats) is True
-        assert b'authored_g' in bytes(ts.textures[nc.GLOW_SLOT])
+        assert b'authored_g' in bytes(ts.textures[shaders.GLOW_SLOT])
         assert 'glow_derived' not in stats
 
     def test_black_emissive_is_lifted_to_vanillas_default(self, tmp_path):
@@ -361,7 +362,7 @@ class TestGlowIsDerivedNotOnlyNamed:
                     textures=['r/stone.dds', 'r/stone_g.dds'])
         shader, ts = self._shader_and_set(r'Textures\tes4\r\stone.dds')
         stats = self._stats(mod)
-        assert nc._apply_glow(shader, ts, b'', stats) is True
+        assert shaders.apply_glow(shader, ts, b'', stats) is True
         e = shader.emissive_color
         assert (e.r, e.g, e.b) == (1.0, 1.0, 1.0)
         assert float(shader.emissive_multiple) == 1.0
@@ -381,7 +382,7 @@ class TestGlowIsDerivedNotOnlyNamed:
         shader.emissive_color.g = 0.188
         shader.emissive_color.b = 0.0
         stats = self._stats(mod)
-        assert nc._apply_glow(shader, ts, b'', stats) is True
+        assert shaders.apply_glow(shader, ts, b'', stats) is True
         e = shader.emissive_color
         assert (round(e.r, 3), round(e.g, 3), round(e.b, 3)) == (1.0, 0.188, 0.0)
         assert 'glow_emissive_defaulted' not in stats

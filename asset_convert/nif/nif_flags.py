@@ -1,13 +1,16 @@
-"""BSXFlags values: what the engine may do with a NIF's root.
+"""NIF flag and enum constants shared across the mesh converter.
 
-BSXFlags is a bitfield on the root NiNode that gates havok, animation and
-ragdoll handling.  The four values here are the combinations vanilla Skyrim
-ships for placed world objects, named after the object class each one serves.
+`NIF_FLAGS` is the per-node value; the `BSX_FLAGS_*` set is the root bitfield
+that gates havok, animation and ragdoll handling, named after the object class
+each combination serves; `TT_*` are the texture-transform operations.
 
 These are object-side constants -- doors, clutter and signs -- so they live
 beside the mesh converter that writes them rather than with the wearable and
 body-slot tables.
 """
+
+#: Standard Skyrim NiAVObject flags (SelectiveUpdate bits 1-3).
+NIF_FLAGS = 14
 
 #: Static objects with collision: complex + havok.
 BSX_FLAGS_STATIC = 0x82
@@ -20,3 +23,6 @@ BSX_FLAGS_ANIMATED = 0x8B
 
 #: Dynamic constrained objects, e.g. swinging signs.
 BSX_FLAGS_CONSTRAINED = 0xCA
+
+#: NiTextureTransformController.operation. See: docs/commentary/asset_convert_shader.md#texture-transform-controller-map
+TT_TRANSLATE_U, TT_TRANSLATE_V, TT_ROTATE, TT_SCALE_U, TT_SCALE_V = range(5)

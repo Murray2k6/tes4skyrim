@@ -1,6 +1,300 @@
 # asset_convert/nif/nif_converter.py - shader values
 
-**Code:** `asset_convert/nif/nif_converter.py`, `asset_convert/texture/spec_mask.py`, `asset_convert/texture/luminance_textures.py`
+**Code:** `asset_convert/nif/shaders.py`, `asset_convert/nif/nif_converter.py`, `asset_convert/texture/spec_mask.py`, `asset_convert/texture/luminance_textures.py`
+
+## Lit or unlit: choosing the Effect shader
+<a id="fx-shader-discriminator"></a>
+
+**Code:** `_is_fx_surface` in `asset_convert/nif/nif_converter.py`
+
+`BSLightingShaderProperty` is a LIT material: it shades every pixel against the
+normal map in texture slot 1. Oblivion's FX textures ship no `_n` companion at
+all (SEFXWHITE, SEFXLightRippleINVERT, SEForceRipple), so routing that geometry
+through the lighting shader shaded it against a texture that does not exist —
+the "major texturing problem" on `se11sheopooffx` and `se01waitingroomwalls`.
+`BSEffectShaderProperty` is the vanilla home for glow/FX geometry and has no
+normal-map slot at all.
+
+**Indicator 1 — Oblivion's own unlit declaration.**
+`NiVertexColorProperty.lighting_mode == LIGHTING_E` (0) means "emissive only,
+ignore scene lighting"; lit geometry uses `LIGHTING_E_A_D` (1). In
+`se01waitingroomwalls` the three roomRoomFX light-ripple shapes are the only
+mode-0 surfaces in the mesh, while all 40-odd wall and trim shapes are mode 1 —
+exactly the lit/unlit split the two Skyrim shaders encode.
+
+**Indicator 2 — additive blending.** A surface whose `NiAlphaProperty` sets
+`dst=ONE` ADDS its colour to the framebuffer, so it can never be ordinary lit
+geometry: lighting it would double-count the light it already contributes.
+Vanilla agrees without exception — of **64** additively-blended shapes sampled
+across `meshes/effects` and `meshes/dungeons`, **64** use
+`BSEffectShaderProperty` and **0** use the lighting shader.
+
+This second indicator exists because mode 0 is not always present: many FX
+meshes ship no `NiVertexColorProperty` at all, so the mode defaults to "lit".
+`dungeons/misc/fx/fxmistgroundeffect01` — the Ayleid-ruin ground mist — is five
+additively-blended AtmosphereCloud01 planes with no vertex-colour property, and
+every one became a LIT, normal-mapped surface with no soft fade: the visible
+rectangle that was reported. Across Oblivion's own FX directories **76 of 179**
+blended shapes declare no `lighting_mode`, so the gap is the common case.
+
+**Plain alpha blending is deliberately excluded.** That same census shows **3**
+legitimate `BSLightingShaderProperty` cases (glass, ice), so widening the rule
+to all blending would misroute real lit geometry.
+
+**Do NOT infer any of this from the texture path or a missing `_n`.** A
+700-mesh census found **101** shapes whose diffuse has no `_n` companion, and
+they are overwhelmingly ordinary LIT geometry — troll skin, clothing, painted
+signs, plaster walls, grass — that must keep its lighting. The material fields
+are equally useless: these FX shapes disagree on every one of them (roomRoomFX
+emissive-white and blended, LightBeam emissive-black and blended, Cone01 no
+alpha property, GlowPlane material-alpha 0).
+
+### <a id="flipbook-to-atlas"></a>NiFlipController becomes a frame-strip atlas
+
+Fire and effect quads animate through multiple texture frames using
+`NiFlipController` on the `NiTexturingProperty`. It is DEAD in Skyrim — **0 of
+17,216** vanilla meshes — and the equivalent is a frame-strip atlas driven by a
+`BSEffectShaderPropertyFloatController` stepping "U Offset" (var 6) with CONST
+keys. The frames are composed into a horizontal-strip DDS (the job runs in
+`convert_nif`, which knows the output tree), which restores the animation in
+game AND in NifSkope, whose EffectFloatController is supported where NiPSys
+chains are not. When the frames cannot be resolved the shape falls back to a
+static first-frame texture.
+
+pyffi defaults UV Scale to (0,0), which collapses every UV to the texture's
+top-left texel — usually transparent on a flame texture — and renders the
+geometry invisible. Vanilla is offset (0,0), scale (1,1).
+
+## The soft-particle depth fade
+<a id="soft-particle-fade"></a>
+
+**Code:** `apply_fx_soft_effect` in `asset_convert/nif/shaders.py`
+
+A blended FX quad that intersects solid geometry is normally cut off along the
+intersection line, so a smoke or mist billboard standing in a floor shows the
+QUAD'S OWN RECTANGULAR EDGE — the "distracting bounding box around transparent
+effects". `slsf_1_soft_effect` makes the engine fade the quad out over Soft
+Falloff Depth units of depth difference instead, which removes the hard edge.
+
+Oblivion has no equivalent flag (its FX quads are hand-placed to avoid
+intersections), so there is no source field to carry across — the value comes
+from what vanilla does with the same kind of surface. Census of **1,198**
+`BSEffectShaderProperty` shapes across `meshes/effects` + `meshes/dungeons`:
+
+| source alpha | n | soft_effect=1 |
+|---|---|---|
+| 0x100d (additive) | 470 | 417 (89%) |
+| 0x10ed (blend) | 362 | 224 (62%) |
+| no `NiAlphaProperty` | 332 | 10 (soft_effect=0 in 322, 97%) |
+
+So blended FX gets the fade and unblended FX does not. **100.0** is the
+commonest falloff depth in the same census (250/521 on mist/smoke/fog geometry)
+and is what vanilla uses for ambient room fog, which is exactly this case.
+
+### <a id="self-lit-flames-are-not-faded"></a>A self-lit flame must not be faded
+
+The depth fade attenuates a quad against whatever it intersects. On ambient fog
+that is the point. On a FLAME it is destructive: a candle flame sits directly on
+its own wax and a sconce flame against its own bracket, so the fade dims the
+flame into the very object it is mounted on. Vanilla authors exactly this split
+inside ONE mesh — `mps\mpscandleflame01.nif`, both particle systems, both
+additive 0x100d, both `emissive_multiple` 1.0:
+
+| shape | soft_effect | falloff |
+|---|---|---|
+| CandleFlame01 (the flame) | 0 | 2.0 |
+| CandleGlow01 (the halo) | 1 | 6.0 |
+
+The same holds for every mounted fire core in the vanilla corpus —
+`slighthousefire` "Fireball", `torchsconce01` "pFireballCore04",
+`giantcampfire01burning` "PFireball" — all `soft_effect=0`, **49** such particle
+systems across **281** vanilla fire meshes.
+
+Skyrim's value is NOT reconstructible from structure. Measured over those **511**
+vanilla FX shaders, none of block type (particle 119/168 soft=1 vs geometry
+159/343), alpha flags (0x100d splits 163/74) or `double_sided` (78% vs 44%)
+predicts it; it is authored per effect. So key it on the one authored quantity
+that DOES separate the populations — `NiMaterialProperty.emissive_color`:
+
+| | example | emissive |
+|---|---|---|
+| flames | `fire\firetorchlarge`, `firecandleflame`, `fireopen*` | (1.0, 1.0, 1.0) |
+| fog/dust | `fxcloudthick01` 0.078, `fxcloudthin01` 0.047, `fxdustcloud01` 0.337, `sefxmistdemen` 0.310 | all ≤ 0.34 |
+
+A surface authored at FULL WHITE declares "I am the light source" and is left
+hard; anything dimmer is ambient haze and takes the fade. Erring here is
+asymmetric — a missing fade leaves a nicety off a flame, a wrongly-applied one
+erases the flame outright.
+
+### <a id="particle-soft-effect"></a>Particles are the case the fade matters most for
+
+A smoke plume drifting into a wall otherwise cuts off along a hard line, and
+every billboard shows its own quad edge. `alpha_prop` is always set by the time
+the particle path calls this (defaulted to additive), so blended systems all
+qualify.
+
+**The test uses the AUTHORED emissive, never the shader's final value.** The
+shader ends up white in three different situations and only one of them is a
+flame: authored full white (**109** systems), a fallback because the source
+authored BLACK (**159**), and a fallback because a chromatic curve supplies the
+colour instead (**320**). Keying the flame test on the final value would skip the
+depth fade on all **479** fallback cases — including the smoke plume in
+`fire\fireopensmallsmoke.nif`, which authors (0,0,0) and is exactly the kind of
+surface the fade exists for.
+
+### <a id="effect-shader-vertex-colors"></a>The vertex-colour flag must match the data
+
+SSE renders geometry black when `slsf_2_vertex_colors` disagrees with what the
+mesh data actually carries, so the flag is set from `has_vertex_colors` rather
+than assumed. Vertex alpha rides along with it, which is what dims layered flame
+quads correctly.
+
+### <a id="flame-brightness-is-authored"></a>Flame brightness: the authored emissive, never the filename
+
+An earlier revision matched `fire`/`flame`/`torch` in the diffuse path (minus a
+smoke/mist/fog/dust/steam/cloud veto) and boosted anything that hit to
+`emissive_multiple` 1.5. That is classification by filename and it is wrong in
+both directions: in Oblivion's own tree it caught `textures\lights\torch02.dds`
+— the WOODEN HANDLE, whose host `lights\torch02noflame.nif` has no flame in it
+at all — and it can only ever work for meshes following Bethesda's naming, never
+for Nehrim, Morroblivion or any third-party plugin.
+
+Oblivion states the brightness itself, per SHAPE, in
+`NiMaterialProperty.emissive_color`. Measured across every particle system in
+`meshes/` (all **778**) the two populations do not overlap:
+
+| | mesh / shape | emissive |
+|---|---|---|
+| flames | `fire\firetorchlarge` "Fire" | (1.000, 1.000, 1.000) |
+| | `crtfirelogs` "PCloud08BigFlame" | (1.000, 1.000, 1.000) |
+| fog | `fx\fxcloudthick01` "Cloud" | (0.078, 0.078, 0.078) |
+| | `fx\fxcloudthin01` "Cloud" | (0.047, 0.047, 0.047) |
+| | `fx\fxdustcloud01` "PCloud02v" | (0.337, 0.337, 0.294) |
+
+Distribution: **227** author full 1.0 white, **190** a dim <0.5, **202** in
+between, **159** author black (which already falls back to white). The authored
+value IS the discriminator, at better than 12× separation, and it is per-shape —
+which matters because `firetorchlargesmoke.nif` holds a flame AND a smoke plume
+in one file, and any per-file test must give them the same answer.
+
+**The boost is 1.5, not 1.0.** 1.0 is the mode across all vanilla FX, but that
+population is mostly smoke, mist and glow planes. Restricting the census to the
+shapes that match this branch — vanilla FX that are full-white AND
+`soft_effect=0`, i.e. self-lit surfaces mounted against geometry — makes 1.0 the
+minority:
+
+| mult | 1.0 | 1.1 | 1.25 | 1.5 | 1.6 | 2.0 | 3.0 |
+|---|---|---|---|---|---|---|---|
+| n | 16 | 9 | 6 | 5 | 43 | 6 | 5 |
+
+**74 of 90** are above 1.0, median 1.6, with the burning cores clustered at the
+top: `torchsconce01` pFireballCore04 1.50 (Torch:0 1.25), `giantcampfire01burning`
+PCloudForgeSparks 1.25, `fxsmokelargeclose01` Flames 1.60. The 1.0 entries are
+`*off*` variants and non-flame parts (GlowMesh, lamp bodies).
+
+The flames commit's 1.5 was therefore the RIGHT VALUE on the wrong test. Holding
+every flame at a neutral 1.0 made `fire\fireopensmall.nif` and its siblings
+visibly dimmer, which the project owner spotted in game. 1.5 sits inside the
+vanilla cluster and is what the previous build shipped, so it is also the
+no-regression choice.
+
+## Rewriting a texture path into the `tes4\` tree
+<a id="rewrite-tex-path"></a>
+
+**Code:** `rewrite_tex_path` in `asset_convert/nif/tex_paths.py`
+
+**Normalise the separator FIRST.** Oblivion NIFs use both, sometimes in the same
+file, so testing only for `textures\` let a forward-slash
+`textures/lowres/foo.dds` fall through to the else branch and come out as
+`Textures\tes4\textures/lowres/foo.dds` — a path that resolves to nothing, and
+the LOD tiles then reference 100 textures that do not exist.
+
+**`textures\lowres\` is dropped.** It is an Oblivion `_far.nif` authoring
+convention for low-resolution LOD copies; pyffi ships a spell that writes exactly
+this prefix, documented "used mainly for making _far.nifs". We ship no lowres
+tree — the converted textures live at the normal path — so dropping the segment
+makes the reference resolve to the real texture.
+
+**A leading `data\` is stripped.** It is an authoring slip Oblivion tolerates (it
+resolves paths from the Data folder either way) and Skyrim does not. Measured
+across Nehrim's **12,437** source meshes: **4** distinct textures in **10** meshes,
+among them `dwarven\rock02.dds` in **7**. Left in, the reference came out as
+`Textures\tes4\data\textures\…` — nothing there, AND the prune then deleted the
+real texture, because the manifest key never matched the shipped path.
+
+## Resolving a source texture through the master's tree
+<a id="texture-fallback-roots"></a>
+
+**Code:** `resolve_source_texture`, `master_texture_roots` in
+`asset_convert/nif/shaders.py`
+
+[Master-export blindness](../../CLAUDE.md#master-blindness), the asset half. An
+imported mod ships only the files it changes; everything else lives in its
+MASTER's export tree, which deriving the texture root from the mesh path can
+never reach. Measured on the author's parallax mod: of the **3357** distinct
+texture paths its **8665** meshes reference, **1464** were in the mod and **1602**
+ONLY in `Nehrim.esm`. Unreachable means no height map and no specular verdict, so
+the resolver falls back through the master roots in order.
+
+## Material defaults come from vanilla, not from Oblivion
+<a id="shader-material-defaults"></a>
+
+**Code:** `_set_material_defaults` in `asset_convert/nif/nif_converter.py`
+
+These were once never assigned at all, so every shape shipped at pyffi's
+defaults — glossiness 0.0 with a BLACK specular colour and the specular flag
+on, measured at **100% of 3931** shaders in our own output.
+
+The replacements are vanilla's modes, not Oblivion's values:
+
+| Field | Value | Evidence |
+|---|---|---|
+| glossiness | 80 | Vanilla shader type 0 has 80 as both median AND mode — **1333 of 2961** sampled shaders, and the modal value in **12 of 15** top folders. |
+| specular colour | white | White in **56%** of vanilla, black in **3%**. |
+| specular strength | 1.0 | The mode. Arcane University puts the typical band at 0.25–1.0, which vanilla's own 2.2 and 3.0 outliers ignore, so the mode is taken and the tail is not. |
+
+**Oblivion's glossiness is deliberately NOT carried over.** Its median is 10
+with **59.4%** of shapes sitting on exactly 10 — an authoring default rather
+than a chosen value — and 10 in Skyrim is what HAIR uses: a very wide highlight.
+
+Specular strength is uniform on purpose: the modulation belongs in the normal
+map's alpha, not here. The spec-mask check still runs, because its per-category
+counters are what tell the texture stage how much it had to synthesise.
+
+## Texture slots are never left empty
+<a id="texture-slots-never-empty"></a>
+
+**Code:** `_fill_texture_slots` in `asset_convert/nif/nif_converter.py`
+
+**Slot 0, the diffuse.** A shape with no `NiTexturingProperty` at all is legal
+in Oblivion, which renders it with the flat `NiMaterialProperty` colour. Skyrim
+has no such mode: `BSLightingShader::SetupMaterial` binds the diffuse
+UNCONDITIONALLY (SkyrimSE.exe 1.6.659 `+0x1412138` → `+0x1415790`,
+`mov rax,[rdx+0x48]` with `rdx = material->diffuse`), so a null diffuse is an
+access violation the moment the shape is drawn. Vanilla never exercises that
+path: **0 of 772** `BSLightingShaderProperty` shapes sampled across Skyrim's own
+meshes ship an empty slot 0.
+
+`white.dds` is Skyrim's own neutral texture, so multiplying it by the material
+colour already carried across reproduces Oblivion's flat shading exactly.
+
+**Slot 1, the normal.** The normal path is DERIVED from the diffuse, so it is a
+guess rather than authored data, and Oblivion content frequently has no `_n`
+beside the diffuse at all. Measured on the shipped tree before this check
+existed: **1904 of 20696** lighting shaders (**9.2%**) named a normal map with
+no file behind it, all fabricated at this one site.
+
+Skyrim null-checks slot 1 (`+0x1412144`, `test rax,rax / je`), so a dangling
+path does not crash — it renders with NO normal, which vanilla never does (**0
+of 8740** shapes sampled across architecture, dungeons, clutter and weapons ship
+an empty slot 1). Those are pointed at the shared flat normal instead, which
+carries the same constant specular mask the texture stage bakes into maskless
+maps.
+
+The stand-in is the LAST resort: `resolve_normal_for` first tries the variant's
+own `_n`, then the one its base name shares across colour variants. When the
+shape genuinely has no texturing property, slot 1 stays empty on purpose —
+vanilla ships normal-less shapes, so a fabricated `_n` would only dangle.
 
 ## Contents
 
@@ -178,6 +472,157 @@ of, and `collision.py` already translates it — but only for physics. Note it i
 per rigid BODY, not per shape: a first census read 30% "Skin" until it turned
 out all of it came from one goblin ragdoll skeleton with 18 bodies.
 
+## Dropping the alpha property on a parallax shape
+<a id="hilight2-alpha-dropped"></a>
+
+**Code:** `process_geometry` in `asset_convert/nif/nif_converter.py`
+
+Oblivion's `APPLY_HILIGHT2` (4) is its PARALLAX switch: the diffuse's alpha
+channel is a HEIGHT FIELD, not a transparency mask. Skyrim reads that same
+channel as plain transparency, so the SI mania/dementia rocks render see-through,
+and where the surface is low they disappear completely — `seisland`'s body
+texture `mrock01.dds` averages alpha 133, i.e. the whole island ~50% transparent.
+
+**These are provably not cutout masks.** 97–99% of texels are PARTIALLY opaque
+with almost no fully-transparent region (`mrock01` **97.9%** ≥ 1 but only **22%**
+≥ 254; `DMRockSideRoot01` **99.0%** ≥ 1 and **0%** ≥ 254) — mid-tone-dominant,
+which is exactly a height map's profile and not a cutout's.
+
+Vanilla agrees on the remedy: across **600** landscape/clutter meshes,
+**1088/1313** shapes ship NO `NiAlphaProperty` at all, and the commonest value on
+the rest is `0x12EC` (test, blend OFF). Vanilla rock simply does not alpha-blend.
+So the property is dropped and the rock renders solid. This is right whether or
+not `--parallax` is on; with it, the height also survives as a real slot-3 map.
+
+**Only the parallax case is touched.** Genuine transparency (gems, bottles,
+curtains, potion liquids) ships MODULATE/HILIGHT and keeps its alpha exactly as
+authored.
+
+**A shape that KEEPS its alpha property is evidence about the texture.** It reads
+the diffuse's alpha as blend weight or test threshold — either way as opacity —
+so the channel is not a height field here, whatever the texture-level classifier
+decided. That diffuse must keep its alpha and may not be stripped to BC1 later.
+Measured on the author's Nehrim parallax mod: **1** shape of **39,201**, but the
+converter runs on plugins nobody has measured.
+
+### <a id="detail-overlay-diffuses"></a>Detail-overlay diffuses, recorded for LOD
+
+A `HILIGHT2` diffuse is recorded as a DETAIL OVERLAY when the source authored it
+that way. This is not about the `NiAlphaProperty` — most overlay shapes ship none
+(`RockGreatForest645`) — it is about the TEXTURE, whose alpha is a blend weight
+rather than a mask.
+
+Harmless in the full mesh, since nothing samples that channel as transparency.
+But object LOD does: LODGen stamps every baked shape `slsf_2_lod_objects` and the
+LOD shader reads diffuse alpha as opacity. The LOD stage flattens the alpha on a
+LOD-local copy of exactly these textures — see `lod_gen._force_opaque_lod_diffuses`.
+
+The key is the CONVERTED path (post-`tes4\` rewrite), because that is what the
+shipped mesh — and therefore the baked `.bto` tile — actually references.
+
+## Deriving a normal map: the base-name fallback
+<a id="normal-base-name-fallback"></a>
+
+**Code:** `resolve_normal_for`, `_resolve_map_for` in `asset_convert/nif/shaders.py`
+
+Oblivion does not store the normal's path — it appends `_n` to the diffuse — and
+when the variant's own `_n` is absent it falls back to the BASE name, the part
+before the last `_`. That is intended engine behaviour, confirmed by the project
+owner from their own research (2026-08-26); it is why `BrumaWoodPost_Dark.dds`
+and `BrumaWoodPost_Grey.dds` both render with `BrumaWoodPost_n.dds` and ship no
+normal of their own.
+
+Deriving from the full name alone invents `BrumaWoodPost_Dark_n.dds`, which
+exists nowhere; dropping straight to a flat stand-in would discard a real normal
+sitting right beside it.
+
+Measured over the merged Nehrim texture tree: of the variants whose own `_n` is
+missing, **201** have one under the base name, against **48** that ship their own
+alongside the base's — and those 48 are unaffected, because the variant's own is
+tried FIRST. The suffixes involved are colour and state words throughout
+(`_dark`, `_black`, `_red`, `_harvested`, `_haunted`, `_01`), i.e. variants of one
+surface rather than different materials.
+
+Only ONE separator is stripped, and only when the result actually exists on disk
+— this never guesses a path into being.
+
+**The rule is not specific to normal maps.** It applies to every derived map,
+glow (`_g`) included, which is why `_resolve_map_for` takes the suffix as a
+parameter. Keeping it generic means the next slot inherits it instead of
+reinventing it — the failure mode this replaced, where `_n` had the rule and
+nothing else would have.
+
+`_normal_exists` resolves through the master fallback for the same reason
+[`resolve_source_texture`](#texture-fallback-roots) does: a mod's mesh usually
+names a normal that lives in its BASE's tree, and without the fallback every one
+of those would look absent and get needlessly replaced by the stand-in.
+
+## Parallax is never set on a distant-LOD tier mesh
+<a id="parallax-not-on-lod-tiers"></a>
+
+**Code:** `_is_lod_tier_mesh`, `apply_parallax` in `asset_convert/nif/shaders.py`
+
+Three independent reasons, any one of which is sufficient.
+
+**It is invisible.** A `_far.nif` is only ever drawn at LOD distance, where a
+per-pixel height offset resolves to nothing.
+
+**It does not survive.** The LOD stage regenerates these from the full model
+with `force_regen_generated=True`, and that path knows nothing about parallax —
+it drops the vertex colors the heightmap shader needs while leaving shader type
+3 in place. `parallax_check.py verify` found exactly that: **60** malformed
+shapes, every one in a `_far`/`_far8`/`_far16` mesh, all reported as "no vertex
+colors (renders unlit-black)".
+
+**It made the output ORDER-DEPENDENT**, which is the real defect: run meshes
+then LOD and the tier meshes come out clean; run LOD then meshes and they keep a
+half-built parallax shape. The shape count moved **1495 → 1555** purely on that
+ordering.
+
+Skyrim's heightmap shader also needs vertex colors present or the shape renders
+unlit-black, so `apply_parallax` synthesises all-white ones where the source has
+none — measured on Nehrim, **848 of 1551** converted shapes have none of their
+own. All-white is neutral and is what the in-game test shipped.
+
+## Specular strength is uniform, and the modulation lives in the texture
+<a id="spec-strength-uniform"></a>
+
+**Code:** `SPEC_STRENGTH` in `asset_convert/nif/shaders.py`
+
+EVERY shape gets the same specular strength. Where a source has no usable mask,
+`landscape_normals.normalize_specular_alpha` bakes a constant 64/255 into the
+texture instead — 64/255 = 0.251, i.e. EXACTLY the per-mesh 0.25 this used to
+write, so the two encodings render identically.
+
+**The point is not the pixels, it is who can change them afterwards.** A
+strength baked into 20,000 NIFs is a TRAP for anyone who later ships real
+specular maps: their good mask would be multiplied by 0.25, and fixing it means
+editing every mesh rather than dropping in a texture. The alpha is overridable
+by definition. Uniform 1.0 is also vanilla's mode (**44.7%**).
+
+It also retires the double damping recorded in `shader_value_mapping.md`:
+landscape was 0.125 (alpha) × 0.25 (strength) = 0.03, and is now 0.125.
+
+## Texture classification is cached per worker
+<a id="texture-classification-caches"></a>
+
+**Code:** `_PARALLAX_ALPHA_CACHE`, `_SPEC_MASK_CACHE` in
+`asset_convert/nif/shaders.py`
+
+Classifying either a diffuse alpha or a normal map's mask means a full scan of
+the texture's top mip, and one texture is shared by many shapes: **2359** flagged
+shapes share only **130** diffuse textures, so without the cache the same DDS
+would be decoded eighteen times over.
+
+Both are keyed on the RESOLVED ABSOLUTE PATH, so they hold per worker process
+and stay deterministic — a key derived from the mesh-relative path would collide
+across plugins whose trees resolve differently.
+
+`_plan_parallax` counts its skips per CATEGORY rather than into one "skipped"
+counter: two thirds of the flagged textures have nothing to carry, and the build
+log has to say WHY or the next person re-measures all 130 of them. `has_spec_mask`
+does the same, because "no specular" has three quite different causes.
+
 ## Known gaps
 <a id="known-gaps"></a>
 
@@ -228,6 +673,83 @@ shape, so moving the value out of the mesh and into the texture is visually
 neutral -- and from then on a modder who ships a real mask simply overrides
 it, instead of having to discover and undo a shader parameter baked into
 thousands of NIFs.
+
+## The glow shader: derived, not read
+<a id="glow-shader"></a>
+
+**Code:** `apply_glow` in `asset_convert/nif/shaders.py`
+
+Oblivion does not require the NIF to name its glow texture. It derives
+`<diffuse base>_g.dds` exactly as it derives `_n`, so most glowing shapes name
+nothing at all: measured over a random 1200-mesh sample of Nehrim, **227** shapes
+have a `_g` on disk for their diffuse and only **31** name it in
+`NiTexturingProperty`'s glow slot. Reading the slot alone therefore missed **86%**
+of the glow content. The named path still wins when present — it is authored —
+and derivation is the fallback, base-name aware via `_resolve_map_for`.
+
+**Without this the conversion is not merely incomplete, it is WRONG.** Arcane
+University on Emissive Color: "if the shader type is not 'Glow Shader', it will
+make the WHOLE MESH glow", while the glow shader "allows per-texel glow …
+applied additively using the color map in texture slot 2". So a rune stone whose
+glyph should glow was flooding its entire surface with the emissive colour.
+
+Slot 2 and shader type 2 come from AU's texture-slot table: "2 | Glow | Glow map
+/ Skin Tint | none | `_g` / `_sk.dds` | BC1". The environment-map flag is cleared
+alongside — AU: "The environment map shader is incompatible with glow mapping."
+
+**Emissive is defaulted to white when the source left it black.** Of **60** type-2
+shapes sampled across Skyrim's own meshes, ALL set `own_emit` and carry the glow
+flag, **55 of 60** carry a slot-2 texture, the modal emissive colour is white (21)
+and the modal multiple is 1.0. Skyrim MULTIPLIES the glow map by the emissive, so
+leaving it black would keep the map and show nothing.
+
+**Glow BLOCKS parallax.** `skyrim_shader_type` holds ONE value, so type 2 (glow)
+and type 3 (height) cannot coexist. Glow wins: the glow map is authored content
+while our height map is derived from the diffuse, and a surface that was meant to
+glow and does not is far more noticeable than one that is merely flat.
+
+A named glow path that resolves nowhere is counted and dropped, never invented —
+absence of glow is the neutral state.
+
+## Shader float controllers: the flags Oblivion does not set
+<a id="shader-float-controller-flags"></a>
+
+**Code:** `attach_tex_transform_ctrls` in `asset_convert/nif/shaders.py`
+
+Vanilla chains one `BS*ShaderPropertyFloatController` per animated UV channel
+through `next_controller` — `fxwaterfallthin512x128` does U Scale → V Offset →
+U Offset — so the re-emit mirrors that, and anything already on the shader (the
+flip-book U-Offset controller, say) is kept at the END of the chain.
+
+`flags = 0x48` is `Active | Compute Scaled Time`, the value on every vanilla
+shader float controller. **Oblivion ships 0x08 (Active only), and without the
+scaled-time bit the curve does not advance.** The source's cycle bits (0x06) are
+preserved so CLAMP/REVERSE loops survive.
+
+The `NiFloatData` is reused as-is: both engines interpret the curve as a UV-space
+offset/scale over time, so the Oblivion keys (waterfall V 0.0 → −2.0 over 3.3s)
+are already correct. `NiFloatInterpolator.float_value` takes the vanilla
+"use data" sentinel (−FLT_MAX).
+
+### <a id="niuvcontroller-has-no-rtti"></a>NiUVController has no RTTI in Skyrim
+
+`NiUVController` is Oblivion's UV-scroll animation (Morrowind's Ghostfence
+shimmer, `ex_gg_fence*`). **SkyrimSE.exe has no `NiUVController` RTTI at all** —
+searching its RTTI for "NiUV" returns only `NiUVData` — so `NiStream` cannot
+construct the block, and a link to that slot hands `NiPointer` a non-NiObject
+pointer: the engine then does `lock cmpxchg` on a "refcount" inside read-only
+`.rdata` and takes an access violation while loading the mesh.
+
+The curve itself survives. `NiUVData.uv_groups` holds the same U/V offset and
+scale key groups a `NiTextureTransformController` would, so each populated group
+becomes one `BS*ShaderPropertyFloatController` by the same path. The harvest must
+therefore run BEFORE the strip that removes the dead controller.
+
+Harvesting skips `TT_ROTATE` (no Skyrim equivalent), non-base texture slots
+(Skyrim shaders expose one UV transform, applied to all maps), and curves that
+cannot be translated — a `NiBlendFloatInterpolator` is driven by a
+`NiControllerManager` sequence rather than inline keys (**46/127** in Nehrim, all
+on skull/fireball meshes), and a single key is a constant, not an animation.
 
 ## The Oblivion property enums the converter keys off
 <a id="ob-enums"></a>

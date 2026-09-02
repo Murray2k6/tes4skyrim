@@ -852,7 +852,89 @@ channels gone, no ragdoll (`has_ragdoll=False`) and a `Death` state with no
 end trigger, the graph held the clip's last frame.
 
 <a id="ghost-dissolve-solution"></a>
-### ✅ THE FIX: `Actor.AttachAshPile` — Skyrim does this natively
+### <a id="pile-activation-phantom"></a>The pile's activation volume is a PHANTOM, not a rigid body
+
+Every vanilla ash pile is built the same way (`ashpileghost01`, `ashpile01`,
+`ashpileghostblack`, byte-read from `references/Skyrim Meshes`): a child NiNode
+`Box01` carries `bhkSPCollisionObject`(flags 129) -> `bhkSimpleShapePhantom`
+(layer 15, NONCOLLIDABLE) -> `bhkTransformShape` -> `bhkBoxShape`, the
+transform shape lifting the box over the mesh (vanilla ghost pile: 64x64x16
+game units, raised z 0..16).
+
+A fixed `bhkRigidBodyT` on the same layer 15 was tried first: it shipped with
+the box measured correct (half-extents 10.4/10.4/2 on the pile's own geometry)
+and **the pile was still unselectable in game** — the crosshair pick never sees
+the body, only the phantom.
+
+The box covers the FULL geometry extents and the Z half-extent floors at 8 game
+units, vanilla's own pick-box thickness, so a flat puddle still has a
+comfortable crosshair target. The float block layout is copied from a real
+Oblivion-authored phantom (`ctrigtripwire01.nif`): 7 zeros, then three
+`[1,0,0,0,0]` rows. BSXFlags bit 1 (Havok) is what tells the engine the static
+has collision to trace against at all — without it the converted pile is inert
+even with a phantom.
+
+**The box is written in OBLIVION havok units**, because `convert_nif` runs
+collision through the usual Oblivion->Skyrim rescale afterwards
+(`collision._HAVOK_SCALE = 0.1`). Oblivion havok -> game units is x7, so a
+game-unit extent is divided by 7 and ends up correct after the x0.1. Writing
+Skyrim-scale values instead produced a box exactly 0.10x the geometry on every
+axis — the double-scale that measurement caught.
+
+The holder's own `bhkCollisionObject` is **not** reusable: it belongs to the
+living creature's rig (a limb proxy), so it is the wrong size and in the wrong
+place. Measured on the shipped meshes it covered 38% of the ghost pile's width
+at 2.3x its height, offset 10 units sideways, and just 4% of the wraith pile's.
+
+### <a id="pile-transform-baking"></a>Baking the pile where the death clip leaves it
+
+    final = parent_of_holder_world
+          + holder_local_on_the_clips_last_frame
+          + (shape_rest_world - holder_rest_world)
+
+The last term keeps the shape's offset relative to its holder; the middle term
+is where the clip actually parks the holder. Both source creatures land on the
+ground this way (ghost pile world Z 6.7..12.9, wraith 1.6..16.6, Scene Root 0).
+
+Two traps, both measured:
+
+- **Dedupe by identity.** pyffi's `tree()` yields a block once per reference and
+  the ghost's ectoplasm shape is referenced twice; transforming it twice moved
+  the pile by the clip offset TWICE (Z 21.2 instead of 10.6).
+- **Write the composed world transform straight onto the node** rather than
+  round-tripping the matrix. The ghost's ectoplasm shape has a 0.57 SCALE baked
+  into its rotation rows and `set_transform()` re-decomposes that, so arithmetic
+  on `m_43` did not survive — again Z 21.2 instead of 10.6.
+
+The pile is then centred on its own origin in X/Y. Whatever offset survives is
+drift inside the creature's rig (the ghost's from the death clip, the wraith's
+from the shape's authored rest position), and a placed object must straddle the
+point `AttachAshPile` drops it at, which is also the point the engine builds the
+activation target around. Z is left alone: that is the authored ground drop.
+
+### <a id="merged-shapes-stay-at-the-root"></a>Merged shapes stay at the ROOT
+
+Do NOT hang a skinned shape off its attachment bone. The engine applies the
+shape's parent chain ON TOP of the skinned result, so a body under
+`SkinAttachment` (a child of the animated `Bip01 NonAccum`) gets that animation
+twice and leaves the view entirely — reported in game 2026-08-26 as the ghost
+losing its whole body while still alive, with only the skeleton-owned smoke
+left. Vanilla agrees: the working dog merge keeps `WolfBody` at the root, and
+Oblivion's own part NIFs are standalone roots the engine attaches at runtime,
+never children inside a mesh file.
+
+The attachment node still matters for REST visibility: the authored hidden bit
+is carried onto the shape (the shrink blob must not show on a living ghost)
+without moving it.
+
+**The 80-bone cap runs after grafting.** SSE renders a skinned shape by
+memcpy'ing one 3x4 matrix per skin bone into a fixed 80-matrix buffer (shadow
+pass), so >80 bones is a CTD (imp: 85, in-game verified 2026-07-10). The merge
+of the lightest leaf bones into their parents must run after grafting because
+only the merged rig has bone hierarchy — Oblivion part NIFs store bones flat —
+and it invalidates the parts' `NiSkinPartition`s, so those are regenerated.
+
+### <a id="creature-mesh-merge"></a>✅ THE FIX: `Actor.AttachAshPile` — Skyrim does this natively
 
 **Skyrim dissolves creatures into piles of goo exactly like Oblivion, and
 ships a GHOST-tinted pile for it.** The pieces were already in the engine:
@@ -881,7 +963,7 @@ geometry lifted straight out of the creature's own `skeleton.nif`:
 | ghost | `AttachmentsBip` | `Bip01 ectoplasm:0` | 47 |
 | wraith | `Attachments` | `Cloak06:0` (a flat slab UNDER the body -- its remains, despite the name) | 278 |
 
-`nif_converter.extract_death_pile` lifts the subtree, bakes it where the death
+`creature_mesh.extract_death_pile` lifts the subtree, bakes it where the death
 clip leaves it, and the pipeline runs it through `convert_nif` (the raw
 extract is still Oblivion-format uv2=11 and SSE cannot load it -- the shipped
 piles are uv2=83 with `BSLightingShaderProperty` + `NiAlphaProperty`).

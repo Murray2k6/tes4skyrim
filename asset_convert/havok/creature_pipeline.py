@@ -56,6 +56,33 @@ def _namespace_for(out_meshes_dir: str) -> str:
         os.path.dirname(os.path.normpath(out_meshes_dir))))
 
 
+def _widen_hkx_to_amd64(proj_dir, convert):
+    """Rewrite every generated .hkx in place as 64-bit.
+
+    SSE silently fails the behavior-graph load on a 32-bit project, leaving an
+    invisible actor.  Generation and validation run 32-bit WIN32 because hkxcmd
+    cannot read AMD64 back, so this is the LAST step.
+    """
+    for dirpath, _dirs, files in os.walk(proj_dir):
+        for fn in files:
+            if fn.lower().endswith('.hkx'):
+                convert(os.path.join(dirpath, fn))
+
+
+def _clear_stale_nifs(proj_dir):
+    """Drop last run's part and merged NIFs from the project root.
+
+    Root level only: the skeleton lives in 'character assets'.
+    """
+    for fn in os.listdir(proj_dir):
+        if not fn.lower().endswith('.nif'):
+            continue
+        try:
+            os.remove(os.path.join(proj_dir, fn))
+        except OSError:
+            pass
+
+
 def _convert_creature(creature_dir: str, name: str, out_meshes_dir: str,
                       part_sets: list = None, fps: float = 30.0,
                       sound_slots: dict = None,
@@ -72,9 +99,10 @@ def _convert_creature(creature_dir: str, name: str, out_meshes_dir: str,
     None, every .nif in the folder is treated as one set."""
     from asset_convert.havok.hkx_behavior import generate_creature_project
     from asset_convert.havok.hkx_xml import convert_hkx_to_amd64
-    from asset_convert.nif.nif_converter import (
-        convert_nif, merge_creature_body, source_attachment_node,
-        source_hidden_attachment_nodes, extract_death_pile)
+    from asset_convert.nif.nif_converter import convert_nif
+    from asset_convert.nif.creature_mesh import (
+        extract_death_pile, merge_creature_body, source_attachment_node,
+        source_hidden_attachment_nodes)
 
     manifest = generate_creature_project(creature_dir, name, out_meshes_dir,
                                          fps=fps, sound_slots=sound_slots,
@@ -83,23 +111,8 @@ def _convert_creature(creature_dir: str, name: str, out_meshes_dir: str,
                                          namespace=namespace)
     proj_dir = os.path.join(out_meshes_dir, manifest['dir'])
 
-    # SSE only loads 64-bit havok files: a 32-bit project makes the engine
-    # silently fail the behavior-graph load → invisible actor (collision
-    # capsule still works).  Generation/validation above is 32-bit WIN32
-    # (hkxcmd can't read AMD64 back), so convert everything in place LAST.
-    for dirpath, _dirs, files in os.walk(proj_dir):
-        for fn in files:
-            if fn.lower().endswith('.hkx'):
-                convert_hkx_to_amd64(os.path.join(dirpath, fn))
-
-    # Clear stale part/merged NIFs from earlier runs (root level only — the
-    # skeleton lives in 'character assets').
-    for fn in os.listdir(proj_dir):
-        if fn.lower().endswith('.nif'):
-            try:
-                os.remove(os.path.join(proj_dir, fn))
-            except OSError:
-                pass
+    _widen_hkx_to_amd64(proj_dir, convert_hkx_to_amd64)
+    _clear_stale_nifs(proj_dir)
 
     # Convert every non-skeleton part NIF once into an ISOLATED staging dir.
     # Merges must never read a file another merge has written: creature

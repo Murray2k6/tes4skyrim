@@ -159,6 +159,181 @@ The `-ExtractAssets` flag triggers BSA extraction and mesh conversion:
   3. **`slsf_1_soft_effect` was never set anywhere.** Without it a blended FX quad intersecting solid geometry is hard-cut along the intersection line, so the billboard shows **its own quad edge** — the reported rectangle. Vanilla census (1,198 BSEffectShaderProperty shapes across meshes/effects + meshes/dungeons): additive `0x100d` → soft_effect=1 in **417/470**, blended `0x10ed` → **224/362**, *no* NiAlphaProperty → soft_effect=0 in **322/332**. So the rule is **blended FX gets the fade, unblended does not**; `soft_falloff_depth` = **100.0** (the commonest value, 250/521 on mist/smoke/fog geometry, and what vanilla uses for ambient room fog).
 - **`lighting_mode == 0` is NOT the only unlit indicator — ADDITIVE BLENDING IS THE SECOND (same fix)**: the FX/lit discriminator was `NiVertexColorProperty.lighting_mode == LIGHTING_E`, but **many Oblivion FX meshes ship no `NiVertexColorProperty` at all**, so the mode defaulted to "lit" and genuine FX geometry took `BSLightingShaderProperty` — lit, normal-mapped, no soft fade. `fxmistgroundeffect01` (the Ayleid-ruin ground mist the user saw in Vilverin) is exactly this: additively-blended AtmosphereCloud01 planes with no vertex-colour property, so **all 30 shapes** were misrouted. Across Oblivion's own FX directories **76 of 179** blended shapes declare no lighting_mode. A surface whose NiAlphaProperty sets **dst=ONE** adds its colour to the framebuffer and therefore cannot be lit geometry (lighting it double-counts the light it already contributes). Vanilla agrees without exception: of 64 additively-blended shapes sampled, **64/64 use BSEffectShaderProperty, 0 use the lighting shader**. **Plain alpha blending is deliberately excluded** — the same census shows 3 legitimate BSLightingShaderProperty cases (glass/ice), so widening the rule to all blending would misroute real lit geometry. Blast radius measured before shipping: across a 250-mesh sample of architecture/clutter/dungeons only 10 shapes newly reroute, all `textures\effects\` blood decals and FlameTower quads.
 
+## Rewriting the particle modifier chain
+<a id="psys-modifier-vocabulary"></a>
+
+**Code:** `_skyrimize_modifiers`, `_psys_order_for` in
+`asset_convert/nif/particles.py`
+
+The SSE particle engine drives only its own modifier vocabulary; an Oblivion
+chain left as authored leaves the particles INVISIBLE. Four rules:
+
+| Oblivion | Skyrim |
+|---|---|
+| `NiPSysGrowFadeModifier` | `BSPSysScaleModifier` (60-entry scale ramp) |
+| `NiPSysColorModifier` | `BSPSysSimpleColorModifier` |
+| — | `BSPSysLODModifier` injected when absent (universal in vanilla) |
+| emitter / spawn / rotation / gravity / position / bound-update / age-death | kept as-is |
+
+`NiPSysModifier`'s Name/Order/Target/Active are set on every modifier, and the
+list is sorted by vanilla's processing `order` bands (census of
+`slighthousefire.nif`). The engine processes modifiers in ascending order, so the
+BS* rewrites and the injected LOD must slot into the same bands or the system
+misbehaves.
+
+**The scale ramp.** `grow_time`/`fade_time` are absolute seconds, but without the
+emitter's life span they are treated as fractions of a unit lifetime — Oblivion's
+fire values are small (grow 0.0, fade 0.2), and vanilla ramps peak ~1.0 and taper
+to ~0.1.
+
+### <a id="authored-particle-color"></a>The particle colour is AUTHORED, never a palette
+
+Skyrim's `BSPSysSimpleColorModifier` holds exactly three colours plus the
+percentages at which each is reached, while Oblivion's `NiPSysColorModifier`
+points at a `NiColorData` curve of arbitrary length — so that curve is sampled at
+its start, middle and end.
+
+**This used to write a fixed warm-orange "fire palette" for every particle system
+in every plugin**, which is why the ghost's ectoplasm smoke came out orange/black
+instead of the pale green its `NiColorData` actually specifies
+(0.70, 0.83, 0.75 → 0.51, 0.65, 0.56). With no authored curve at all, a neutral
+white ramp with an alpha envelope is the honest default — it tints nothing rather
+than inventing a hue.
+
+### <a id="alpha-envelope-vs-color-curve"></a>An alpha envelope is not a colour curve
+
+Oblivion uses `NiPSysColorModifier` for two unrelated jobs, and they need
+opposite handling when deciding the shader tint:
+
+- **an ALPHA ENVELOPE** — an achromatic ramp, R==G==B at every key, whose only
+  real content is the alpha fade. `fxcloudthick01`, `fxcloudthin01` and
+  `fxdustcloud01` all ship exactly (0,0,0,0) → (1,1,1,1) → (0,0,0,0). It
+  contributes NO colour, so the material's `emissive_color` is the only
+  brightness the effect has.
+- **a real COLOUR CURVE** — chromatic keys, R≠G≠B. `creatures/ghost`'s `PArray*`
+  systems ramp (0.702, 0.831, 0.745) → (0.514, 0.647, 0.561), the ghost's pale
+  green, against a near-black 0.039 material. Here the CURVE is the authored
+  colour and the material is just a carrier, so deferring to the curve is right —
+  carrying 0.039 through would multiply the green down to ~0.027 and render the
+  ghost black.
+
+Measured over **778** particle systems in `meshes/`: of the **190** that author a
+dim (<0.5) emissive, **120** have an achromatic curve and **70** a chromatic one.
+Telling them apart by whether the keys carry chroma is the authored test; "has a
+modifier at all" conflates the two and whitens both.
+
+Keys that are essentially black are ignored — they are the endpoints of an alpha
+envelope — and chroma is called only on a real spread (`hi > 0.02` and
+`hi - lo > 0.03`).
+
+### <a id="psys-shader-values"></a>The particle shader's values
+
+Flags match vanilla fire (`slighthousefire.nif` "Fireball"): `flags1` is
+`z_buffer_test` only, `flags2` is `vertex_colors` only — particles do not write
+depth, and they modulate colour per-vertex.
+
+**UV scale must be set explicitly.** PyFFI defaults it to (0,0), which collapses
+EVERY particle UV to the texture's top-left texel — transparent on flame textures
+— giving invisible particles. This was the fire-invisibility endgame bug
+(2026-07-05). Vanilla is offset (0,0), scale (1,1).
+
+`texture_clamp_mode` is **0xFF03**: a u32 packing clamp mode in the low byte
+(3 = WRAP_S|WRAP_T) with lighting influence in byte 1 (0xFF). Every vanilla fire
+effect shader uses this value.
+
+**`emissive_multiple` stays at the neutral 1.0.** 1.5 was once applied to EVERY
+particle system regardless of what it emits. It is a fire value (vanilla flame
+shaders sit at 1.25–1.5), but the same code path converts smoke, mist, steam and
+dust, and a 50% over-brighten on an additively-blended smoke plume makes it
+glaring and opaque instead of translucent. Vanilla's overwhelming default is 1.0
+(**852/1164** blended FX shapes); brighter values are authored per effect, not
+applied blanket. Oblivion states the intended brightness in
+`NiMaterialProperty.emissive_color`, so the multiple stays neutral and the
+authored colour does the dimming.
+
+Whitening the shader when the curve is merely an alpha envelope is what made
+Ayleid-ruin fog blinding: `fxcloudthick01` authors (0.078, 0.078, 0.078) against
+a plain (0,0,0,0)→(1,1,1,1)→(0,0,0,0) ramp, so whitening over-brightened it
+**12.8×** on additively blended geometry that Belda layers several planes deep. A
+`NiVertexColorProperty` alone is likewise not a colour source — every one of those
+fog meshes carries one — so it does not force the tint either.
+
+**Every particle system gets its OWN NiAlphaProperty.** Vanilla particles always
+have one (additive: src=SRC_ALPHA dst=ONE, flags `0x100d`), and without it they
+do not alpha-blend. Oblivion sources often SHARE one across several systems;
+vanilla Skyrim never does, so the block is cloned per system.
+
+**The emitter/update controller flags are OR'd to 0x48.** Oblivion ships
+`flags=0x08` (Active only); vanilla Skyrim uses 0x48/0x4c (Active | Compute
+Scaled Time, cycle bits preserved). The Compute-Scaled-Time bit (0x40) is
+default-true in Skyrim and drives the emitter's time base — without it the
+birth-rate interpolator can evaluate to 0. The bit is OR'd rather than
+overwritten because Oblivion's `NiPSysUpdateCtlr` carries CLAMP cycle bits (0x0c)
+that vanilla keeps (`campfire01burning` UpdateCtlr = 0x4c).
+
+**The NiFlipController is NOT attached to the particle system.** It targets
+`NiTexturingProperty`, which is gone by then, and attaching it to a
+`NiParticleSystem` causes an invalid-target crash. The static first-frame texture
+is used instead.
+
+**`bs_max_vertices` must be non-zero.** At UV2≥34 (BS202) `NiPSysData`'s
+per-particle arrays are NOT serialized — only boolean flags and
+`bs_max_vertices`. The particle pool size moves from `num_vertices` (Oblivion) to
+`bs_max_vertices` (Skyrim), and an empty pool crashes emitters trying to allocate
+into it. The Skyrim `NiPSysData` layout is hand-rolled by `pyffi_monkey_patch`
+Patch 4, since PyFFI's own layout is structurally wrong for `#BS202#`; that
+serializer always emits an empty inline pool with
+`BS Max Vertices = max(num_vertices, bs_max_vertices, 75)`.
+
+Every vanilla Skyrim particle system also carries a `BSPSysLODModifier`
+(**498/498** census), without which the system culls at all distances.
+
+### <a id="billboard-axis-fix"></a>Oblivion and Skyrim disagree on the billboard axis
+
+Oblivion mode-1 billboards keep local +Y up and +Z at the camera; Skyrim keeps
+local +Z up and −Y at the camera. Oblivion-authored flat-XY quads therefore need
+a −90° about-X rotation on their billboard node — byte-identical to vanilla
+`campfire01burning` "Plane05".
+
+**A wrapper this converter builds carries NO axis correction.** These meshes are
+authored +Y-up and their PLACED REFERENCES carry the stand-up rotation: censused
+across Oblivion.esm, **494** REFRs of the `Fire\*.nif` lights use RotX = ±90°
+(10/10 for FireTorchLargeSmoke, 188+51 of 395 for FireOpenSmall). The whole model
+— quads AND emitter markers — shares that one +Y-up frame, and the REFR rotates
+all of it together. Pre-rotating the quad to +Z-up made it the ONLY part in a
+different frame, so the REFR's −90° then laid it flat: the "third flame component
+on its side", with the smoke and flame beside it looking correct. Such wrappers
+are tagged so the later pass leaves them alone.
+
+### <a id="billboard-demotion"></a>Demoting a billboard that contains particles
+
+A billboard whose subtree holds a particle system is DEMOTED to a plain `NiNode`
+— a billboarding ancestor would spin the emitters — and its direct geometry
+children are wrapped in fresh billboard nodes instead.
+
+**The demoted node does NOT inherit the billboard's rotation.** A
+`NiBillboardNode` DISCARDS its own rotation at runtime and substitutes identity in
+view space — NifSkope's `BillboardNode::viewTrans` (`glnode.cpp`):
+`t = parent->viewTrans() * local; t.rotation = Matrix();`. So the authored
+rotation was never used for orientation, and copying it onto the plain
+replacement RESURRECTS a dead value: `firetorchsmall`'s "Sparks-Emitter" and
+`firecandleflame`'s "FlameParticles-Emitter" are billboards carrying
++Z=(0,−1,0), and reviving that aims the emitter sideways — the horizontal jet
+beside the upright flame.
+
+**EXCEPT when the node is an EMITTER MARKER.** Rotation-is-discarded applies to
+how a billboard DRAWS its subtree; a `NiPSysEmitter` reads its `emitter_object`
+node's orientation as the emission DIRECTION, and that is live data.
+`firecandleflame` authors quad and emitter in one +Y-up frame — quad identity with
+extent [1.3, 2.6, 0.0] (tall in Y), emitter [1,0,0][0,0,−1][0,1,0] whose local +Z
+maps to model +Y. Zeroing the emitter makes it +Z-up while the quad stays +Y-up,
+so the flame splits into an upright quad and a sideways particle jet, visible once
+the FlameNode marker rotates the pair into a +Z-up host.
+
+Particle modifiers in the subtree may reference the OLD billboard node
+(`emitter_object` / `gravity_object`), so those are remapped to the replacement or
+the reference dangles ("block is missing from the nif tree") and the sim breaks.
+
 ## NIF FlameNode → grafted converted flame (rewritten 2026-07-05, replaces the MPS/AddonNode substitution)
 <a id="nif-flamenode-grafted-converted-flame"></a>
 - Oblivion marks where a flame burns with an empty `FlameNode*` NiNode (a bare marker: name + transform, no children) and attaches a flame NIF there at RUNTIME (`fire\firecandleflame.nif` for candles/sconces/lamps/etc., torch flame for torches). 108 Oblivion meshes have them.
@@ -278,6 +453,887 @@ block after the swap must retarget *all* of them — it already handled
 - **FURN record linkage (CRITICAL)**: TES5 FURN `MNAM` bits 0-23 enable NIF marker POSITION index 0-23. TES4 MNAM bits indexed the Oblivion NIF's ENTRY list — passing the bitmask through after seat clustering leaves dangling bits and the engine seats NPCs at garbage positions FAR from the mesh. The shared algorithm lives in `asset_convert/nif/furniture_markers.py`; `tes5_import` (items.py `load_furniture_seats`, called in import Phase 0e) recomputes the same seat list from the source NIF and writes MNAM=(1<<n_seats)−1 + preserved high bits (0x40000000 sit-type / 0x80000000 bed-type, same in both games; beds add 0x08000000 MustExitToTalk like all vanilla beds) + WBDT(0,-1) + one FNPR per seat.
 - **Oblivion entry-restriction variants**: many TES4 FURN records share one NIF and enable different entry-marker subsets (SEChair01F/R/L, 19 LCBench01* variants like `Fall`=front row only, `RL`=ends only). Conversion carries this into per-seat FNPR entry flags: only the entry directions whose TES4 entry bit was enabled are allowed (seats with no enabled entries fall back to all their entries). Verified vs vanilla: converted bench = 0x40000007 + 3×FNPR like CommonBench01; converted bed = 0x88000001 + FNPR 0x000C0002 byte-identical to CommonBed01; LCBed02L keeps right-entry-only (FNPR 0x00040002).
 - FURN models whose NIF is missing from the export (SI furniture, palace thrones) get a conservative fallback: MNAM bit 0 + high flags, FNPR all entries. NIFs with NO markers get MNAM high flags only (no active positions — never enable bits beyond the NIF's position count).
+
+## NiControllerSequence conversion
+<a id="nif-controller-sequences"></a>
+
+**Code:** `asset_convert/nif/sequences.py`
+
+Oblivion drives in-NIF animation through a `NiControllerManager` holding named
+`NiControllerSequence`s. Skyrim keeps the same structure but accepts a much
+narrower set of controller types and stores its strings differently, so every
+sequence has to be rewritten rather than copied.
+
+The module owns the whole animation half of a NIF: the controller-manager
+rewrite, root-accumulation handling, the string-palette resolution, shader
+controller binding and retargeting, morph emulation, and the blend-interpolator
+normalising that must follow all of them.
+
+## Accum-root classification
+<a id="accum-root-classification"></a>
+
+**Code:** `_accum_root_mode` in `asset_convert/nif/sequences.py`
+
+Oblivion's exporter writes the accum root's controlled block as the
+**root-motion placeholder** — an IDENTITY pose — and moves the node's real
+transform onto the `<accum> NonAccum` child.
+
+Census of all **464** Oblivion non-creature NIFs with sequences: **853**
+accum-root entries, **815** data-less identity poses, **38** with never-varying
+keys, and **0 that move**. The real transform turns up on NonAccum either as a
+pose (doors) or as key 0 (keyed nodes): `sesacellumgate01`'s NonAccum keys start
+at MetalGate's authored (-7, -16.2, 37.9); `bravilloaddoorlowerint01`'s NonAccum
+pose is (0, -42.7, 12) with rotation keys starting at the root's 90°.
+
+Both engines apply the identity and NonAccum restores the world pose, so playing
+the identity is CORRECT for these — mode **`transferred`** — and the entry must
+be left exactly as authored. Sentinelling its rotation, as the generic
+data-less rule would, DOUBLES the door's authored rotation.
+
+**The arena spectators are exactly this case.** `Bip01` (the actor rig's 82.5°
+Z rotation, 64 units up) has the identity pose, and `Bip01 NonAccum` key 0 is
+(-0.34, -1.64, 64.07) at 82.6°. Sentinelling Bip01's rotation left the authored
+82.5° in place while NonAccum re-applied its own, so the crowd faced **165° off**
+whenever the sequence played — the "rotated 90 degrees" report. Patched in the
+live engine (2026-08-18): with Bip01's pose left as the valid identity, Bip01
+read back as identity, NonAccum as (-0.34, -1.64, ~64) / 82.5°, and the crowd
+sat at its authored pose.
+
+Every one of the **195** non-identity accum roots in Oblivion.esm is
+`transferred`. Mode **`orphan`** — nothing carries the transform, so applying
+the identity would collapse the node, and every channel is sentinelled instead —
+is defensive, for plugins whose exporter did not follow the convention.
+
+`None` means no accum root, or one whose authored transform is identity, where
+the pose is a no-op either way.
+
+## Sequence controller retargeting
+<a id="sequence-controller-retargeting"></a>
+
+**Code:** `process_controller_manager` in `asset_convert/nif/sequences.py`
+
+A `NiControllerSequence` names its controller TYPE as a string and the engine
+instantiates it by name when the sequence loads, so a single Oblivion-only type
+fails the WHOLE NIF — the red missing-mesh triangle (`se11sheopooffx`,
+`palacefont01`, `se01waitingroomwalls`, `OblivionArchGate01`).
+
+Census of ~8,300 vanilla Skyrim meshes: `NiTextureTransformController` and
+`NiAlphaController` appear **zero** times. The types vanilla does use in a
+controlled block are `BS*ShaderPropertyFloatController`, `NiPSys*Ctlr`,
+`NiTransformController` and `NiVisController`.
+
+Three types are RETARGETED rather than dropped, because the animation CURVE
+lives on the sequence entry's own interpolator while the controller block holds
+only a keyless blend interpolator:
+
+| Oblivion type | Becomes | Why not drop it |
+|---|---|---|
+| `NiMaterialColorController` (target_color 3 = emissive) | `BSLightingShaderPropertyColorController` | Deleting it froze the animation at its first key — for `se11sheopooffx`'s Cone01 that is emissive (0,0,0), a large PITCH BLACK cone where an orange force-ripple should pulse over ~13s. |
+| `NiTextureTransformController` | `BSLightingShaderPropertyFloatController` | `palacefont01`'s scrolling water is 3 × `NiFloatInterpolator`, 2 keys, V 0 → -2/-4/-1 over 2s. `TT_ROTATE` has no Skyrim equivalent and IS dropped. |
+| `NiAlphaController` | `BSLightingShaderPropertyFloatController` | Dropping it froze the fade and left the surface static (`se11sheopooffx`'s GlowPlane pulses 0 → 1 → 0 over 13s). Enum per `references/nif 0.10.0.0.xml`: Lighting var 12 "Alpha", Effect var 5 "Alpha Transparency". |
+
+Each is stamped provisionally as the **Lighting** variant;
+`match_seq_shader_types` re-stamps nodes that ended up on the Effect shader
+after the geometry walk. The block the entry POINTS AT must be replaced too —
+rewriting only the type string leaves the Oblivion block in the file's
+block-type table, which is what the engine rejects.
+
+`NiFlipController` is DROPPED: the flip-book is already fully converted
+geometry-side into a frame-strip atlas driven by a
+`BSEffectShaderPropertyFloatController` on the shader itself (verified on all 5
+of `OblivionArchGate01`'s flip nodes), so the sequence entry is a pure
+duplicate. A **backstop** drops any other type outside the vanilla set: every
+handler is type-by-type, so the next Oblivion-only controller would otherwise
+ship broken exactly as `NiFlipController` did. Dropping costs at most one
+animation channel; leaving it costs the entire mesh.
+
+### <a id="controlled-block-names"></a>Controlled-block names may live in the palette
+
+Names live EITHER in the bytes field OR, when the sequence carries a
+`NiStringPalette`, at an offset into it. Oblivion NIFs written with a palette
+leave the bytes field EMPTY, so reading only the bytes returned `''` for every
+entry — and the "drop blocks with an empty node name" rule then deleted the
+ENTIRE sequence. **16 of 108** sampled animated meshes lost 100% of their
+animation this way (candles, light sconces, the gnarl spawner, Cameron's
+Paradise bricks). Prefer the bytes, fall back to the palette offset.
+
+### <a id="root-named-blocks-and-mttc-targets"></a>Root-named blocks, and the MTTC target list
+
+A block naming the file root is dropped, AND that node is removed from every
+`NiMultiTargetTransformController` extra-target list at the same time. Both
+halves are required. Census of 141 sequences across 43 animated vanilla meshes:
+**0** controlled blocks target their own root node, and **0** MTTC extra targets
+lack a driving controlled block.
+
+`extra_targets` is POSITIONAL — the engine pairs slot N with the entry that
+drives it. Leaving the target while removing the block gives that slot a null
+interpolator, which `BGSGamebryoSequenceGenerator` dereferences as soon as the
+object animates: `movdqu xmm2,[rax]`, rax=0, in VCRUNTIME140
+(crash-2026-08-10-00-42-35, `spiddalcloudplant.nif`, whose root `spiddalplant`
+is also extra-target #1). Keeping the block instead is equally wrong — it
+produces a root-targeting entry vanilla never ships, and crashed in the same
+place (crash-2026-08-10-00-51-26).
+
+### <a id="dataless-transform-interpolators"></a>A dataless transform interpolator is sentinelled, not deleted
+
+Deleting these was wrong. The snapping concern is real (a dataless interpolator
+whose stored transform is a real value would yank the node there), but vanilla's
+answer is a SENTINEL: `volunruudleftswordanimated`'s LeftLockDoor /
+LeftRingParentDoor entries keep a real translation and store rotation + scale as
+**-FLT_MAX** (-3.4028235e38), telling the engine the channel has no value.
+
+Census of vanilla animated doors and traps: **12** dataless transform entries
+are KEPT (96 have data), and **123/123** sequences have at least one controlled
+block — vanilla ships NO empty sequence.
+
+Removal emptied whole sequences: `ctrapswingmacelong01` and
+`ctrapswingmaceshort01`'s `Unequip` went 2 entries → 0. A sequence with nothing
+to bind never runs, so its TEXT KEYS never fire — which is why the swinging
+traps made no sound (their visible motion is Havok, not the clip, so the empty
+sequence was invisible until the sound went missing). `ctraplogs01` 3→1,
+`ctrigpressureplate01` 3→1, `ctrigtripwire01` 6→3.
+
+The sequence's ACCUM ROOT is the exception both ways. `transferred` (NonAccum
+carries the node's transform): the exporter's identity pose is what both engines
+play, so the entry is left exactly as authored — sentinelling its rotation would
+double the door's authored rotation, the arena crowd's "rotated 90 degrees".
+`orphan` (nothing carries the transform): sentinel EVERY channel so the node
+keeps its authored transform, dropping a keyless `NiTransformData` first so the
+sentinel applies.
+
+### <a id="morph-swap-block-mechanics"></a>How the swap is built
+
+The morph target is baked into a hidden sibling shape and the sequence gains
+`NiVisController` entries swapping base → target as the weight curve crosses 0.5.
+The base shape is visible exactly while NO target weight is at or above 0.5.
+
+**Bool keys MUST be CONST_KEY (5).** **3449/3449** vanilla and **1296/1296**
+Oblivion `NiBoolData` blocks store it, and LINEAR crashed the engine in
+`NiBoolData::Load`.
+
+**A synthesized `NiVisController` copies the vanilla pattern** from
+`sldjailwallcollapse01`: flags 108 (ACTIVE | CLAMP | Compute Scaled Time) over a
+`NiBlendBoolInterpolator` whose `bool_value` 2 is vanilla's "no authored value"
+sentinel.
+
+**Cloning a block copies fields in declaration order.** `_attrs` is per-class
+only — `NiTriStripsData._attrs` holds just `num_strips`/`strip_lengths`/`points`,
+while the vertices live on `NiTriBasedGeomData` — so the MRO is walked base-first
+and counts still precede their arrays. A single in-order pass with
+`update_size()` at each array therefore keeps dimensions valid. Reference-typed
+fields are copied as POINTERS (shared blocks); the caller overrides the ones the
+clone must own (data, controller, collision).
+
+### <a id="shared-property-fan-out"></a>A shared property drives several shapes
+
+Oblivion shares one `NiTexturingProperty` / `NiMaterialProperty` block between
+several shapes, and a sequence entry names only ONE of them. `palacefont01`'s
+`Water` entry drives `NiTexturingProperty` #71, which `Water03`, `PalaceWaterL2`
+and `PalaceWaterR02` also wear, so in TES4 that one entry scrolls all four — the
+fountain's upper tier.
+
+Skyrim gives every converted shape its own `BS*ShaderProperty`, so the retargeted
+entry must be FANNED OUT to one entry (and one controller) per sharing shape, or
+the siblings stay frozen. That was the upper tier of the Font of Madness after
+the first conversion.
+
+The controller and interpolator are cloned per sibling — each shape's own shader
+gets its own controller, as vanilla does — while the key DATA is shared. The
+index is built once per manager in a single tree walk and looked up per entry;
+the private re-stamp markers travel with the clone so `match_seq_shader_types`
+can still re-stamp the copies.
+
+### <a id="morph-emulation"></a>Morph controllers are harvested, then dropped
+
+`NiGeomMorpherController` does not exist in Skyrim — the SSE exe has no RTTI
+class for it and vanilla ships 0 — so the entry must go. But the morph IS the
+visible effect for a whole family of Oblivion meshes (`ctrigtripwire01`'s wire
+snap, `se01waitingroomwalls`, the forming Oblivion gate), so everything
+`emulate_morphs` needs to rebuild it as a baked target shape plus a
+wrapper-node scale swap is harvested first.
+
+## The controlled block is resolved BY STRING at activation
+<a id="controlled-block-id-strings"></a>
+
+**Code:** `_normalize_shader_cb_strings`, `match_seq_shader_types`,
+`_bind_shader_ctrl_target` in `asset_convert/nif/sequences.py`
+
+The engine resolves a sequence's controlled block at activation time by string:
+on node `<node_name>` find the property whose class is `<property_type>`, then its
+controller of class `<controller_type>`, using `<variable_1>` (Controller ID) to
+pick the channel.
+
+The retargeting rewrites swap the controller block and `controller_type` but the
+entry otherwise keeps Oblivion's strings — `property_type` `NiTexturingProperty`
+(a class that no longer exists in the file) and controller IDs like
+`0-0-TT_TRANSLATE_V`. The lookup fails SILENTLY and the interpolator is never
+applied: `palacefont01`'s fountain water shipped with a correct V-Offset curve
+that never played.
+
+Vanilla convention (`beehive01`, `blackpool`, `dweastrolabehub01` — every
+`BS*ShaderProperty*Controller` entry sampled):
+
+| field | value |
+|---|---|
+| `property_type` | the shader property's class name |
+| `variable_1` | `str(type_of_controlled_variable/color)`, e.g. `'8'`, `'11'` |
+| `variable_2` | `''` |
+
+**Effect-vs-Lighting must be reconciled after the geometry walk.**
+`process_controller_manager` rewrites the Oblivion entries before the shaders
+exist, so it can only assume the Lighting variant. Unlit surfaces
+(`lighting_mode` 0, e.g. `palacefont01`'s fountain water) end up on
+`BSEffectShaderProperty`, and the two shaders number their controlled variables
+differently — V Offset is 22 on Lighting but 8 on Effect — so an unreconciled
+entry leaves the engine unable to bind the animation. A Lighting controller is
+never bound to an Effect shader or vice versa, for the same reason.
+
+**`NiTimeController.Target` is NOT optional for this family.** Every vanilla
+`BS*ShaderProperty{Color,Float}Controller` sampled names its own shader block
+(Lighting → `BSLightingShaderProperty`, Effect → `BSEffectShaderProperty`;
+**15/15**, 0 nulls). The Oblivion source controllers target the NiTriShape's
+*property list*, which has no Skyrim counterpart, so the rebuilt controller was
+left with a NULL target — the engine dereferences it while loading the shader
+property and faults.
+
+### <a id="geometry-suffix-entries"></a>Entries naming geometry as `<node>:<index>`
+
+Oblivion's exporter names a node's geometry children either as
+`Tri <parent> <index>` (a real block name) or, inside a `NiControllerSequence`
+string palette, as `<parent>:<index>`. `morroblivionchandilier01`'s Idle sequence
+uses BOTH conventions at once:
+
+| node name | controller |
+|---|---|
+| `CandleSkinny01:0` | `NiMaterialColorController` (emissive) |
+| `CandleSkinny01` | `NiTransformController` |
+| `CandleSkinny01 NonAccum` | `NiTransformController` |
+
+The last two name real `NiNode`s, so the palette is NOT stale — only the `:0` form
+needs translating. It means "geometry child 0 of CandleSkinny01", which after
+conversion is the shape carrying the `BSLightingShaderProperty`.
+
+Binding matters because Skyrim dereferences `NiTimeController.Target` while
+loading the shader property, so an unbound shader controller is a CTD. Deleting
+the entry is NOT an acceptable fix: it costs the chandelier its emissive flicker,
+and emptying a sequence strands its `NiControllerManager` with zero sequences —
+which the engine also dereferences (vanilla ships no manager with 0 sequences).
+The entry is rewritten to name the real block, or the engine cannot re-bind it at
+run time.
+
+## The three flags that select a conversion path
+<a id="convert-nif-path-flags"></a>
+
+**Code:** `_convert_nif` in `asset_convert/nif/nif_converter.py`
+
+**`worn=True`** marks the NIF as body-worn gear on the plugin's own authority —
+an ARMO/CLOT record names it as a biped model, see `wearable_plan.is_worn`. It
+only ever WIDENS the armor path: the folder-name guess still applies on its own
+for meshes no record references.
+
+**`parallax=True`** carries Oblivion's `APPLY_HILIGHT2` height field across as a
+Skyrim slot-3 height map. Off by default — the result needs Community Shaders or
+ENB and renders wrong without one.
+See [asset_convert_shader.md](asset_convert_shader.md#hilight2-alpha-dropped).
+
+**`creature=True`** selects the creature-asset rules for `skeleton.nif` and the
+skinned body parts under `meshes/creatures/`:
+
+- skinned bodies keep a plain `NiNode` root and their plain `NiSkinInstance`
+  with ORIGINAL Oblivion bone names — the faithful-port strategy keeps the
+  Oblivion skeleton, so there is no retarget and no bone renaming;
+- `skeleton.nif` becomes a `BSFadeNode` with BSX=198, the vanilla
+  creature-skeleton value, and its ragdoll bhk tree is converted in place on the
+  bone nodes, never hoisted to the root.
+
+## Rest visibility: what a node looks like before its animation runs
+<a id="rest-visibility"></a>
+
+**Code:** `apply_rest_visibility` in `asset_convert/nif/sequences.py`
+
+Oblivion drives per-node visibility from a `NiVisController` inside a
+`NiControllerSequence`. Where that sequence is script-triggered, Skyrim leaves it
+unplayed until the script fires — but the NODE still renders, because the engine
+only applies the sequence's keys while it is playing. So geometry Oblivion keeps
+hidden until mid-effect is visible from the moment the cell loads.
+
+`se11sheopooffx` is the case in point: its `Forward` sequence holds `Cone01` at
+visibility 0 until t=0.3 and hides it again at 12.93, and nothing ever plays the
+sequence (the STAT has no script), so the cone renders permanently — a large
+black cone over the effect. Applying the t=0 value as the node's authored rest
+state matches what the object looks like before its animation is triggered, which
+is the correct resting appearance in both engines. A node visible at t=0 is
+untouched.
+
+**AutoPlay/AutoLoop sequences are skipped.** They RUN from cell load, so their
+own keys restore the node's visibility; baking the t=0 value in would hide
+geometry the animation is about to show.
+
+**A dataless `NiBoolInterpolator` is a CONSTANT**, not an absence: its
+`bool_value` IS the rest state and there are no keys to read.
+`OblivionArchGate01` drives every one of its 30+ vis-controlled nodes this way,
+so a keys-only path skipped all of them and the meteors and tendrils rendered
+from cell load.
+
+**Only scene-graph objects have a "hidden" bit.** `root.tree()` also yields
+properties, and bit 0 of `NiAlphaProperty.flags` is ALPHA BLEND ENABLE — setting
+it there turned opaque surfaces into additive blends (0x1042 → 0x1043, src=ONE
+dst=SRC_COLOR) and they rendered as blown-out green and red. Those blocks also
+have an empty name, so a name-only match hits every one of them at once. The
+match is therefore gated on `NiAVObject`.
+
+## A sequence entry does not connect its own controller
+<a id="seq-shader-controller-attach"></a>
+
+**Code:** `attach_seq_shader_controllers` in `asset_convert/nif/sequences.py`
+
+A `NiControllerSequence` entry only says "while this sequence plays, drive node
+N's controller of type T". It does not itself connect the controller to the
+property, and Skyrim resolves T against the controllers ALREADY hanging off the
+target — so a controller that exists only as a sequence entry drives nothing and
+the surface renders frozen. That was `palacefont01`'s fountain water, converted
+from Oblivion's `NiTextureTransformController`.
+
+Vanilla never leaves one dangling: across **80** meshes carrying shader float
+controllers, **481/481** are reachable from `shader.controller`. The pass mirrors
+that — the controller goes on the shader's chain, targeted at the shader.
+
+## Ambient animation: Oblivion's Idle becomes vanilla's AutoPlay pair
+<a id="autoplay-ambient-sequences"></a>
+
+**Code:** `autoplay_ambient_sequences`, `_clone_sequence_as` in
+`asset_convert/nif/sequences.py`
+
+Oblivion auto-plays a sequence named `Idle` as soon as the object loads. Skyrim
+has NO such convention: a `NiControllerSequence` sits idle until something starts
+it (a script's `PlayGamebryoAnimation`, an engine-native name like Open/Close, or
+the behaviour graph). So converted ambient animation — `palacefont01`'s fountain
+water, `se01waitingroomwalls`' light ripples, the arena crowds — simply never ran,
+and the surface rendered as a frozen first frame.
+
+Vanilla's self-playing meshes (**63** in Skyrim.esm's BSAs) all point their BGED
+at `GenericBehaviors/Autoplay.hkx`, whose state machine STARTS on a state playing
+sequence `AutoPlay` (a CLAMP intro; **53/54** vanilla) and, on that sequence's End
+event, hands off to a state playing `AutoLoop` (the real motion, cycle type LOOP;
+**39/53** vanilla). Looping is the SEQUENCE's own cycle type —
+`BGSGamebryoSequenceGenerator` has no looping field (`bLooping` is
+SERIALIZE_IGNORED) and the AutoLoop state has no self-transition.
+
+So the authored `Idle` becomes `AutoLoop` and KEEPS its authored cycle type (all
+**116** Oblivion `Idle` sequences are `CYCLE_LOOP` = 0), and a CLAMP clone named
+`AutoPlay` is added for the start state. Read out of the running engine
+(2026-08-18, arena spectator, `tools/live/game_bridge.py`): with AutoLoop written
+as CLAMP the graph reached AutoLoopState and froze on the last frame; flipping the
+loaded sequence's `cycleType` to LOOP in memory and `sae AutoReset` made it loop
+indefinitely.
+
+Reading cycle type 2 (CLAMP) as "loop" is what left every converted ambient mesh
+playing exactly one cycle and freezing.
+
+Script-driven names (`Forward`, `SpecialIdle`, …) are left alone — those are
+started through the behaviour graph BY NAME, and renaming them would break the
+`PlayAnimation()` call that drives them.
+
+**The clone REUSES the original's controlled-block interpolators** rather than
+deep-copying the key data: a `NiControllerSequence` only references its
+interpolators, two sequences may reference the same ones (verified in the live
+engine — both sequences bind the same interpolator pointers and play), and the
+keys are by far the largest part of the block. Every declared member is copied by
+`_get_names()`, pyffi's own declaration order, because `ControllerLink`'s field
+set differs across NIF versions (20.0.0.4 has `variable_1`/`variable_2` where
+later ones have `controller_id`/`interpolator_id`), so naming them explicitly
+breaks on the next version.
+
+### <a id="script-driven-sequence-names"></a>Which group names a script can drive
+
+TES4 animation GROUP names a script can drive with `playgroup`, which converts to
+`ObjectReference.PlayAnimation()`. Census of the converted output (**18,566**
+scripts): Forward 418, Backward 192, Unequip 45, Equip 27, SpecialIdle 10,
+FastForward 8, Left 6, FastBackward 6, Right 5, Stagger 1.
+
+`Open`/`Close` are deliberately ABSENT. They are the engine's own DOOR group
+names, driven natively through the NIF's `NiControllerManager` — no script ever
+names them, and giving such a mesh a behaviour graph is what CTD'd
+`prisonCellGate01` on cell load (2026-07-26). Vanilla agrees: the graph-driven
+`NocturnalsSecretDoor01` uses `AnimIdle01`/`AnimPlay01`, never Open/Close.
+
+## Which sequences earn a behaviour graph
+<a id="which-sequences-earn-a-graph"></a>
+
+**Code:** `collect_sequence_names` in `asset_convert/nif/nif_converter.py`
+
+The names collected here become both the graph's state names and the events
+that select them, so `PlayAnimation("Forward")` reaches the right sequence.
+Four rules decide what qualifies:
+
+- **Only SCRIPT-DRIVEN group names.** A mesh whose sequences are all
+  engine-native (`Open`/`Close` on doors) is already animated by the engine and
+  must NOT get a graph — attaching one makes the engine bind the sequence
+  through the graph instead, and it crashes.
+- **`AutoPlay` / `AutoLoop` are kept even though they are not script-driven**,
+  because it is the behaviour graph that starts them: **63/63** vanilla AutoPlay
+  meshes carry a BGED, confirmed against the arena crowd's graph read out of the
+  live engine.
+- **A sequence stripped to nothing by `process_controller_manager` is skipped.**
+  It animates no node, and giving it a state would make `PlayAnimation()`
+  succeed on a dead sequence.
+- **No controller manager means no names at all.** A static mesh needs no graph
+  and must not get a BGED.
+
+## Post-walk animation passes
+<a id="post-walk-animation-passes"></a>
+
+**Code:** `_run_animation_passes` in `asset_convert/nif/nif_converter.py`
+
+Six passes run after the geometry walk, and the ORDER is a contract:
+
+| # | Pass | Why it sits here |
+|---|---|---|
+| 1 | `match_seq_shader_types` | Reconciles retargeted UV controllers with the shader each target node actually received; Lighting and Effect number their variables differently. Must follow the walk. |
+| 2 | `emulate_morphs` | Rebuilds dropped `NiGeomMorpherController` animation (Skyrim has no morph class) as baked target shapes plus `NiVisController` swaps. Clones copy CONVERTED shapes and shaders, so it follows the walk and precedes rest visibility and sequence-name collection. |
+| 3 | `autoplay_ambient_sequences` | Oblivion's auto-started `Idle` becomes vanilla's `AutoPlay` (CLAMP intro) + `AutoLoop` (the authored loop) pair, or the animation never starts. Precedes `collect_sequence_names` so the behaviour graph is built from the final names. |
+| 4 | `apply_rest_visibility` | Nodes a sequence keeps invisible at t=0 must ship hidden: Skyrim applies a sequence's keys only while it plays, so mid-effect-only geometry otherwise renders from cell load — `se11sheopooffx`'s black cone. |
+| 5 | `attach_seq_shader_controllers` | A shader controller that lives ONLY as a sequence entry drives nothing; vanilla always hangs it off the shader too (**481/481**). Runs after pass 1 so the final controller object is the one attached. |
+| 6 | `normalize_blend_interpolators` | Stamps vanilla's manager-driven header onto every blend interpolator, synthesized or copied. Must follow every pass that can create or replace one. |
+
+## The root transform wrapper
+<a id="root-rotation-wrapper"></a>
+
+**Code:** `_wrap_root_transform` in `asset_convert/nif/nif_converter.py`
+
+Skyrim **ignores BSFadeNode root-node rotation** for static placement but
+applies a child NiNode's rotation correctly. So a non-skinned model whose root
+carries a rotation gets an inner NiNode holding that rotation and translation,
+and the root's own transform is zeroed.
+
+The collision object **stays on the root**: a `bhkCollisionObject` on a child
+NiNode intermittently crashes `hkpCollisionDispatcher`. Instead the rigid body
+absorbs the transform that is about to vanish, because the engine places a root
+collision body at `REFR ∘ bodyT` while Oblivion applied `REFR ∘ L ∘ bodyT`.
+Without that composition the collision is rotated relative to the mesh —
+measured on `stackhallentrance01`, which came out 90° off.
+
+Furniture re-origin rides the same wrapper: marker-bearing models are
+translated by `furn_shift` so the floor plane sits at z=0, the vanilla origin
+convention (the engine anchors seated actors to the REFR z). The importer lowers
+the REFRs of every base record using the model by the same amount, so
+world-space visuals are unchanged. The shift is absorbed into the rigid body
+along with the rotation.
+
+### <a id="root-named-controlled-blocks"></a>Root-named controlled blocks are stripped
+
+A NiControllerManager on the BSFadeNode root may hold controlled blocks
+targeting the root by name (`X`, `X NonAccum`). In Oblivion that drives the
+accumulation system for characters and is a no-op for statics. In Skyrim the
+blocks are applied **literally**, so a rotation animation on the root spins the
+whole object in world space — the `stonewallgatedoor01` "spinning" bug.
+
+`process_controller_manager` strips blocks named after the node, drops
+`NiMaterialColorController` / `NiGeomMorpherController`, and handles
+zero-interpolator data.
+
+## Second links to replaced geometry
+<a id="second-links-to-replaced-geometry"></a>
+
+**Code:** `_remap_replaced_blocks` in `asset_convert/nif/nif_converter.py`
+
+Two structures reference geometry through a link OUTSIDE the children arrays
+the tree walk rewrites, so both still name the orphaned `NiTriStrips` after a
+shape is converted:
+
+- `NiDefaultAVObjectPalette` entries, whose `av_object` names the old block.
+- `NiPSysMeshEmitter.emitter_meshes`, which reaches its source geometry through
+  a second link.
+
+pyffi then re-serialises the orphan, because it is still reachable, leaving raw
+Oblivion `NiTriStrips` in a Skyrim file. Skyrim has no NiTriStrips renderer —
+vanilla is **107/107 NiTriShape** across all **256** `NiPSysMeshEmitter` meshes
+— so the engine fails the whole NIF and draws the red missing-mesh triangle
+(`se11sheopooffx`, `se01waitingroomwalls`, `palacefont01`).
+
+## Helper geometry must not draw
+<a id="helper-geometry-must-not-draw"></a>
+
+**Code:** `_hide_helper_geometry` in `asset_convert/nif/nif_converter.py`
+
+Oblivion ships invisible helper volumes — particle emitter sources, spawn
+volumes, effect proxies — that Skyrim would otherwise render as solid
+untextured boxes over the effect. Two passes catch them.
+
+**Emitter source shapes** exist only to define where particles spawn. Oblivion
+hides them with `NiMaterialProperty.alpha = 0.0`; Skyrim has no material
+property, and the conversion forces `NIF_FLAGS` (visible) onto every node, so
+they came through as `se11sheopooffx`'s white blobs. Vanilla census of **119**
+emitter-source shapes across 80 particle meshes: **114** set the node's HIDDEN
+flag (bit 0) **and** carry NO shader property at all — so both are matched,
+which also drops the pointless texture payload.
+
+**Lit geometry with no UVs is unrenderable.** `BSLightingShaderProperty` ALWAYS
+samples a diffuse texcoord and reads the tangent basis for its normal map, but
+geometry with `num_uv_sets == 0` ships neither stream, so the shader samples
+whatever follows the vertex buffer — `OblivionArchGate01`'s red triangle.
+Vanilla census (373 shapes): **ZERO** pair a lighting shader with 0 UV sets; the
+54 UV-less vanilla shapes are either `BSEffectShaderProperty` (45 — that shader
+needs no tangents) or carry no shader at all (9).
+
+These are the helpers the emitter pass cannot see: they reach the shape through
+some path other than `NiPSysMeshEmitter`, or nothing references them at all.
+Geometry genuinely meant to be drawn always has UVs, so the rule can only ever
+catch helpers.
+
+## Strip-format skin partitions
+<a id="strip-format-skin-partitions"></a>
+
+**Code:** `_destripify_skin_partitions` in
+`asset_convert/nif/nif_converter.py`
+
+A `NiSkinPartition` can store its geometry as either STRIPS or TRIANGLES.
+Oblivion writes strips; Skyrim's renderer reads the **partition**, not the
+`NiTriShapeData`, to draw a skinned shape, so a strip-format partition gives it
+no triangles at all and the shape renders as the red missing-geometry marker.
+Census: **678/678** vanilla skin partitions across 350 sampled meshes store
+triangles, **zero** store strips.
+
+The strips→triangles conversion in the tree walk rebuilds `NiTriShapeData` but
+does NOT touch the partition, and the two regeneration passes that would fix it
+are gated on mesh CATEGORY (creature, worn armor). Anything else that happens to
+be skinned — self-skinned clutter such as rope, chain, banner and hanging
+bucket, effect meshes, odd creature parts outside the creature path — kept its
+Oblivion strip partition and broke. Found via
+`dungeons\chargen\ropebucket01.nif` (red triangle in game); a sweep of 500
+converted meshes found **93** such partitions across 6+ unrelated meshes, so
+this is a general class rather than one file.
+
+It runs after every category-specific pass — those set up bones and bind poses
+and regenerate correctly on their own — and only rewrites what is still in strip
+format, leaving their triangle partitions alone.
+
+## Inventory-marker orientation
+<a id="inventory-marker-orientation"></a>
+
+**Code:** `_finalise_inv_markers` in `asset_convert/nif/nif_converter.py`
+
+Weapons and shields sit in Skyrim's normalised attachment frames — the Prn node
+convention and the SHIELD attach transform — so the vanilla-derived constant
+markers written earlier are already exact and are left alone.
+
+Everything else that can appear in the inventory (armor and clothes `_gnd`
+models, clutter, books, ingredients, keys, soul gems) is still in an arbitrary
+Oblivion modelling frame, where a fixed rotation shows a random side. Those get
+a rotation computed from the FINISHED geometry — after root wrapping and any
+furniture shift — so the side showing the most mesh faces the inventory camera.
+Meshes never viewed in an inventory simply carry an inert extra-data block.
+
+A skinned non-equipment mesh is skipped: it poses through its bones rather than
+its node transforms, so geometry analysis would misjudge it.
+
+## Dangling back-references after the root swap
+<a id="dangling-root-back-references"></a>
+
+**Code:** `_repoint_root_refs` in `asset_convert/nif/nif_converter.py`
+
+When a NiNode root becomes a `BSFadeNode`, the old node leaves `data.roots` and
+is no longer reachable — so pyffi writes every surviving reference to it as
+null (-1), and Skyrim null-derefs on load. Three kinds of link point backwards
+at a root and all must be moved:
+
+- **Controller targets.** `NiControllerManager` and
+  `NiMultiTargetTransformController` both store a back-reference to their
+  controlled node in `.target`, and Skyrim uses the manager's target as the root
+  for animated-node lookup. `NiMultiTargetTransformController` additionally keeps
+  an `extra_targets` array that may name the old root as well.
+- **`NiDefaultAVObjectPalette` entries**, whose `av_object` may be the old root.
+- **`NiSkinInstance.skeleton_root`.** A skinned shape names the node its bone
+  transforms are relative to, and on a self-skinned clutter mesh — rope, chain,
+  banner, hanging bucket — that node IS the root. Left dangling, Skyrim cannot
+  resolve the skin's frame of reference and the shape renders as the red
+  missing-geometry marker; seen on `dungeons\chargen\ropebucket01.nif`, whose
+  two BucketRope shapes are skinned to the `c_BucketBone` chain.
+
+Extra data is copied SELECTIVELY onto the new root rather than in bulk: a bulk
+copy breaks animated objects (the throne NIF's controller refs). What is carried
+across is `BSBound`, converted furniture markers, and `Prn`.
+
+`BSBound` is "Bethesda-specific collision bounding box for skeletons" (nif.xml).
+The engine uses it as the actor's physical bounds, so a creature skeleton
+without one has nothing for the ragdoll/death handoff to land on. Oblivion
+creature skeletons ship one (named `BBX`) and **35/39** vanilla Skyrim creature
+skeletons have one — but the selective copy originally omitted it, so all **44**
+converted creature skeletons lost it at the swap (2026-08-08). Its values are
+already in NIF object space, not Havok space, so they carry over verbatim.
+
+## Billboard and geometry roots
+<a id="billboard-roots"></a>
+
+**Code:** `_normalise_billboard_root`, `_wrap_geometry_root` in
+`asset_convert/nif/nif_converter.py`
+
+**A `NiBillboardNode` root re-orients its ENTIRE subtree to face the camera
+every frame.** For a pure billboard sprite that is fine, but Oblivion's
+fire and effect NIFs put the particle-system emitters under the billboard root
+too, and the spinning transform scrambles world-space particle emission — the
+system renders nowhere, which is the invisible-flames bug. Vanilla Skyrim keeps
+particle emitters under a PLAIN node.
+
+So a billboard root whose subtree contains any `NiParticleSystem` is demoted to
+a plain NiNode (individual particles self-billboard, and static effect quads
+keep a fixed orientation, which is acceptable). Any other billboard root is
+simply wrapped so it can become a `BSFadeNode`.
+
+Two details of the demotion are load-bearing:
+
+- **The replacement's rotation is IDENTITY, not the billboard's.** A
+  `NiBillboardNode` discards its own rotation at runtime (NifSkope
+  `BillboardNode::viewTrans`), so copying it onto the plain replacement revives
+  a value the engine never used and skews the whole subtree.
+- **Direct geometry children are re-wrapped in child billboards.** The root must
+  not billboard, but the flat fire QUADS still need to face the camera — a
+  fixed-facing quad is edge-on or backfacing from most angles, which is why
+  fires looked invisible. Vanilla does the same:
+  `campfire01burning` is `BSFadeNode → NiBillboardNode "Plane05" → NiTriShape`.
+
+**A bare geometry root is wrapped in a NiNode.** A few Oblivion-era meshes are
+authored with a `NiTriShape`/`NiTriStrips` as the ROOT block. Skyrim never ships
+one — a 400-mesh vanilla census found **0** geometry roots (BSFadeNode 340,
+NiNode 55, BSMasterParticleSystem 2, BSLeafAnimNode 3) — and anything walking
+the tree as a node scene graph breaks: LODGenx64 hard-crashes with "Unable to
+cast NiTriShape to NiNode" and abandons the **entire worldspace's** object LOD,
+not just the offending mesh. The geometry keeps its own transform, so the wrap
+is visually identity.
+
+## Animated-object behaviour graphs
+<a id="animated-object-graphs"></a>
+
+**Code:** `_build_animobject_graph` in `asset_convert/nif/nif_converter.py`
+
+Skyrim will not drive an in-NIF `NiControllerSequence` from
+`ObjectReference.PlayAnimation()`. That call needs an animation graph manager,
+which exists only when the root carries a `BSBehaviorGraphExtraData` naming an
+hkx project. So an activator, door or lever gets a four-file
+project/character/skeleton/behavior tree written beside the mesh, with one
+`BGSGamebryoSequenceGenerator` state per surviving sequence, and the BGED
+points at it.
+
+Ordering matters twice: the pass runs **after** the conversion, so sequences
+stripped to nothing cannot become dead states that `PlayAnimation` would
+happily select, and **before** the write, so the BGED ships inside the file.
+
+**A graph-bound mesh must ship no empty text keys.** The generator `strchr()`s
+every key value on activation and an empty `NiString` loads as a NULL pointer —
+the Spiddal Stick / Harrada crash. They are stripped before project generation
+so the rule holds even if hkxcmd later fails and the BGED is skipped: a
+graph-less mesh with fewer dead keys loses nothing.
+
+A missing or failing hkxcmd never loses the mesh. The object still converts and
+renders; it just stays unanimated, and the error is recorded in the result.
+
+### <a id="bged-clears-bsx-bit-80"></a>A BGED forces BSXFlags bit 0x80 CLEAR
+
+Attaching the graph also rewrites the root's BSXFlags: the Animated bit goes ON
+(or the engine never ticks the graph) and **bit 0x80 goes OFF**.
+
+0x80 marks the object as articulated / ragdoll-driven. Paired with a BGED the
+engine waits on a physics rig that a Gamebryo-sequence graph never provides, and
+**NEVER DRAWS THE MESH** — invisible in game, perfect in NifSkope, which does not
+load the hkx at all.
+
+Census of all **217** vanilla animated-object meshes that carry a BGED: **0 set
+bit 0x80** (values 0x4–0x20; the graph-driven `NocturnalsSecretDoor01` is 0x0B).
+The converter's longstanding `BSX_FLAGS_ANIMATED` is 0x8B, which is correct for a
+mesh with NO graph — `prisonCellGate01` renders fine with it — so the illegal
+combination only ever appears where the BGED is added.
+
+`controls_base_skeleton` is 0: the graph drives this object only, not a shared
+base skeleton.
+
+## Nodes the walk drops
+<a id="nodes-stripped-by-name"></a>
+
+**Code:** `walk_node` in `asset_convert/nif/nif_converter.py`
+
+Four kinds of node never reach the output.
+
+**`SecretBigger*` / `Secret Bigger*`.** Oblivion artists placed tiny 3-vertex
+triangles far below the model origin (e.g. Z = -1725) to artificially expand the
+bounding sphere so the mesh loads from further away. Skyrim's `BSFadeNode` uses
+a different LOD system and does not need the trick; in converted output those
+triangles appear as visible floating geometry underground — the "mispositioned"
+visual bug.
+
+**`EditorMarker*`.** Editor-only marker meshes, such as the pyramid inside fire
+NIFs, hidden at runtime through the node's hidden flag. Conversion clobbers node
+flags with `NIF_FLAGS` (visible), so the marker would show in game as an
+untextured black shape. Vanilla Skyrim NIFs carry no editor markers in these
+objects.
+
+**Every `NiDynamicEffect` subtype.** `NiTextureEffect` (projected-texture
+environment mapping) has a completely different rendering path in Skyrim, and
+`Ni*Light` blocks — Ambient, Directional, Point, Spot — are 3ds Max export
+leftovers: **zero** vanilla Skyrim meshes contain any `Ni*Light` block
+(`nif_block_scan`, 2026-07-18), and SSE fails to load a static that carries one.
+`statuegodszenithar01.nif`, with a `NiAmbientLight` child, rendered as the
+missing-model red triangle. Skyrim lighting comes from placed LIGH references,
+never from mesh-embedded light nodes, so there is nothing to convert these into.
+The root's own effects array is cleared during the NiNode→BSFadeNode conversion;
+this branch handles dynamic effects sitting in a children array.
+
+**Shapes with no reconstructible topology.** Dev-era Oblivion shapes with no
+triangle data in the file at all (minotaur `hair01`, `hornsa`, `minotaurold` —
+`has_triangles=False` with a non-grass UV layout). Nothing can render them, so
+the shape is dropped rather than failing the whole file or creature.
+
+`NiParticleSystem` is converted rather than dropped: `NiPSysData`'s binary
+layout differs between UV2=11 and UV2=83, so the data block is replaced with a
+fresh instance and the shader properties converted, which is what avoids
+"Block size check failed" on load.
+
+## BSXFlags value selection
+<a id="bsxflags-value-selection"></a>
+
+**Code:** `_bsx_value` in `asset_convert/nif/nif_converter.py`
+
+A root gets BSXFlags when the tree has collision anywhere, or is animated
+(particles or time controllers). The value is chosen in priority order:
+
+| Case | Value | Constant |
+|---|---|---|
+| constrained dynamic (signs) | 0xCA | `BSX_FLAGS_CONSTRAINED` |
+| animated (doors, activators) | 0x8B | `BSX_FLAGS_ANIMATED` |
+| dynamic clutter (mass > 0) | 0xC2 | `BSX_FLAGS_DYNAMIC` |
+| static | 0x82 | `BSX_FLAGS_STATIC` |
+
+Bit 0 (Animated) is OR'd in whenever the tree has particle systems or time
+controllers, so the engine ticks them: 0x82→0x83 and 0xC2→0xC3 both appear in
+the vanilla census.
+
+With no collision at all, an animated tree gets plain **0x01**, the most common
+vanilla value for collisionless particle meshes — except an ambient
+AutoPlay/AutoLoop mesh (the arena crowd, the fountain), which takes the
+animated-object value like a converted door.
+
+**The DYNAMIC bit (0x40) is critical for any object with mass > 0.** Without it
+Skyrim uses a coarse bounding sphere for the activation and grab shell instead
+of the actual collision shape, and applies extra drag while the object is
+carried.
+
+A `BSInvMarker` must stay first in the extra-data list, so BSXFlags is inserted
+immediately after it.
+
+## Geometry preparation
+<a id="geometry-preparation"></a>
+
+**Code:** `_prepare_geometry_data` in `asset_convert/nif/nif_converter.py`
+
+Four repairs run on the mesh data before any shader exists.
+
+**The AUTHORED hidden bit is carried across.** Oblivion hides helper geometry —
+particle emitter sources, spawn volumes, effect proxies — with bit 0 of the node
+flags. Overwriting flags wholesale with `NIF_FLAGS` un-hides all of it, so the
+helper renders in game as an untextured shard; that geometry carries no UVs, so
+a lighting shader over it samples an absent texcoord stream, which is the
+`OblivionArchGate01` "red triangle". Bit 0 means the same thing in both games,
+so it is copied rather than re-derived.
+
+**Absent triangle arrays are rebuilt.** Some vanilla Oblivion meshes — grass
+blades in particular — ship `NiTriShapeData` with `has_triangles=False`, the
+index array simply missing. Skyrim's grass planter CTDs on that. Legacy vertex
+match groups likewise appear on several Oblivion meshes and on no vanilla Skyrim
+mesh, so they are dropped.
+
+**`ExtraVectorsFlags` is reset to 0.** Skyrim accepts only 0 (none) or 16 (has
+binormal + tangent). Oblivion NIFs may store 1, binormals-only, which is invalid
+in Skyrim and triggers a pyffi enum warning that can corrupt the tangent data.
+`_set_tangents` raises it to 16 when real tangent data is available.
+
+### <a id="one-uv-set"></a>Skyrim reads exactly ONE UV set
+
+On disk the UV-set count shares a u16 "BS Data Flags" whose low 6 bits hold it
+(pyffi splits this into `num_uv_sets` + `extra_vectors_flags`). That count is
+the ONLY thing telling the engine how many TexCoord arrays follow, so a file
+storing 2 sets while the shader binds 1 **overruns the vertex buffer it sized** —
+a non-temporal memcpy off the end of the allocation (`vmovntdq`, CTD on cell
+load).
+
+Oblivion authors a second set for detail and overlay passes that Skyrim has no
+slot for. Census: **2,233** vanilla shapes are 0 or 1 UV sets, **never 2**.
+
+## Pre-upgrade source fixups
+<a id="pre-upgrade-source-fixups"></a>
+
+**Code:** `_run_source_fixups` in `asset_convert/nif/nif_converter.py`
+
+Four repairs run on the source tree before `data.version` is raised, because
+raising it changes how pyffi reads the file.
+
+**String-palette offsets MUST resolve first.** In Oblivion format (UV2=11) a
+`NiControllerSequence`'s controlled blocks store `node_name` and friends as
+integer offsets into a `NiStringPalette`. Once the version is the Skyrim one,
+pyffi switches to direct-string mode and ignores the offsets, leaving every
+`node_name` as `b''`. Skyrim uses `node_name` to look up animation targets, so
+empty names become null and the NIF crashes on load.
+
+**Oblivion `sound: X` text keys are NATIVE in Skyrim** and must survive
+verbatim; rewriting them to `SoundPlay.*` silenced every animated gate.
+
+**Oblivion never sets `NiTimeController` "Compute Scaled Time" (0x40)**, which
+Skyrim requires — without it a sequence started by `PlayAnimation()` binds but
+never advances.
+
+**Non-finite geometry is fixed before anything can propagate it** into a tangent
+computation or a skin retarget. Orphaned non-scene-graph roots are dropped first
+of all, so nothing later walks them.
+
+## Geometry sanitising
+<a id="geometry-sanitising"></a>
+
+**Code:** `asset_convert/nif/geometry_sanitize.py`
+
+Two authored defects that Oblivion tolerates and the Skyrim-side tools do not.
+Both are repaired before the mesh ships, and the pass returns how many
+components it touched.
+
+**Non-finite (NaN) mesh data.** A handful of Oblivion sources ship it:
+`anvildooruc02.nif` has 9 NaN UVs and `middlecandlestickfloor03fake.nif` has 2
+— one mesh in each of the AnvilMagesGuild / AnvilCastlePrivateQuarters cells,
+whose loads crashed with **no crash log**. Oblivion's renderer tolerated
+non-finite mesh data; Skyrim SE dies at cell load.
+
+The repairs are chosen so the mesh degrades locally rather than globally:
+
+| Component | Repair |
+|---|---|
+| UV | zeroed |
+| vertex | moved to the mesh's finite centroid |
+| normal / tangent / bitangent | +Z |
+| vertex colour channel | 1.0 |
+| bound sphere | recomputed after the vertices are fixed |
+
+A bad vertex goes to the centroid rather than the origin because that
+*collapses* the offending triangle instead of stretching it across the model.
+
+### <a id="shapes-that-declare-no-vertices"></a>A shape that declares vertices and ships none
+
+`LeyawiinLowerDoor01` in `leyawiinhouselower01.nif` is the measured case:
+`num_vertices=16`, `has_vertices=False`, yet normals, colours, UVs and 6
+triangles all still index 16 of them. Oblivion tolerates it — there is nothing
+to draw, so it draws nothing — but anything that walks the faces and reaches
+for a vertex does not.
+
+LODGen is what found it: `RemoveUnseenFaces` indexes straight into the empty
+list, throws `ArgumentOutOfRangeException`, and the run ends with **exit 548 and
+no .bto tiles** — one broken shape costs an entire worldspace its object LOD.
+Measured at **1 of Nehrim's 1552 `_far.nif`**.
+
+The shape is cleared rather than repaired: without vertex positions the
+triangles have no geometry to describe, and the shape already drew nothing, so
+it loses nothing.
+
+**Both geometry layouts must be cleared, and the strips are the one that
+bites.** The measured case is `NiTriStripsData`, which has no `triangles` array
+at all — it stores STRIPS. A first version cleared only `triangles`, so the
+strips survived, the strips-to-triangles conversion downstream turned them back
+into 6 triangles, and the shape shipped with zero vertices and six faces
+indexing vertex 15. LODGen happened to tolerate that; the next tool would not.
 
 ## NIF analyzer tools
 <a id="nif-analyzer-tools"></a>

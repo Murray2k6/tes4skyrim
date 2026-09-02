@@ -696,7 +696,7 @@ class TestDeathPileExtraction:
 
     def _extract(self, folder, tmp_path):
         import numpy as np
-        from asset_convert.nif.nif_converter import extract_death_pile
+        from asset_convert.nif.creature_mesh import extract_death_pile
         from asset_convert.havok.hkx_behavior import detect_dissolve
         from pyffi.formats.nif import NifFormat
 
@@ -760,7 +760,7 @@ class TestDeathPileExtraction:
         assert len(names) == len(set(names)), names
 
     def test_no_pile_when_nothing_is_revealed(self, tmp_path):
-        from asset_convert.nif.nif_converter import extract_death_pile
+        from asset_convert.nif.creature_mesh import extract_death_pile
         skel = os.path.join(REPO, 'export', 'Oblivion.esm', 'meshes',
                             'creatures', 'ghost', 'skeleton.nif')
         if not os.path.exists(skel):
@@ -841,8 +841,8 @@ class TestPileCollision:
     bhkSimpleShapePhantom(layer 15) -> bhkTransformShape -> bhkBoxShape."""
 
     def _pile(self, folder, tmp_path):
-        from asset_convert.nif.nif_converter import (extract_death_pile,
-                                                 convert_nif)
+        from asset_convert.nif.creature_mesh import extract_death_pile
+        from asset_convert.nif.nif_converter import convert_nif
         from asset_convert.havok.hkx_behavior import detect_dissolve
         from pyffi.formats.nif import NifFormat
         skel = os.path.join(REPO, 'export', 'Oblivion.esm', 'meshes',

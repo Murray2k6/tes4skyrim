@@ -2,6 +2,193 @@
 
 **Code:** `asset_convert/character/body_wrap.py`, `asset_convert/character/skin_retarget.py`, `asset_convert/character/skin_replacement.py`, `asset_convert/nif/inv_marker.py`, `asset_convert/character/bow_rig.py`
 
+## One offset per NIF, and which slot picks it
+<a id="armor-offset-slot"></a>
+
+**Code:** `_offset_slot` in `asset_convert/nif/nif_converter.py`
+
+ONE offset applies to the whole NIF, so a record claiming a SINGLE biped slot
+answers the question outright. A multi-slot record has no single stated answer —
+the Knight of Order armour is helmet, torso, legs and feet in one mesh, flags
+`0x003D` — and taking its head-ward slot **lifted the entire suit by the
+helmet's dz=+7**: its Foot shape floated from z -1.3 to +5.9.
+
+Those are resolved instead by where the mesh's skinned vertex MASS actually
+sits, which is the rig the artist authored. Per-SHAPE slotting is handled
+separately inside the retarget.
+
+The same rule governs the body-splice fill: a fill partition takes the piece's
+primary biped slot, because an ARMA only renders partitions for slots it claims
+— a slot-44 pants ARMA culls a partition-32 fill, leaving invisible skin holes.
+
+## Head gear is fitted by MEASUREMENT, not by a scale
+<a id="head-gear-fit"></a>
+
+**Code:** `_apply_head_and_offsets`, `_retarget_worn_armor` in
+`asset_convert/nif/nif_converter.py`
+
+The two skulls differ in SHAPE, not by a factor. In world space the Oblivion
+head spans z **106.84..126.04** (19.20 tall) and the Skyrim head z
+**109.33..131.85** (22.52) — the Skyrim skull reaches **5.4 further down AND 2.1
+higher at the crown**. No single scale expresses that, which is why the old
+`ARMOR_PIECE_OFFSETS_PRN['helmet']` affine could never stop the back of the head
+poking through.
+
+Every Prn block hanging on the HEAD bone — helmets, hoods, hair — is instead run
+through `head_fit`: each vertex keeps its authored signed distance from the
+Oblivion skin, measured against the real Skyrim head. A helmet authored 2 units
+off the skull stays exactly 2 units off, and the skull can no longer poke
+through anything that covered it in Oblivion. Converted hair is fitted upstream
+in `hair_pipeline.bake_hair_variant` and must not be touched again.
+
+Everything else keeps the previous rules: skinned geometry is exact under the
+wrap (offsets suppressed), non-head Prn pieces such as shields keep their
+near-zero PRN offsets, and the FK-tuned constants remain the fallback whenever
+the fit or field data is unavailable.
+
+**Beast races get their own mesh**, exactly as vanilla ships one. A hood is ONE
+Oblivion record worn by every race, so unlike hair — whose EDID names its race —
+there is nothing on the record to read: the only way to serve a khajiit and a
+human from one source is to write a mesh per race and let the per-race ARMA
+pick. It must be a re-RUN of the whole conversion, not a re-fit of the finished
+mesh: a hood is multi-bone SKINNED geometry (Bip01 Head + Neck + Clavicles), so
+its head fit happens inside the retarget wrap, and there is no later point where
+the head verts can be displaced again without redoing the skin solve.
+
+Ordering inside the retarget is fixed: bones are renamed to Skyrim names only
+AFTER the skin transforms are correct, and the body skin is collected after that
+again, once the vertex positions are in Skyrim skeleton space — the section
+bounding boxes must localise the armour hole in post-retarget coordinates,
+including arm openings that shift ~20 z units.
+
+## Prn attachment: shields, torches and weapons
+<a id="shield-attachment"></a>
+
+**Code:** `_convert_prn` in `asset_convert/nif/nif_converter.py`
+
+The authored `Prn` string names the skeleton node a mesh hangs off. It is
+remapped to the Skyrim node and re-written onto the new root; gear that the
+engine has to resolve an equipped model for also gains a `BSInvMarker`.
+
+**A shield needs a real attach transform.** Oblivion straps it to
+`Bip01 L ForearmTwist` with an identity root transform, while Skyrim glues the
+NIF root to the `SHIELD` bone at the hand grip. `shield_attach_transform()` maps
+between the two attach frames through anatomically corresponding hand frames of
+both skeletons, so the shield sits on the forearm at the handle exactly as it
+did in Oblivion — no per-mesh bbox heuristics. The wrapper pass then detects the
+non-identity rotation and bakes it into an inner NiNode.
+
+**A TORCH also hangs off the SHIELD node** — Skyrim carries it in the off-hand —
+**but it is not a shield and must NOT get that transform.** A torch is authored
+at the grip in BOTH games: vanilla `meshes\weapons\torch\torch.nif` is
+identity rotation, zero translation, geometry at identity. Applying the shield
+transform threw it ~65° off with a -20.5 forearm-strap offset, which in game
+read as a torch at a completely wrong orientation. It still needs its own
+`BSInvMarker`, because `SHIELD` is in `_EQUIPPED_PRN_VALUES` and the per-mesh
+inventory pass skips it — vanilla's values are rot (4712, 0, 0), zoom 0.82: a
+shield's orientation, pulled back slightly.
+
+### <a id="weapon-attachment"></a>Side-carried weapons flip 180° about Y
+
+Skyrim's `WeaponAxe` attachment node has a different local orientation from
+Oblivion's `SideWeapon`, so the blade appears on the wrong side. A 180° rotation
+around Y — the handle-blade axis — corrects it without flipping the weapon
+upside-down, which a 180° Z rotation would do. The wrapper pass bakes the
+resulting non-identity rotation into an inner NiNode so Skyrim applies it to
+static geometry.
+
+**Bows are excluded.** Oblivion bows already match the Skyrim `WeaponBow` frame,
+with the string side at -X: the Oblivion steel bow's string is at x = -15.7 and
+vanilla `steelbow`'s string bones at x = -13.7. Flipping them held the bow
+backwards, with the curve facing the archer.
+
+## Weight-slider variants
+<a id="weight-slider-variants"></a>
+
+**Code:** `_write_weight_variants` in `asset_convert/nif/nif_converter.py`
+
+Biped wearables get vanilla-style `_0` / `_1` variants: the ARMA records for
+body, hands and feet gear reference `<name>_1.nif` with the weight slider
+enabled, and the engine lerps the pair per-vertex.
+
+**That lerp REQUIRES identical topology, so the `_1` file is never a second
+independent conversion.** Converting twice makes the body splice clip
+differently and the pair explodes at intermediate slider values. `_1` is the
+finished weight-0 mesh post-morphed by the fitted `_0`→`_1` Skyrim body morph
+(`body_wrap.morph_converted_to_weight1`), with rigid PRN blocks untouched. When
+there is no morph to apply — a PRN-only piece — the `_1` file is an identical
+copy, so the ARMA's path always resolves.
+
+**Which variants exist is the plugin's call, not the path's.** Gear without the
+slider (helmets, shields, rings) is referenced as the plain mesh and gains
+nothing from a pair, while slider gear never uses the plain mesh unless it also
+serves as a ground model. `wearable_plan` derives this from the same records the
+importer writes, so only referenced files are emitted, and `variants_for`
+returns BASE for anything no ARMO/CLOT record names — which keeps
+non-wearables on their plain conversion while gear filed outside `meshes\armor`
+still gets the pair its ARMA asks for.
+
+A beast-race head variant is a copy of ONE mesh, never a weight pair: head gear
+has the slider off, and `_0`/`_1` would collide with the race suffix.
+
+### <a id="prn-bone-fallback"></a>A worn piece with no Prn and no skin
+
+`BODY_PART_FALLBACK_PRN_BONE` maps a Skyrim body part onto the Oblivion bone
+that piece rigidly attaches to. It is used ONLY when a worn NIF carries no `Prn`
+extra data AND no skin at all: those meshes fell straight out of `add_prn_skin`
+and shipped with no skin instance, so they never left Oblivion object space —
+Morroblivion's `cryohelm.nif` rendered at z −5..27 instead of ~115..133, i.e. on
+the floor.
+
+The fallback is keyed off the wearing record's BMDT biped flags — the plugin's
+own statement of what the item is — never off the filename.
+
+## Splicing body geometry into a worn piece
+<a id="body-splice-fill-partition"></a>
+
+**Code:** `_convert_nif` in `asset_convert/nif/nif_converter.py`
+
+The splice runs AFTER the retarget and the bone rename, so the bone `NiNode`s in
+the armor NIF already carry Skyrim names to match against.
+
+It is always the **_0 fill**: the _1 variant is generated afterwards by
+post-morphing the finished mesh, which is what keeps the pair
+topology-identical (see [weight-slider variants](#weight-slider-variants)).
+
+**The fill partition takes the piece's primary biped slot.** An ARMA only renders
+partitions for the slots it claims, so a slot-44 pants ARMA culls a partition-32
+fill and leaves invisible skin holes. The slot is resolved by the same rule as
+the offset: a single-slot record states it, a multi-slot one is resolved from
+where the skinned vertex mass sits.
+
+## Rigid Prn skinning
+<a id="rigid-prn-skinning"></a>
+
+**Code:** `_add_prn_skin` in `asset_convert/nif/nif_converter.py`
+
+Oblivion attaches some armor pieces — helmets above all — rigidly to a bone
+through a `Prn` NiStringExtraData on the root, instead of skeleton skinning.
+Skyrim requires all worn-armor geometry to carry a `BSDismemberSkinInstance`,
+so the piece is given a one-bone skin: a NiNode placeholder for the target bone
+(matched by NAME against the skeleton at load) with every vertex at weight 1.0.
+
+**The per-bone bind transform is IDENTITY, and that is correct here.** The
+caller runs `_bake_node_transforms_into_verts` first, which leaves the verts in
+bone-LOCAL space — verified on the converted dog, whose Head centroid is
+(2.8, 14.5, 0), a bone-local coordinate rather than the (0, 42, 57) bind-world
+of `Bip01 Head`. So `vert · I · boneWorld` places the part correctly and it
+tracks the bone under both animation and ragdoll.
+
+**The per-bone bounding sphere must be real.** The engine visibility-culls
+skinned geometry by these spheres, moving each one by its live bone every
+frame, so a zero-radius sphere is never visible in game — even though NifSkope
+ignores the field and renders the mesh fine. With an identity bind the sphere
+is just the vertex bounds in mesh space.
+
+The bone name picks the biped slot; note that vanilla Skyrim puts **helmets on
+the HAIR slot (131)**, which is why a head or neck bone maps there rather than
+to a head slot.
+
 ## Contents
 
 - [NIF worn armor conversion](#nif-worn-armor-conversion)

@@ -9,12 +9,12 @@ from pathlib import Path
 
 import pytest
 
+from asset_convert.nif.nif_batch import batch_convert
 from asset_convert.nif.nif_converter import (
     OUTPUT_USER_VERSION as _SKY_UV,
     OUTPUT_USER_VERSION_2 as _SKY_UV2,
     OUTPUT_VERSION as _SKY_VERSION,
     rewrite_tex_path,
-    batch_convert,
     convert_nif,
 )
 from asset_convert.character import wearable_plan
@@ -3986,7 +3986,7 @@ class TestAnimationBlockLayout:
         'The wrapper-node SCALE morph swap was REVERTED 2026-08-10: it hard-'
         'freezes Skyrim on the ImperialDungeon05 tripwire (no crash, no log, '
         'process alive but never renders again), while the SAME mesh works in '
-        'Vilverin.  _emulate_morphs is back to the pre-90d04a3 '
+        'Vilverin.  morphs.emulate_morphs is back to the pre-90d04a3 '
         'NiVisController version, so this test asserts a design that is no '
         'longer shipped.  Re-enable it together with a real fix - see '
         'docs/commentary/asset_convert_nif.md "NiGeomMorpherController does not exist '
@@ -4000,10 +4000,10 @@ class TestAnimationBlockLayout:
         visible swap in-game.  The swap is a wrapper-NODE scale animation
         driven by NiTransformController -- the machinery confirmed working
         in-game (CharacterGen secret wall)."""
-        from asset_convert.nif.nif_converter import BLEND_INTERP_FLAGS_ARRAYSIZE
+        from asset_convert.nif.morphs import BLEND_INTERP_FLAGS_ARRAYSIZE
         import inspect
-        from asset_convert.nif import nif_converter
-        src = inspect.getsource(nif_converter._emulate_morphs)
+        from asset_convert.nif import morphs
+        src = inspect.getsource(morphs.emulate_morphs)
         assert 'NiVisController()' not in src, \
             'morph emulation must not construct NiVisController blocks'
         assert "b'NiVisController'" not in src, \

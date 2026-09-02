@@ -24,7 +24,7 @@ from asset_convert.nif import grass_profile
 from asset_convert.character import hair_pipeline
 from asset_convert.texture import landscape_normals
 from asset_convert.texture import luminance_textures
-from asset_convert.nif import nif_converter
+from asset_convert.nif import nif_batch
 from asset_convert.speedtree import spt_converter
 from asset_convert.texture import texture_prune
 from asset_convert.character import wearable_plan
@@ -126,7 +126,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         textures_only: Read and analyse the meshes, ship none of them; only the
                       textures (with their `_p` height maps) go to output.  For
                       PGPatcher, which patches meshes across the player's whole
-                      load order — see nif_converter.batch_convert.
+                      load order — see nif_batch.batch_convert.
 
     Returns a dict with keys: 'mesh_conversion', 'textures_copied', 'other_copied'.
     """
@@ -165,7 +165,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         plan = wearable_plan.build_plan(rec_dir)
         print(f"  Wearable variant plan: {len(plan)} meshes referenced by "
               f"ARMO/CLOT")
-        stats['mesh_conversion'] = nif_converter.batch_convert(
+        stats['mesh_conversion'] = nif_batch.batch_convert(
             str(mesh_src), output_dir=str(mesh_dst),
             fix_textures=True, remap_skeleton=None,
             subdir_filter=mesh_subdirs,
@@ -201,17 +201,6 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         print(f"  No meshes found at {mesh_src}")
         stats['mesh_conversion'] = {'converted': 0, 'skipped': 0, 'errors': 0}
 
-    # -----------------------------------------------------------------------
-    # Grass models — GRAS NIFs (from the export's GRAS.txt) get the vanilla
-    # grass shader profile and a copy under meshes\landscape\grass\, the
-    # location every working GRAS record uses (see grass_profile module doc).
-    # -----------------------------------------------------------------------
-    # -----------------------------------------------------------------------
-    # Hair — meshes\characters\ is in nif_converter.SKIP_PATHS, and hair could
-    # not be un-skipped into the batch anyway: one Oblivion HAIR record becomes
-    # several Skyrim meshes, because the per-NPC hair length (NPC_.LNAM) has no
-    # Skyrim equivalent and is baked in per variant.  See hair_pipeline.
-    # -----------------------------------------------------------------------
     if mesh_src.exists() and not textures_only:
         stats['hair'] = hair_pipeline.run(rec_dir, plugin_dir / 'meshes')
 
@@ -257,12 +246,6 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         stats['landscape_normals_fixed'] = fixed
         print(f"  Landscape normals: {checked} checked, {fixed} DXT1->DXT5 fixed")
 
-        # Every REMAINING normal map without a usable specular mask gets a
-        # constant one, and the shared stand-in normal is written for shapes
-        # whose own normal does not exist.  The mesh stage now writes a
-        # UNIFORM specular_strength of 1.0, so the modulation has to live here
-        # -- see nif_converter._SPEC_STRENGTH for why that trade is worth
-        # making.  Landscape is excluded: just handled, with a dimmer value.
         n_checked, n_fixed, n_kinds = landscape_normals.normalize_specular_alpha(
             tex_dst, skip=(os.sep + 'landscape' + os.sep,))
         # AFTER the sweep: the stand-in is a constant alpha by design, so a

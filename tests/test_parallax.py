@@ -565,8 +565,10 @@ def _shape(NifFormat, apply_mode, tex_rel='rocks\\stone.dds',
 
 
 def _convert(shape, src_nif, parallax_on):
+    """Convert one shape, with the per-process alpha cache cleared first."""
     from asset_convert.nif import nif_converter as nc
-    nc._PARALLAX_ALPHA_CACHE.clear()      # the cache is per process, not per test
+    from asset_convert.nif import shaders
+    shaders._PARALLAX_ALPHA_CACHE.clear()
     stats = {'_src_path': src_nif, '_parallax': parallax_on}
     ts = nc.process_geometry(shape, fix_textures=True, stats=stats)
     return ts, stats
@@ -599,9 +601,10 @@ class TestParallaxIsOptIn:
         distance is invisible anyway.
         """
         from asset_convert.nif import nif_converter as nc
+        from asset_convert.nif import shaders
         src = _tree(tmp_path, HEIGHT_DDS)
         far = str(Path(src).with_name(name))
-        nc._PARALLAX_ALPHA_CACHE.clear()
+        shaders._PARALLAX_ALPHA_CACHE.clear()
         stats = {'_src_path': far, '_parallax': True}
         ts = nc.process_geometry(_shape(nif, parallax.APPLY_HILIGHT2),
                                   fix_textures=True, stats=stats)
@@ -614,11 +617,11 @@ class TestParallaxIsOptIn:
     def test_a_normal_mesh_named_like_a_farm_still_converts(self, nif,
                                                             tmp_path):
         """The suffix test must not swallow ordinary names ending in 'far'."""
-        from asset_convert.nif import nif_converter as nc
-        assert not nc._is_lod_tier_mesh('meshes\\clutter\\farm.nif')
-        assert not nc._is_lod_tier_mesh('meshes\\x\\barnfar.nif')
-        assert nc._is_lod_tier_mesh('meshes\\x\\wall_far.nif')
-        assert nc._is_lod_tier_mesh('meshes\\x\\WALL_FAR16.NIF')
+        from asset_convert.nif import shaders
+        assert not shaders._is_lod_tier_mesh('meshes\\clutter\\farm.nif')
+        assert not shaders._is_lod_tier_mesh('meshes\\x\\barnfar.nif')
+        assert shaders._is_lod_tier_mesh('meshes\\x\\wall_far.nif')
+        assert shaders._is_lod_tier_mesh('meshes\\x\\WALL_FAR16.NIF')
 
     def test_unflagged_shape_is_untouched_with_the_switch(self, nif, tmp_path):
         """The mesh flag is the AUTHORED intent and is never guessed at: a
@@ -1007,7 +1010,8 @@ class TestTexturesOnly:
 
     def _run(self, nif, tmp_path, textures_only):
         from asset_convert.nif import nif_converter as nc
-        nc._PARALLAX_ALPHA_CACHE.clear()
+        from asset_convert.nif import shaders
+        shaders._PARALLAX_ALPHA_CACHE.clear()
         src = _source_nif(nif, tmp_path, parallax.APPLY_HILIGHT2)
         dst = tmp_path / 'out' / 'meshes' / 'tes4' / 'a.nif'
         r = nc.convert_nif(str(src), str(dst), parallax=True,
