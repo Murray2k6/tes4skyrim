@@ -220,12 +220,45 @@ VALUE defects, both in terrain:
 VHGT and VNML and nothing else. Morroblivion averages ~838 layer entries per
 LAND. Terrain with no base layer gives the landscape shader nothing to draw.
 
-Morrowind stores one texture index per 8x8-unit patch with **no blend
-weights**, so the authored signal is a single texture per patch — there is no
-alpha layer to recover. Each TES4 quadrant therefore gets one BASE layer from
-the dominant index over its 4x4 sub-patch. Measured: 5,006 of 5,168 LANDs
-carry layers (4,965 with all four quadrants); the other 162 name only the
-default texture in the source and correctly carry none.
+Each TES4 quadrant gets one BASE layer from the dominant index over its 4x4
+sub-patch. Measured: 5,006 of 5,168 LANDs carry layers (4,965 with all four
+quadrants); the other 162 name only the default texture in the source and
+correctly carry none.
+
+### <a id="terrain-texture-blending"></a>One base layer per quadrant is not enough
+
+The first fix stopped at that BASE layer, on the reasoning that Morrowind has
+no blend weights and so "there is no alpha layer to recover". **That reasoning
+was wrong, and it threw away most of the terrain.** Morrowind has no *weight*
+per patch, but it fully authors *which patch uses which texture* — and the
+spatial signal is exactly what ATXT/VTXT encodes. Keeping only the dominant
+index per quadrant discards the rest.
+
+Measured over `Morrowind.esm`'s 1,292 LANDs with VTEX (20,672 layer quadrants):
+
+| distinct textures in a 4x4 layer quadrant | quadrants |
+|---|---|
+| 1 | 3,456 (16.7%) |
+| 2 | 8,341 (40.3%) |
+| 3 | 5,935 (28.7%) |
+| 4 | 2,424 (11.7%) |
+| 5+ | 516 (2.5%) |
+
+**83.3% of layer quadrants lost texture data**, and the dominant texture covered
+only **67.1%** of a quadrant's area on average. Of TES4 cells, 88.1% use two or
+more textures. The visible symptom is a cell painted in one flat texture.
+
+Every non-dominant texture in a quadrant now becomes an ALPHA layer. The
+quadrant's VTXT opacity grid is 17x17 vertices over the same 4x4 patches
+(`wbVTXTPosition`: `pos = row*17 + col`, range 0..288), so one patch spans four
+vertex cells and each vertex is shared by the one to four patches meeting at it.
+A vertex's opacity is the share of those patches using the texture — 1.0 inside
+a patch, a partial value on a boundary. That ramp is what vanilla writes:
+sampling 300 Skyrim.esm LANDs, **62.6% of opacity values are strictly between 0
+and 1**, only 30.5% are fully opaque, and quadrants carry 1–6 alpha layers
+(mode 5). Morrowind's worst quadrant holds 8 distinct textures, so the
+importer's six-alpha cap (`build_land_layers`, which keeps the highest-coverage
+layers) binds on 4 quadrants of 20,672.
 
 **2. `DATA.Flags` was 3, which is not a value vanilla ever writes.**
 Per xEdit (`wbDefinitionsTES5.pas`): `0x001` normals/height map, `0x002`

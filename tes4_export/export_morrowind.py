@@ -24,8 +24,8 @@ from output_layout import record_dir
 from .morrowind_cell import parse_cell
 from .morrowind_ids import IdIndex, load_index, marker_formid
 from .morrowind_land import (TES4_TEX_SIZE, decode_heights, decode_textures,
-                             encode_heights, ltex_index, quadrant_normals,
-                             quadrant_textures)
+                             encode_heights, layer_lines, ltex_index,
+                             quadrant_normals, quadrant_textures)
 from .morrowind_world import (TES4_CELL_SIZE, WORLDSPACE_EDID, cell_editor_id,
                               cell_grid, tes3_cell_quadrants)
 from .record_types.morrowind import MORROWIND_EXPORTERS
@@ -457,26 +457,25 @@ def land_records(rec, ctx: MorrowindContext) -> list:
 
 
 def _land_layers(textures: list, quad: tuple, ctx: MorrowindContext) -> list:
-    """One BASE texture layer per TES4 quadrant, from the dominant TES3 index.
+    """Every texture a TES4 quadrant uses: a dominant BASE plus ALPHA layers.
 
     Terrain with no base layer is what crashed the game on entering a cell.
-    Morrowind stores one texture per 8x8-unit patch with no blend weights, so
-    the dominant index per quadrant is the whole of the authored signal --
-    there is no alpha layer to recover.
-    See: docs/commentary/tes4_export_morrowind.md#land-terrain
+    Morrowind carries no blend weight, but it does author which patch uses
+    which texture, so the non-dominant ones become alpha layers masked by the
+    patches naming them rather than being discarded.
+    See: docs/commentary/tes4_export_morrowind.md#terrain-texture-blending
     """
     if not textures:
         return []
     cell = quadrant_textures(textures, quad)
     lines, count = [], 0
     for sub in ((0, 0), (1, 0), (0, 1), (1, 1)):
-        form_id = _dominant_texture(_sub_patch(cell, sub), ctx)
-        if not form_id:
-            continue
-        lines.append(f'Layer[{count}].Type=BASE')
-        lines.append(f'Layer[{count}].BTXT.Texture={form_id}')
-        lines.append(f'Layer[{count}].BTXT.Quadrant={sub[0] + 2 * sub[1]}')
-        count += 1
+        patch = _sub_patch(cell, sub)
+        quadrant = sub[0] + 2 * sub[1]
+        for rank, (value, form_id) in enumerate(_ranked_textures(patch, ctx)):
+            lines.extend(layer_lines(count, quadrant, form_id, rank,
+                                     patch, value))
+            count += 1
     return [f'LayerCount={count}'] + lines if count else []
 
 
@@ -488,12 +487,15 @@ def _sub_patch(cell: list, sub: tuple) -> list:
             for y in range(half) for x in range(half)]
 
 
-def _dominant_texture(patch: list, ctx: MorrowindContext) -> str:
-    """The LTEX FormID covering most of one quadrant, or '' for the default."""
+def _ranked_textures(patch: list, ctx: MorrowindContext) -> list:
+    """One quadrant's (VTEX value, LTEX FormID) pairs, widest coverage first.
+
+    Ties break on the VTEX value so the layer order is stable across runs.
+    """
     tally = Counter(v for v in patch if ctx.land_texture(v))
-    if not tally:
-        return ''
-    return ctx.land_texture(tally.most_common(1)[0][0])
+    return [(value, ctx.land_texture(value))
+            for value, _n in sorted(tally.items(),
+                                    key=lambda kv: (-kv[1], kv[0]))]
 
 
 def cell_records(rec, ctx: MorrowindContext) -> tuple:

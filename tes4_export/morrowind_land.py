@@ -34,6 +34,13 @@ TES4_TEX_SIZE = 8
 #: VTEX stores an LTEX index plus one; zero means "no texture, use default".
 VTEX_INDEX_BIAS = 1
 
+#: Texture patches per side of a TES4 layer quadrant, and its VTXT vertex grid.
+QUAD_TEX_SIZE = TES4_TEX_SIZE // 2
+QUAD_VERTS = 17
+
+#: Vertex cells one texture patch spans: 16 cells across 4 patches.
+PATCH_VERTS = (QUAD_VERTS - 1) // QUAD_TEX_SIZE
+
 
 def decode_heights(vhgt: bytes) -> list:
     """The 65x65 absolute heights in a Morrowind VHGT subrecord.
@@ -148,3 +155,50 @@ def quadrant_textures(textures: list, quadrant: tuple) -> list:
     x0, y0 = qx * TES4_TEX_SIZE, qy * TES4_TEX_SIZE
     return [textures[(y0 + y) * TES3_TEX_SIZE + x0 + x]
             for y in range(TES4_TEX_SIZE) for x in range(TES4_TEX_SIZE)]
+
+
+def opacity_grid(patch: list, value: int) -> list:
+    """VTXT (position, opacity) pairs for one texture over a 4x4 patch.
+
+    Each of the quadrant's 17x17 vertices takes the share of the one to four
+    patches meeting at it that use `value`. Zero-opacity entries are omitted.
+    See: docs/commentary/tes4_export_morrowind.md#terrain-texture-blending
+    """
+    out = []
+    for vy in range(QUAD_VERTS):
+        for vx in range(QUAD_VERTS):
+            hits = total = 0
+            for py in _touching_patches(vy):
+                for px in _touching_patches(vx):
+                    total += 1
+                    hits += patch[py * QUAD_TEX_SIZE + px] == value
+            if hits:
+                out.append((vy * QUAD_VERTS + vx, hits / total))
+    return out
+
+
+def _touching_patches(vertex: int) -> range:
+    """The patch indices along one axis that share a given vertex."""
+    lo = (vertex - 1) // PATCH_VERTS
+    hi = vertex // PATCH_VERTS
+    return range(max(lo, 0), min(hi, QUAD_TEX_SIZE - 1) + 1)
+
+
+def layer_lines(index: int, quadrant: int, form_id: str, rank: int,
+                patch: list, value: int) -> list:
+    """One texture layer's export lines; rank 0 is the BASE, later ranks ALPHA.
+
+    See: docs/commentary/tes4_export_morrowind.md#terrain-texture-blending
+    """
+    pfx = f'Layer[{index}]'
+    if rank == 0:
+        return [f'{pfx}.Type=BASE', f'{pfx}.BTXT.Texture={form_id}',
+                f'{pfx}.BTXT.Quadrant={quadrant}']
+    grid = opacity_grid(patch, value)
+    lines = [f'{pfx}.Type=ALPHA', f'{pfx}.ATXT.Texture={form_id}',
+             f'{pfx}.ATXT.Quadrant={quadrant}', f'{pfx}.ATXT.Layer={rank - 1}',
+             f'{pfx}.VTXTCount={len(grid)}']
+    for i, (pos, opacity) in enumerate(grid):
+        lines.append(f'{pfx}.VT[{i}].Pos={pos}')
+        lines.append(f'{pfx}.VT[{i}].Opacity={opacity:.6f}')
+    return lines
