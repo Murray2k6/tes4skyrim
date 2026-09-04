@@ -39,9 +39,9 @@ import numpy as np
 
 from asset_convert import paths
 from asset_convert.nif.geometry_sanitize import sanitize_geometry_data
-from asset_convert.nif.nif_converter_morrowind import (build_skin_partitions,
-                                                       is_morrowind,
-                                                       run_morrowind_fixups)
+from asset_convert.nif.nif_converter_morrowind import (
+    attach_morrowind_collision, build_skin_partitions, disable_specular,
+    is_morrowind, run_morrowind_fixups)
 from asset_convert.nif.tex_paths import rewrite_tex_path
 from asset_convert.nif.shaders import (ALPHA_BLEND_ENABLED,
                                        ALPHA_DST_ONE, ALPHA_DST_SHIFT,
@@ -1096,12 +1096,13 @@ def _convert_one_root(data, i, root, stats, fix_textures, src_path, creature,
                             has_constraints)
 
 
-def _upgrade_version(data, stats=None) -> None:
+def _upgrade_version(data, stats=None) -> bool:
     """Stamp the Skyrim version, then run the fixups that need it.
 
-    A Morrowind skin partition is built HERE, not with the other source
-    fixups: the 4.0.0.2 schema has no `skin_partition` ref, so one built
-    earlier is unreachable and the writer drops it.
+    Returns whether the source was a Morrowind mesh. A Morrowind skin
+    partition is built HERE, not with the other source fixups: the 4.0.0.2
+    schema has no `skin_partition` ref, so one built earlier is unreachable
+    and the writer drops it.
     See: docs/commentary/asset_convert_nif.md#morrowind-skin-partitions
     """
     was_morrowind = is_morrowind(data)
@@ -1111,6 +1112,49 @@ def _upgrade_version(data, stats=None) -> None:
     data.header.endian_type = ENDIAN_LITTLE
     if was_morrowind:
         build_skin_partitions(data, stats)
+    return was_morrowind
+
+
+def _prepare_rig(data, creature, is_gnd, in_armor_dir, is_shield,
+                 authored_bp) -> bool:
+    """Ready the skin and rig before the version upgrade; is the mesh skinned?
+
+    A _gnd model's cloth-physics bones are stripped first.
+    See: docs/commentary/asset_convert_armor.md#nif-worn-armor-conversion
+    """
+    has_skin = _has_skin(data)
+    if is_gnd and has_skin:
+        strip_gnd_skin(data)
+        has_skin = False
+    if creature:
+        prepare_creature_rig(data, _strip_creature_bone_controllers,
+                             _add_creature_equip_nodes)
+    if creature and not has_skin:
+        rigid_skin_creature_parts(data)
+        has_skin = _has_skin(data)
+    if not creature and not is_gnd and in_armor_dir:
+        has_skin = prepare_worn_armor(data, has_skin, is_shield,
+                                      authored_bp, _has_skin)
+    return has_skin
+
+
+def _convert_roots(data, stats, fix_textures, src_path, creature,
+                   nif_basename, has_skin, is_worn_armor, is_gnd_armor,
+                   was_morrowind) -> None:
+    """Convert every root, then apply the Morrowind collision and shader rules.
+
+    See: docs/commentary/asset_convert_nif.md#morrowind-collision
+    """
+    for i, root in enumerate(data.roots):
+        if root is None:
+            continue
+        _convert_one_root(data, i, root, stats, fix_textures, src_path,
+                          creature, nif_basename, has_skin, is_worn_armor,
+                          is_gnd_armor)
+        if was_morrowind:
+            attach_morrowind_collision(data.roots[i], stats)
+    if was_morrowind:
+        disable_specular(data, stats)
 
 
 def _convert_nif(data, fix_textures=True, src_path='', weight=0,
@@ -1120,8 +1164,7 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
 
     worn, parallax and creature each select a different path.
     See: docs/commentary/asset_convert_nif.md#convert-nif-path-flags
-    Worn gear keeps a NiNode root; shields and _gnd take BSFadeNode, and a
-    _gnd model's cloth-physics bones are stripped first.
+    Worn gear keeps a NiNode root; shields and _gnd take BSFadeNode.
     See: docs/commentary/asset_convert_armor.md#nif-worn-armor-conversion
     Body geometry is spliced after the retarget.
     See: docs/commentary/asset_convert_armor.md#body-splice-fill-partition
@@ -1141,7 +1184,6 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
     }
 
     _run_source_fixups(data, stats)
-    has_skin = _has_skin(data)
 
     nif_basename = os.path.basename(src_path).lower()
     _is_gnd = is_ground_model(nif_basename)
@@ -1155,34 +1197,18 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
 
     _is_bow_weapon, _bow_string_masks = _capture_bow_masks(
         data, nif_basename, _is_gnd, _in_armor_dir)
-
-    if _is_gnd and has_skin:
-        strip_gnd_skin(data)
-        has_skin = False
-
+    has_skin = _prepare_rig(data, creature, _is_gnd, _in_armor_dir,
+                            _is_shield, _authored_bp)
     _body_nibs_to_splice: dict = {}
 
-    if creature:
-        prepare_creature_rig(data, _strip_creature_bone_controllers,
-                             _add_creature_equip_nodes)
-    if creature and not has_skin:
-        rigid_skin_creature_parts(data)
-        has_skin = _has_skin(data)
-    if not creature and not _is_gnd and _in_armor_dir:
-        has_skin = prepare_worn_armor(data, has_skin, _is_shield,
-                                      _authored_bp, _has_skin)
-
-    _upgrade_version(data, stats)
+    was_morrowind = _upgrade_version(data, stats)
 
     _is_creature_body = creature and has_skin
     _is_worn_armor = (not _is_gnd and _in_armor_dir and not _is_shield) \
         or _is_creature_body
-
-    for i, root in enumerate(data.roots):
-        if root is not None:
-            _convert_one_root(data, i, root, stats, fix_textures, src_path,
-                              creature, nif_basename, has_skin,
-                              _is_worn_armor, _is_gnd and _in_armor_dir)
+    _convert_roots(data, stats, fix_textures, src_path, creature,
+                   nif_basename, has_skin, _is_worn_armor,
+                   _is_gnd and _in_armor_dir, was_morrowind)
 
     if creature and has_skin:
         regen_creature_skins(data, _authored_bp, _authored_allowed)

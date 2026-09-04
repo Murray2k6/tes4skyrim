@@ -1812,8 +1812,33 @@ and Oblivion/Skyrim round-trips byte-identical to before.
 
 ## Morrowind collision: `RootCollisionNode` (2026-09-01)
 
-**Code:** `asset_convert/nif/nif_converter_morrowind.py`, called from
-`_run_source_fixups`.
+**Code:** `asset_convert/nif/nif_converter_morrowind.py`;
+`attach_morrowind_collision` is called from `_convert_roots` AFTER each
+root's Oblivion collision pass.
+
+### Attached after conversion, not before
+
+The first pass built the collision in `_run_source_fixups`. Two things then
+happened to it: `collision.py::_convert_shape` unwrapped the
+`bhkMoppBvTreeShape` as "stale Oblivion MOPP data" (the block list of every
+built mesh had a bare `bhkCompressedMeshShape` under the body, which no
+vanilla mesh ever has), and `_to_fade_node` swapped the root so the CMS
+`target` pointed at a NiNode no longer in the tree (pyffi: *"NiNode block is
+missing from the nif tree: omitting reference"*). Attaching after
+`_convert_one_root` fixes both, and also means the triangles are read from
+the FINAL geometry, so a root whose rotation `_wrap_root_transform` baked
+into a child needs no separate frame correction. The BSXFlags the
+collision-less tree earned are dropped and recomputed by `add_bsx_flags`.
+
+One consequence of attaching late: when `_wrap_root_transform` HAS baked a
+rotation (84 of 5,798 Morrowind meshes), the source root's children -- the
+RootCollisionNode among them -- now sit under one inner NiNode carrying the
+root's name, and the engine's direct-child search run on the BSFadeNode finds
+nothing. Measured on a 308-mesh sample of the first full build: 4 meshes
+(`in_dwrv_wall00`, `in_r_l_int_lcorner_03`, `in_r_s_int_wall_01`,
+`ex_strongholdruin_wall02`) still rendered their collision node and had no
+collision. `source_children_owner` recognises the wrapper and searches (and
+strips) there instead.
 
 Morrowind ships no Havok data whatsoever. Collision is an ordinary triangle
 mesh parked under a `RootCollisionNode`, which the engine consumes and never
@@ -1853,13 +1878,26 @@ reverse**; recursion is opt-in through an `RCN` string extra.
 
 Collision meshes are small: 2 triangles minimum, **48 median**, 2,219 maximum.
 
-### The scale is bare, not `/7`
+With render-mesh generation in place, a 308-mesh stride of the full 5,834-mesh
+output has collision on 291 (94%), every one a `bhkMoppBvTreeShape` + CMS with
+0 bare CMS, 0 leftover `RootCollisionNode`s and 0 specular flags on a
+Morrowind-sourced shader (the 4 that remain are the vanilla book reading rigs
+`book_inam` generates). The 17 without collision are the skinned meshes
+(banners, creature parts) plus the `NC`-flagged ones, exactly the set the
+engine itself does not collide with.
 
-`collision.py::_visual_tri_soup` uses `_HAVOK_SCALE / 7.0` because Oblivion
-pre-divides its collision data by 7. Morrowind authors the collision mesh in
-plain render units, so it takes `_HAVOK_SCALE` (0.1) alone. Verified on
-`in_dae_hall_ruin_l_01.nif`: a 512-unit interior piece spans +/-25.34 havok
-units, exactly x0.1.
+### The scale is `1 / 69.9904`, not `0.1`
+
+`collision.py`'s `_HAVOK_SCALE` (0.1) converts OBLIVION havok units (7 game
+units each) into Skyrim havok units (69.9904 each). Morrowind authors its
+collision mesh in plain render units, so the factor is `1 / GAME_UNITS_PER_HAVOK`
+-- the same `_HAVOK_SCALE / 7.0` that `_visual_tri_soup` applies to Oblivion
+render geometry. The first pass applied 0.1 to render units and every
+collision shape came out **7.0x too large**: `ex_hlaalu_b_12.nif` renders
++/-536 units wide and its CMS spanned +/-53.9 havok units (37,700 game units)
+instead of +/-7.66. Measured after the fix on the same mesh: CMS bounds
+`(-7.70, -4.91, -4.55)..(7.70, 4.91, 7.71)` against render bounds
+`(-539, -344, -318)..(539, 343, 540)` / 69.9904.
 
 The rigid body is the vanilla static block already established by the
 SpeedTree generator -- identity transform, mass 0, layer 1 (`SKYL_STATIC`),
@@ -1871,11 +1909,48 @@ material: Morrowind records no havok material, so nothing finer is recoverable.
 
 The node is stripped whether or not a shape was built -- it must never render.
 
-### Still missing
+### No node: the render mesh IS the collision
 
-The 55% with no collision node currently ship with **no collision**, where the
-engine would generate it from the render mesh. Doing that here means feeding
-render geometry through the same bridge, and it is a separate change.
+`bulletnifloader.cpp:170-230` is followed branch for branch by
+`collision_source`:
+
+| Source | Collision |
+|---|---|
+| root has an `NC`/`NCC` string extra | none (`NCC` is camera-only, which Skyrim lacks) |
+| `RootCollisionNode` with children | its triangles |
+| `RootCollisionNode` with none | none (camera-only) |
+| no node | the RENDER geometry |
+
+Generated collision skips what the engine skips: `AvoidNode` subtrees (AI
+hints), skinned shapes (actors), every child but the first of a
+`NiSwitchNode`/`NiFltAnimationNode`, and shapes named `Tri EditorMarker*` when
+the root carries an `MRK` extra. Triangles are taken in the ROOT frame
+(`get_transform(root)`), not the collision node's, so a transformed node no
+longer offsets the shape. Every mesh goes through the same Havok bridge, so
+the generated case is a real MOPP + CMS too.
+
+
+## Morrowind specular
+<a id="morrowind-specular"></a>
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py::disable_specular`,
+called from `_convert_nif` after the roots are converted.
+
+Converted Morrowind meshes rendered "super shiny". Every one takes the shared
+flat `default_n.dds` (Morrowind ships no normal maps), whose constant 64/255
+specular mask is applied under `_set_material_defaults` (glossiness 80,
+strength 1.0) with `SLSF1_Specular` set -- a coherent hard highlight on every
+flat wall.
+
+The authored indicator is the source engine itself: *"While NetImmerse and
+Gamebryo support specular lighting, Morrowind has its support disabled"*
+(`references/openmw/components/nifosg/nifloader.cpp:2892-2895`, which forces
+the material specular to black regardless of `NiSpecularProperty`). Measured
+on `ex_hlaalu_b_12.nif` / `ex_hlaalu_b_01.nif`: `NiMaterialProperty`
+glossiness 0.0, specular (0,0,0), no `NiSpecularProperty`. So every
+`BSLightingShaderProperty` on a 4.0.0.2 source gets `SLSF1_Specular` cleared;
+glossiness and strength keep the vanilla defaults, exactly as vanilla's own
+non-specular shapes do.
 
 
 ## Morrowind triangle flag

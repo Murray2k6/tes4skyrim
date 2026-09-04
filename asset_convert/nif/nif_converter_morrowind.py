@@ -1,11 +1,12 @@
-"""Morrowind mesh fixups: the RootCollisionNode idiom, and helper nodes.
+"""Morrowind mesh fixups: collision, helper nodes, specular, skin partitions.
 
 Morrowind carries no Havok data at all. Collision is a plain triangle mesh
 parked under a `RootCollisionNode`, which the engine consumes and never draws;
-a mesh without one gets collision built from its render geometry instead
-(`references/openmw/components/nifbullet/bulletnifloader.cpp:171`). Left alone
-the node ships as *visible* geometry and the object has no collision in Skyrim,
-so both halves of that rule have to be reproduced here.
+a mesh without one collides with its RENDER geometry instead, and an `NC`
+string extra on the root switches collision off
+(`references/openmw/components/nifbullet/bulletnifloader.cpp:171`). Every
+branch of that rule is reproduced here, in Skyrim havok units, AFTER the
+Oblivion collision pass has run over the converted tree.
 
 Detection is by BLOCK TYPE, never by name: pyffi reads the node as its own
 `RootCollisionNode` class exactly as the engine registers it
@@ -18,9 +19,11 @@ See: docs/commentary/asset_convert_nif.md#morrowind-collision
 from pyffi.formats.nif import NifFormat
 
 from asset_convert.collision.cms_builder import build_cms_collision
+from asset_convert.collision.collision import GAME_UNITS_PER_HAVOK
+from asset_convert.nif.nif_passes import add_bsx_flags
 
-#: Game units to Skyrim havok units; bare, not collision.py's `/7.0`.
-_HAVOK_SCALE = 0.1
+#: Render units to Skyrim havok units; Morrowind authors collision in render units.
+_HAVOK_SCALE = 1.0 / GAME_UNITS_PER_HAVOK
 
 #: SKY_HAV_MAT_STONE, the fallback for a material Morrowind never records.
 _SKY_MAT_STONE = 3741512247
@@ -30,6 +33,18 @@ _MAX_COLLISION_TRIS = 20000
 
 #: Helper nodes Morrowind uses that must never reach Skyrim as geometry.
 _HELPER_TYPES = ('AvoidNode',)
+
+#: Node types whose collision comes from their first child only.
+_FIRST_CHILD_ONLY = ('NiSwitchNode', 'NiFltAnimationNode')
+
+#: Root string extra prefix that disables collision ("NC", "NCC").
+_NO_COLLISION_PREFIX = 'nc'
+
+#: Root string extra that marks editor-only geometry.
+_MARKER_EXTRA = 'mrk'
+
+#: Shape name prefix of editor-only geometry when the root carries MRK.
+_MARKER_SHAPE_PREFIX = 'tri editormarker'
 
 #: Skin partition limits; the values every vanilla Skyrim partition uses.
 _MAX_BONES_PER_PARTITION = 4
@@ -58,20 +73,89 @@ def find_collision_node(root):
     return None
 
 
-def collision_triangles(node, scale: float = _HAVOK_SCALE) -> list:
-    """Every triangle under `node`, in Skyrim havok units in the root frame.
+def _text(value) -> str:
+    """A pyffi string value as lower-case text."""
+    if isinstance(value, bytes):
+        value = value.decode('cp1252', 'replace')
+    return str(value).lower()
 
-    Returns [] when the subtree holds no usable geometry, which the engine
-    treats as "collide with camera only" and we treat as no collision.
+
+def _extra_strings(node) -> list:
+    """Every NiStringExtraData text on `node`, lower-cased."""
+    return [_text(extra.string_data) for extra in node.get_extra_datas()
+            if getattr(extra, 'string_data', None) is not None]
+
+
+def source_children_owner(root):
+    """The node that holds the SOURCE root's children.
+
+    `_wrap_root_transform` moves them under one NiNode carrying the root's
+    name when it bakes a root rotation; the RootCollisionNode moves with
+    them, so that inner node is where the engine's direct-child search must
+    run after conversion.
+    See: docs/commentary/asset_convert_nif.md#morrowind-collision
     """
+    kids = [c for c in (getattr(root, 'children', None) or []) if c is not None]
+    if (len(kids) == 1 and type(kids[0]).__name__ == 'NiNode'
+            and kids[0].name == root.name):
+        return kids[0]
+    return root
+
+
+def collision_source(root) -> tuple:
+    """(subtree, generated) naming the geometry Morrowind collides with.
+
+    `subtree` is None when the mesh has no collision: an `NC`/`NCC` root
+    extra, or an EMPTY RootCollisionNode, which the engine treats as
+    camera-only. `generated` is True when the render mesh itself is the
+    collision, because no RootCollisionNode exists.
+    See: docs/commentary/asset_convert_nif.md#morrowind-collision
+    """
+    if any(s.startswith(_NO_COLLISION_PREFIX) for s in _extra_strings(root)):
+        return None, False
+    node = find_collision_node(source_children_owner(root))
+    if node is not None:
+        return (node if getattr(node, 'num_children', 0) else None), False
+    return root, True
+
+
+def _collision_shapes(node, skip_markers: bool):
+    """The render shapes under `node` the engine builds collision from.
+
+    AvoidNode subtrees are AI hints, skinned shapes are actors, and a
+    switch node contributes its first child only
+    (`bulletnifloader.cpp:handleNode`).
+    """
+    if type(node).__name__ in _HELPER_TYPES:
+        return
+    if isinstance(node, NifFormat.NiTriBasedGeom):
+        marker = skip_markers and _text(node.name).startswith(
+            _MARKER_SHAPE_PREFIX)
+        if node.skin_instance is None and not marker:
+            yield node
+        return
+    children = [c for c in (getattr(node, 'children', None) or [])
+                if c is not None]
+    if type(node).__name__ in _FIRST_CHILD_ONLY:
+        children = children[:1]
+    for child in children:
+        yield from _collision_shapes(child, skip_markers)
+
+
+def collision_triangles(node, root=None, scale: float = _HAVOK_SCALE) -> list:
+    """Every collision triangle under `node`, in havok units in `root`'s frame.
+
+    Returns [] when the subtree holds no usable geometry, or more than
+    `_MAX_COLLISION_TRIS`, which is treated as no collision.
+    """
+    root = node if root is None else root
+    skip_markers = _MARKER_EXTRA in _extra_strings(root)
     out = []
-    for block in node.tree():
-        if not isinstance(block, NifFormat.NiTriBasedGeom):
-            continue
+    for block in _collision_shapes(node, skip_markers):
         data = block.data
         if data is None:
             continue
-        verts = _transformed_verts(block, node, data, scale)
+        verts = _transformed_verts(block, root, data, scale)
         for a, b, c in data.get_triangles():
             if a != b and b != c and a != c:
                 out.append((verts[a], verts[b], verts[c]))
@@ -132,42 +216,64 @@ def build_collision(root, tris):
     return obj
 
 
-def _strip_children(root, doomed) -> int:
-    """Drop `doomed` children from `root`, compacting the array."""
-    keep = [c for c in root.children if c is not None and id(c) not in doomed]
-    if len(keep) == root.num_children:
+def _compact(array_owner, count_attr: str, array_attr: str, keep: list) -> int:
+    """Rewrite one pyffi ref array to `keep`; how many entries were dropped."""
+    array = getattr(array_owner, array_attr)
+    dropped = getattr(array_owner, count_attr) - len(keep)
+    if dropped <= 0:
         return 0
-    dropped = root.num_children - len(keep)
-    root.num_children = len(keep)
-    root.children.update_size()
-    for i, child in enumerate(keep):
-        root.children[i] = child
+    setattr(array_owner, count_attr, len(keep))
+    array.update_size()
+    for i, item in enumerate(keep):
+        array[i] = item
     return dropped
 
 
-def convert_morrowind_collision(root, stats=None) -> bool:
-    """Turn Morrowind's collision idiom into Skyrim collision on `root`.
+def _strip_children(root, doomed) -> int:
+    """Drop `doomed` children from `root`, compacting the array."""
+    keep = [c for c in root.children if c is not None and id(c) not in doomed]
+    return _compact(root, 'num_children', 'children', keep)
 
-    The node is consumed and stripped either way: it must never render. When
-    it holds no geometry the engine collides with the camera only, which has
-    no Skyrim equivalent, so the object simply ships without collision.
+
+def _count(stats, key: str, amount: int = 1) -> None:
+    """Add to one stats counter, when stats are being kept."""
+    if stats is not None and amount:
+        stats[key] = stats.get(key, 0) + amount
+
+
+def _recompute_bsx(root) -> None:
+    """Replace the BSXFlags the collision-less tree earned with a fresh one."""
+    keep = [e for e in root.extra_data_list
+            if e is not None and not isinstance(e, NifFormat.BSXFlags)]
+    _compact(root, 'num_extra_data_list', 'extra_data_list', keep)
+    add_bsx_flags(root)
+
+
+def attach_morrowind_collision(root, stats=None) -> bool:
+    """Give a CONVERTED root the collision Morrowind's engine would build.
+
+    Runs after the Oblivion collision pass, whose `_convert_shape` unwraps
+    every bhkMoppBvTreeShape as stale Oblivion data, and after the root swap,
+    so the CMS targets the final root. A RootCollisionNode is consumed and
+    stripped either way: it must never render.
+    See: docs/commentary/asset_convert_nif.md#morrowind-collision
     """
-    node = find_collision_node(root)
-    if node is None:
-        return False
-    tris = collision_triangles(node)
+    node, generated = collision_source(root)
+    tris = collision_triangles(node, root) if node is not None else []
     built = False
     if tris and getattr(root, 'collision_object', None) is None:
         obj = build_collision(root, tris)
         if obj is not None:
             root.collision_object = obj
+            _recompute_bsx(root)
             built = True
-    _strip_children(root, {id(node)})
-    if stats is not None:
-        stats['mw_collision_built'] = \
-            stats.get('mw_collision_built', 0) + int(built)
-        stats['mw_collision_stripped'] = \
-            stats.get('mw_collision_stripped', 0) + 1
+    owner = source_children_owner(root)
+    rcn = find_collision_node(owner)
+    if rcn is not None:
+        _strip_children(owner, {id(rcn)})
+        _count(stats, 'mw_collision_stripped')
+    _count(stats, 'mw_collision_built', int(built))
+    _count(stats, 'mw_collision_generated', int(built and generated))
     return built
 
 
@@ -182,9 +288,7 @@ def strip_helper_nodes(root, stats=None) -> int:
     if not doomed:
         return 0
     dropped = _strip_children(root, doomed)
-    if stats is not None and dropped:
-        stats['mw_helpers_stripped'] = \
-            stats.get('mw_helpers_stripped', 0) + dropped
+    _count(stats, 'mw_helpers_stripped', dropped)
     return dropped
 
 
@@ -204,8 +308,7 @@ def raise_triangle_flags(data, stats=None) -> int:
         block.num_triangles = len(tris)
         block.num_triangle_points = len(tris) * 3
         fixed += 1
-    if stats is not None and fixed:
-        stats['mw_triangle_flags'] = stats.get('mw_triangle_flags', 0) + fixed
+    _count(stats, 'mw_triangle_flags', fixed)
     return fixed
 
 
@@ -233,8 +336,7 @@ def build_skin_partitions(data, stats=None) -> int:
                 maxbonespervertex=_MAX_WEIGHTS_PER_VERTEX,
                 stripify=False, padbones=False, verbose=0)
         except Exception:
-            if stats is not None:
-                stats['mw_skin_failed'] = stats.get('mw_skin_failed', 0) + 1
+            _count(stats, 'mw_skin_failed')
             continue
         partition = getattr(skin.data, 'skin_partition', None)
         if partition is None:
@@ -242,22 +344,35 @@ def build_skin_partitions(data, stats=None) -> int:
         skin.skin_partition = partition
         skin.data.skin_partition = None
         built += 1
-    if stats is not None and built:
-        stats['mw_skin_partitions'] = \
-            stats.get('mw_skin_partitions', 0) + built
+    _count(stats, 'mw_skin_partitions', built)
     return built
 
 
+def disable_specular(data, stats=None) -> int:
+    """Clear the specular flag on every converted lighting shader.
+
+    Returns the number of shaders changed. Morrowind's renderer never
+    applied specular lighting, whatever the material said.
+    See: docs/commentary/asset_convert_nif.md#morrowind-specular
+    """
+    cleared = 0
+    for root in data.roots:
+        for block in root.tree():
+            if not isinstance(block, NifFormat.BSLightingShaderProperty):
+                continue
+            if block.shader_flags_1.slsf_1_specular:
+                block.shader_flags_1.slsf_1_specular = 0
+                cleared += 1
+    _count(stats, 'mw_specular_cleared', cleared)
+    return cleared
 
 
 def run_morrowind_fixups(data, stats=None) -> None:
-    """Apply every Morrowind-only repair, before the version upgrade runs."""
+    """Apply the Morrowind-only repairs that must precede the version upgrade."""
     raise_triangle_flags(data, stats)
     for root in data.roots:
-        if not hasattr(root, 'children'):
-            continue
-        strip_helper_nodes(root, stats)
-        convert_morrowind_collision(root, stats)
+        if hasattr(root, 'children'):
+            strip_helper_nodes(root, stats)
 
 
 def is_morrowind(data) -> bool:

@@ -346,7 +346,7 @@ def test_collision_node_becomes_skyrim_collision():
 
     from asset_convert.nif import pyffi_monkey_patch
     from asset_convert.nif.nif_converter_morrowind import (
-        collision_triangles, find_collision_node, run_morrowind_fixups)
+        attach_morrowind_collision, collision_triangles, find_collision_node)
     assert pyffi_monkey_patch, 'the 4.0.0.2 read layouts must be installed'
     from asset_convert.sources.bsa_extract_morrowind import iter_bsa
     from pyffi.formats.nif import NifFormat
@@ -365,15 +365,15 @@ def test_collision_node_becomes_skyrim_collision():
     node = find_collision_node(root)
     assert node is not None, 'collision node not found by block type'
 
-    tris = collision_triangles(node)
+    tris = collision_triangles(node, root)
     assert len(tris) == 30
     span = max(v[0] for t in tris for v in t) - min(v[0] for t in tris
                                                     for v in t)
-    assert 50 < span < 52, 'triangles are not in Skyrim havok units'
+    assert 7.2 < span < 7.4, 'triangles are not in Skyrim havok units'
 
     before = sum(1 for b in root.tree()
                  if isinstance(b, NifFormat.NiTriBasedGeom))
-    run_morrowind_fixups(data)
+    assert attach_morrowind_collision(root)
     after = sum(1 for b in root.tree()
                 if isinstance(b, NifFormat.NiTriBasedGeom))
     assert after < before, 'collision geometry would still render'
