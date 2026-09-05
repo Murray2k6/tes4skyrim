@@ -216,11 +216,11 @@ def test_teleport_door_names_the_door_it_arrives_beside():
 
 def _export(tmp_path, name: str, records, master_dirs=()) -> str:
     """Convert `records` as plugin `name` into tmp_path, borrowing from masters."""
-    ctx = load_context(str(tmp_path), master_dirs)
+    masters = [(os.path.basename(d), d) for d in master_dirs]
+    ctx = load_context(str(tmp_path), masters)
     out_dir = os.path.join(str(tmp_path), name)
     counts = write_export(convert_plugin(records, ctx), out_dir)
-    write_header(out_dir, [os.path.basename(d) for d in master_dirs],
-                 sum(counts.values()))
+    write_header(out_dir, [n for n, _d in masters], sum(counts.values()))
     return out_dir
 
 
@@ -242,7 +242,7 @@ def test_dependent_plugin_borrows_its_masters_records(tmp_path):
     master_ids = _form_ids(os.path.join(master, 'STAT.txt'))
     assert master_ids and all(fid.startswith('00') for fid in master_ids)
 
-    ctx = load_context(str(tmp_path), [master])
+    ctx = load_context(str(tmp_path), [(os.path.basename(master), master)])
     assert ctx.own_index == 1
     assert ctx.resolve('HUT') in master_ids
     assert ctx.resolve('unknown_master_object') == ''
@@ -442,7 +442,7 @@ def test_morroblivion_mode_refuses_without_the_patch(tmp_path):
     found, missing = converted_master_dirs(str(export), 'Child.esm',
                                            str(child), SOURCE_MORROBLIVION)
     assert not missing
-    assert any(PATCH_NAME in path for path in found), 'the patch is borrowed from'
+    assert any(n == PATCH_NAME for n, _d in found), 'the patch is borrowed from'
 
 
 def test_actor_drops_the_reference_to_a_package_that_never_emitted():

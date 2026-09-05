@@ -37,6 +37,7 @@ from collision_options import (
     WINDING_FIX_DEFAULT_PLUGINS,
     default_for_plugin as _winding_default,
 )
+import gui_mods as _gui_mods
 from gui_morrowind import add_source_menu as _add_morrowind_source_menu
 
 # ── Pipeline steps ─────────────────────────────────────────────────────────
@@ -1131,32 +1132,8 @@ def gui_main():
     converted_menu.bind("<Map>", lambda _e: _rebuild_converted_menu())
     _rebuild_converted_menu()
 
-    # ── Mods ▸ import a mod archive as a conversion source ────────────────────
-    # The discoverable half of the feature: dragging an archive onto the sidebar
-    # does the same thing, but drag-and-drop needs an optional package and is
-    # invisible until you try it, so this menu is the path that always works.
-    mods_menu = _menubutton("Mods")
-
-    def _import_mod_archive():
-        path = filedialog.askopenfilename(
-            title="Select a mod archive",
-            filetypes=[("Mod archives", "*.zip *.7z *.rar"),
-                       ("All files", "*.*")])
-        if path:
-            _begin_import(path)
-
-    def _import_mod_folder():
-        path = filedialog.askdirectory(title="Select an extracted mod folder")
-        if path:
-            _begin_import(path)
-
-    mods_menu.add_command(label="Import Mod Archive…",
-                          command=_import_mod_archive)
-    mods_menu.add_command(label="Import Mod Folder…",
-                          command=_import_mod_folder)
-    mods_menu.add_separator()
-    mods_menu.add_command(label="Manage Imported Mods…",
-                          command=lambda: _manage_mods())
+    mods_ui = _gui_mods.ModsUI(root, None, CLR, EXPORT_DIR, None, None)
+    _gui_mods.add_mods_menu(_menubutton("Mods"), mods_ui)
 
     # ── Tools ─────────────────────────────────────────────────────────────────
     tools_menu = _menubutton("Tools")
@@ -1761,7 +1738,7 @@ def gui_main():
         if not row:
             return
         if row["kind"] == "mod":
-            _manage_mods()
+            _gui_mods.manage_mods(mods_ui)
             return
         if len(_dir_sources()) <= 1:
             _info("Remove Source",
@@ -3985,482 +3962,10 @@ def gui_main():
         log_text.delete("1.0", tk.END)
         log_text.configure(state=tk.DISABLED)
 
-    # ── Mod archive import ────────────────────────────────────────────────────
-    # Entry points: Mods > Import..., and dropping an archive on the sidebar.
-    # Both land here.
-
-    def _begin_import(path: str):
-        """Inspect `path` on a worker thread, then show the confirm dialog.
-
-        Inspection is threaded because a 400 MB archive takes real time to list
-        and the UI thread must not freeze while it does. NOTHING is written
-        until the user confirms.
-        """
-        if running.is_set():
-            _info("Busy", "A conversion is running. Wait for it to finish "
-                          "before importing a mod.")
-            return
-
-        status_var.set("Reading archive...")
-        result = {}
-
-        def _work():
-            try:
-                from asset_convert.sources import mod_ingest
-                man = mod_ingest.inspect(path)
-                result["manifest"] = man
-                # The master scan stages every plugin out of the archive,
-                # so it belongs on this thread too -- running it while the
-                # confirm dialog was built froze the UI for minutes on a
-                # large .7z. Keyed per plugin so the dialog can refilter it
-                # on every checkbox click without touching the archive.
-                result["by_plugin"] = _masters_by_plugin(man)
-            except Exception as exc:            # IngestError and anything else
-                result["error"] = exc
-
-        def _done(thread):
-            if thread.is_alive():
-                root.after(80, lambda: _done(thread))
-                return
-            status_var.set("Ready")
-            if "error" in result:
-                _info("Cannot Import",
-                      f"{os.path.basename(path)}\n\n{result['error']}")
-                return
-            _confirm_import(path, result["manifest"],
-                            result.get("by_plugin") or {})
-
-        th = threading.Thread(target=_work, daemon=True)
-        th.start()
-        root.after(80, lambda: _done(th))
-
-    def _confirm_import(path, manifest, by_plugin=None):
-        """Show what was found and let the user choose plugins, then ingest.
-
-        `by_plugin` is {plugin_rel: [master, ...]}, computed on the caller's
-        worker thread -- see `_masters_by_plugin`, which is far too slow to
-        run here. Filtering it per selection is pure dict lookups, so the
-        warning can follow the checkboxes live.
-        """
-        by_plugin = by_plugin or {}
-        card = tk.Frame(outer, bg=CLR["panel"],
-                        highlightbackground=CLR["border"], highlightthickness=1)
-
-        def _close():
-            card.grab_release()
-            card.destroy()
-
-        tk.Label(card, text="Import Mod", bg=CLR["panel"], fg=CLR["text"],
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16,
-                                                     pady=(14, 0))
-        ttk.Separator(card, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=16,
-                                                       pady=8)
-
-        layout = (f"Data folder: {manifest.payload_root}"
-                  if manifest.payload_root else "Payload at archive root")
-        info = [os.path.basename(str(manifest.path)), layout,
-                manifest.summary()]
-        if manifest.bsas:
-            info.append(f"{len(manifest.bsas)} BSA(s) will be extracted")
-        if manifest.nested:
-            info.append(f"{len(manifest.nested)} nested archive(s)")
-        if manifest.ambiguous_data:
-            info.append("NOTE: several equally-shallow Data folders; "
-                        f"using {manifest.payload_root}")
-        tk.Label(card, text="\n".join(info), bg=CLR["panel"],
-                 fg=CLR["subtext"], font=("Segoe UI", 9), justify=tk.LEFT,
-                 anchor="w", wraplength=420).pack(anchor="w", padx=16)
-
-        # Which plugins to register. Defaults to all -- both TWMP archives ship
-        # two, and taking only one silently loses half the mod.
-        # An asset-only mod (texture/mesh pack) has none: say so rather than
-        # showing an empty "Plugins" heading.
-        picks = []
-        if manifest.plugins:
-            tk.Label(card,
-                     text="Plugins ({})".format(len(manifest.plugins)),
-                     bg=CLR["panel"], fg=CLR["text"],
-                     font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=16,
-                                                        pady=(10, 2))
-            # Better Cities ships 99 plugins. Packing 99 checkbuttons straight
-            # into the card makes it taller than the screen with no way to
-            # reach the buttons, so anything past a handful gets its own
-            # scrolling viewport.
-            if len(manifest.plugins) > PICKER_MAX_ROWS:
-                holder = tk.Frame(card, bg=CLR["panel"], height=260)
-                holder.pack(fill=tk.X, padx=16)
-                holder.pack_propagate(False)
-                pcanvas = tk.Canvas(holder, bg=CLR["panel"],
-                                    highlightthickness=0, borderwidth=0)
-                pbar = ttk.Scrollbar(holder, orient=tk.VERTICAL,
-                                     command=pcanvas.yview)
-                pcanvas.configure(yscrollcommand=pbar.set)
-                pbar.pack(side=tk.RIGHT, fill=tk.Y)
-                pcanvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-                plist = tk.Frame(pcanvas, bg=CLR["panel"])
-                win = pcanvas.create_window((0, 0), window=plist, anchor="nw")
-
-                def _psync(_e=None):
-                    pcanvas.configure(scrollregion=pcanvas.bbox("all"))
-                    pcanvas.itemconfigure(win, width=pcanvas.winfo_width())
-
-                plist.bind("<Configure>", _psync)
-                pcanvas.bind("<Configure>", _psync)
-                pcanvas.bind(
-                    "<MouseWheel>",
-                    lambda e: pcanvas.yview_scroll(
-                        -1 if e.delta > 0 else 1, "units"))
-
-                def _set_all(value):
-                    for _rel, v in picks:
-                        v.set(value)
-
-                bulk = tk.Frame(card, bg=CLR["panel"])
-                bulk.pack(anchor="w", padx=16, pady=(4, 0))
-                ttk.Button(bulk, text="All",
-                           command=lambda: _set_all(True)).pack(side=tk.LEFT)
-                ttk.Button(bulk, text="None",
-                           command=lambda: _set_all(False)).pack(side=tk.LEFT,
-                                                                 padx=(6, 0))
-            else:
-                plist = card
-
-            for rel in manifest.plugins:
-                var = tk.BooleanVar(value=True)
-                picks.append((rel, var))
-                # trace_add, not the Checkbutton command: it also fires for
-                # the All/None buttons, which set the vars directly.
-                var.trace_add("write", lambda *_a: _queue_refresh())
-                tk.Checkbutton(plist, text=os.path.basename(rel),
-                               variable=var,
-                               bg=CLR["panel"], fg=CLR["text"],
-                               selectcolor=CLR["btn"],
-                               activebackground=CLR["panel"],
-                               activeforeground=CLR["text"],
-                               font=("Segoe UI", 9), anchor="w",
-                               highlightthickness=0, borderwidth=0).pack(
-                    anchor="w", padx=(24 if plist is card else 4))
-        else:
-            tk.Label(card,
-                     text="No plugin — assets only.\n"
-                          "Export, Import, Scripts and Creatures will be "
-                          "unavailable for this mod.",
-                     bg=CLR["panel"], fg=CLR["subtext"],
-                     font=("Segoe UI", 9), justify=tk.LEFT, anchor="w",
-                     wraplength=420).pack(anchor="w", padx=16, pady=(10, 0))
-
-        # Masters that have no export yet. This is the project's classic silent
-        # failure -- a mod whose master was never converted imports "fine" and
-        # resolves every master-owned record to nothing.
-        # Follows the selection: unticking the plugin that wanted a master
-        # must drop that master from the warning, or the user is told to
-        # convert something nothing they picked needs.
-        miss_var = tk.StringVar(value="")
-        miss_lbl = tk.Label(card, textvariable=miss_var, bg=CLR["panel"],
-                            fg=CLR["red"], font=("Segoe UI", 9),
-                            justify=tk.LEFT, anchor="w", wraplength=420)
-
-        # Plain flag, never winfo_ismapped(): that reads 0 until the geometry
-        # manager next runs, so a hide/show pair inside one callback left the
-        # warning permanently hidden (measured -- re-ticking a plugin after
-        # None did not bring it back).
-        miss_shown = [False]
-
-        def _refresh_missing(*_a):
-            chosen = [rel for rel, var in picks if var.get()]
-            missing = _missing_masters(by_plugin, chosen)
-            if not missing:
-                miss_var.set("")
-                if miss_shown[0]:
-                    miss_lbl.pack_forget()
-                    miss_shown[0] = False
-                return
-            # Better Cities lists dozens. Showing every one makes the card
-            # taller than the screen, so name a few and count the rest.
-            shown = sorted(missing)
-            head = shown[:10]
-            tail = ("\n  …and {} more".format(len(shown) - len(head))
-                    if len(shown) > len(head) else "")
-            miss_var.set("Missing masters — convert these FIRST:\n  "
-                         + "\n  ".join(head) + tail)
-            if not miss_shown[0]:
-                miss_lbl.pack(anchor="w", padx=16, pady=(10, 0),
-                              before=btns_anchor)
-                miss_shown[0] = True
-
-        # All/None writes 99 vars in a loop, and every write fires the trace.
-        # Recomputing on each one measured 708 ms for a single click, so the
-        # work is coalesced into one idle-time pass.
-        pending = [None]
-
-        def _queue_refresh():
-            if pending[0] is not None:
-                return
-
-            def _run():
-                pending[0] = None
-                _refresh_missing()
-
-            pending[0] = card.after_idle(_run)
-
-        # Anchor so the warning always reappears ABOVE the buttons rather
-        # than after them, whatever order it is shown and hidden in.
-        btns_anchor = tk.Frame(card, bg=CLR["panel"], height=0)
-        btns_anchor.pack(anchor="w")
-        _refresh_missing()
-
-        keep_var = tk.BooleanVar(value=True)
-        if not manifest.is_folder:
-            try:
-                size_mb = manifest.path.stat().st_size / 1024 ** 2
-            except OSError:
-                size_mb = 0
-            tk.Checkbutton(
-                card,
-                text=f"Keep a copy of the archive ({size_mb:.0f} MB) so steps "
-                     f"can be re-run later",
-                variable=keep_var, bg=CLR["panel"], fg=CLR["subtext"],
-                selectcolor=CLR["btn"], activebackground=CLR["panel"],
-                activeforeground=CLR["text"], font=("Segoe UI", 9),
-                anchor="w", highlightthickness=0, borderwidth=0,
-                wraplength=400, justify=tk.LEFT).pack(anchor="w", padx=16,
-                                                      pady=(10, 0))
-
-        btns = ttk.Frame(card, style="Panel.TFrame")
-        btns.pack(anchor="e", padx=16, pady=(14, 14))
-
-        def _go():
-            chosen = [rel for rel, var in picks if var.get()]
-            keep = bool(keep_var.get())
-            _close()
-            # Only a mod that HAS plugins can have none selected. An
-            # asset-only mod legitimately passes an empty list.
-            if manifest.plugins and not chosen:
-                _info("Import Mod", "No plugins selected.")
-                return
-            _run_import(manifest.path, manifest, chosen or None, keep)
-
-        ttk.Button(btns, text="Cancel", command=_close).pack(side=tk.RIGHT,
-                                                             padx=(6, 0))
-        ttk.Button(btns, text="Import", style="Accent.TButton",
-                   command=_go).pack(side=tk.RIGHT)
-
-        card.place(relx=0.5, rely=0.5, anchor="center")
-        card.grab_set()
-
     def _plugin_esm(out_root, plugin: str):
         """The converted plugin file, wherever its mod's folder is."""
-        try:
-            from output_layout import plugin_esm
-            return plugin_esm(out_root, plugin, EXPORT_DIR)
-        except ImportError:
-            return Path(out_root) / plugin / plugin   # noqa: plugin-path (no-registry fallback)
-
-    def _master_export_present(master: str) -> bool:
-        """True when `master`'s exported records exist under EXPORT_DIR."""
-        try:
-            from output_layout import record_dir
-            return record_dir(EXPORT_DIR, master).is_dir()
-        except ImportError:
-            return (EXPORT_DIR / master).is_dir()   # noqa: plugin-path (no-registry fallback)
-
-    def _masters_by_plugin(manifest):
-        """{plugin_rel: [master, ...]} read straight out of the archive.
-
-        Per-plugin, not a merged set, so the confirm dialog can recompute the
-        missing-master warning instantly as the user ticks plugins on and off
-        -- re-reading the archive on every click is not an option (see below).
-
-        ONE `extract_all` pass, never `extract_one` per plugin. A solid .7z is
-        a single compressed stream, so extracting one member costs a scan of
-        the whole archive: Better Cities (1.7 GB, 99 plugins) measured 3.7 s
-        per member = 364 s serially, against 3.5 s for all 99 in one pass.
-        Slow enough that Windows painted the window "Not Responding" while it
-        ran -- this must also never be called from the UI thread.
-        """
-        try:
-            import tempfile
-
-            from asset_convert.sources import archive as _archive
-            from convert import get_masters_from_binary
-        except Exception:
-            return {}
-
-        if not manifest.plugins:
-            return {}
-
-        by_plugin = {}
-        with tempfile.TemporaryDirectory(prefix="tesconv_mast_") as tmp:
-            if manifest.is_folder:
-                root = manifest.path / manifest.payload_root
-                staged = [(rel, root / rel) for rel in manifest.plugins]
-            else:
-                members = [(f"{manifest.payload_root}/{rel}"
-                            if manifest.payload_root else rel)
-                           for rel in manifest.plugins]
-                try:
-                    _archive.extract_all(manifest.path, tmp, members=members)
-                except Exception:
-                    return {}
-                # extract_all preserves the archive's directory structure, so
-                # each staged file sits under its full member path.
-                staged = [(rel, Path(tmp) / mem)
-                          for rel, mem in zip(manifest.plugins, members)]
-
-            # A plugin's own siblings in the same archive are about to be
-            # converted alongside it, so they are never "missing".
-            own = {os.path.basename(rel).lower() for rel in manifest.plugins}
-            for rel, target in staged:
-                try:
-                    if not os.path.isfile(target):
-                        continue
-                    by_plugin[rel] = [
-                        m for m in get_masters_from_binary(str(target))
-                        if m.lower() not in own]
-                except Exception:
-                    continue
-        return by_plugin
-
-    def _missing_masters(by_plugin, chosen):
-        """Masters of the SELECTED plugins that have no export records yet.
-
-        Resolved through `record_dir`, never by joining the name onto export/:
-        an imported mod's plugins live inside their mod's shared folder, so a
-        master that IS converted reads as missing under the plain join and the
-        dialog tells the user to convert something they already have.
-        """
-        missing = set()
-        for rel in chosen:
-            for master in by_plugin.get(rel) or ():
-                if not _master_export_present(master):
-                    missing.add(master)
-        return missing
-
-    def _run_import(path, manifest, chosen, keep_archive):
-        """Do the ingest on a worker thread, streaming progress to the log."""
-        _clear_log()
-        _log(f"Importing {os.path.basename(str(path))}")
-        _set_running(True)
-        _start_timer()
-        q = queue.Queue()
-        outcome = {}
-
-        def _work():
-            try:
-                from asset_convert.sources import mod_ingest
-                outcome["results"] = mod_ingest.ingest(
-                    path, EXPORT_DIR, plugin_members=chosen,
-                    keep_archive=keep_archive, manifest=manifest,
-                    log=q.put)
-            except Exception as exc:
-                outcome["error"] = exc
-
-        def _drain(thread):
-            try:
-                while True:
-                    _log(q.get_nowait())
-            except queue.Empty:
-                pass
-            if thread.is_alive():
-                root.after(60, lambda: _drain(thread))
-                return
-            _set_running(False)
-            _stop_timer()
-            if "error" in outcome:
-                _log(f"  FAILED: {outcome['error']}")
-                _info("Import Failed", str(outcome["error"]))
-                return
-            names = sorted(outcome.get("results") or {})
-            _log(f"  Imported: {', '.join(names)}")
-            # Switch the plugin selector to the mod just imported -- that is
-            # what the user wants to convert next.
-            try:
-                from asset_convert.sources import source_registry
-                entry = source_registry.get(EXPORT_DIR, names[0]) if names else None
-                # Source ids are prefixed ("mod:<group_id>"); passing the bare
-                # group_id silently fails to match and leaves the old source
-                # selected, so the user has to switch by hand.
-                gid = entry.get("group_id") if entry else None
-                _refresh_scopes(select=f"mod:{gid}" if gid else None)
-                _apply_scope(select_plugin=names[0] if names else None)
-            except Exception:
-                _refresh_scopes()
-                _apply_scope()
-            _apply_step_availability()
-            _refresh_upgrade_notice()
-
-        th = threading.Thread(target=_work, daemon=True)
-        th.start()
-        root.after(60, lambda: _drain(th))
-
-    def _manage_mods():
-        """List imported mods, with a Remove action for each."""
-        try:
-            from asset_convert.sources import source_registry
-            groups = source_registry.groups(EXPORT_DIR)
-        except Exception as exc:
-            _info("Imported Mods", f"Could not read the mod registry:\n\n{exc}")
-            return
-
-        if not groups:
-            _info("Imported Mods",
-                  "No mods imported yet.\n\n"
-                  "Use Mods > Import Mod Archive…, or drag an archive onto "
-                  "the left panel.")
-            return
-
-        card = tk.Frame(outer, bg=CLR["panel"],
-                        highlightbackground=CLR["border"], highlightthickness=1)
-
-        def _close():
-            card.grab_release()
-            card.destroy()
-
-        tk.Label(card, text="Imported Mods", bg=CLR["panel"], fg=CLR["text"],
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16,
-                                                     pady=(14, 0))
-        ttk.Separator(card, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=16,
-                                                       pady=8)
-
-        body = ttk.Frame(card, style="Panel.TFrame")
-        body.pack(fill=tk.BOTH, padx=16)
-
-        def _remove(plug_names):
-            if not _confirm(
-                    "Remove Imported Mod",
-                    "Delete the imported copy of:\n\n  "
-                    + "\n  ".join(plug_names)
-                    + "\n\nThis removes their export folders. The original "
-                      "archive on disk is not touched.",
-                    yes="Remove", no="Cancel"):
-                return
-            from asset_convert.sources import mod_ingest
-            for name in plug_names:
-                try:
-                    mod_ingest.remove(name, EXPORT_DIR)
-                except Exception as exc:
-                    _log(f"  Could not remove {name}: {exc}")
-            _close()
-            _refresh_scopes()
-            _apply_scope()
-            _manage_mods()
-
-        for _gid, label, plugs in groups:
-            row = ttk.Frame(body, style="Panel.TFrame")
-            row.pack(fill=tk.X, pady=3)
-            tk.Label(row, text=f"{label}\n  " + "\n  ".join(plugs),
-                     bg=CLR["panel"], fg=CLR["subtext"],
-                     font=("Segoe UI", 9), justify=tk.LEFT,
-                     anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True)
-            ttk.Button(row, text="Remove", style="Danger.TButton",
-                       command=lambda p=list(plugs): _remove(p)).pack(
-                side=tk.RIGHT, padx=(8, 0))
-
-        ttk.Button(card, text="Close", command=_close).pack(anchor="e",
-                                                            padx=16,
-                                                            pady=(14, 14))
-        card.place(relx=0.5, rely=0.5, anchor="center")
-        card.grab_set()
+        from output_layout import plugin_esm
+        return plugin_esm(out_root, plugin, EXPORT_DIR)
 
     _timer_job = [None]
     _timer_start = [0.0]
@@ -4511,6 +4016,25 @@ def gui_main():
             # actions would produce, so a previously-done one goes live again.
             _refresh_global_btns()
         _update_run_btn()
+
+    def _bind_mods_ui() -> None:
+        """Give gui_mods the callbacks its dialogs need, now they all exist."""
+        mods_ui.outer = outer
+        mods_ui.running = running
+        mods_ui.status_var = status_var
+        mods_ui.info = _info
+        mods_ui.confirm = _confirm
+        mods_ui.log = _log
+        mods_ui.clear_log = _clear_log
+        mods_ui.refresh_scopes = _refresh_scopes
+        mods_ui.apply_scope = _apply_scope
+        mods_ui.apply_step_availability = _apply_step_availability
+        mods_ui.refresh_upgrade_notice = _refresh_upgrade_notice
+        mods_ui.set_running = _set_running
+        mods_ui.start_timer = _start_timer
+        mods_ui.stop_timer = _stop_timer
+
+    _bind_mods_ui()
 
     def _cancel_clicked():
         if running.is_set():
@@ -5231,7 +4755,7 @@ def gui_main():
                           "Drop a .zip, .7z or .rar, or an extracted mod "
                           "folder.")
                     return
-            _begin_import(path)
+            _gui_mods.begin_import(path, mods_ui)
 
         # Both the frame and the scroll viewport that now covers it: a drop
         # onto the sidebar lands on whichever of the two is under the pointer,

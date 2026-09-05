@@ -273,9 +273,7 @@ def _mod_commands(args, export_dir: str, tes4_data: str) -> int:
         return 1
 
     print(f"Archive : {manifest.path.name}")
-    print(f"Layout  : "
-          + (f"Data folder '{manifest.payload_root}'" if manifest.payload_root
-             else "archive root"))
+    print(f"Layout  : {mod_ingest.layout_description(manifest.payload_root)}")
     print(f"Contents: {manifest.summary()}")
     if manifest.ambiguous_data:
         print("WARNING: several equally-shallow Data folders "

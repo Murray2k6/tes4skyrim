@@ -310,7 +310,7 @@ class MorrowindContext:
         raise RuntimeError('no free derived FormID for %r' % record_id)
 
 
-def load_context(export_root: str, master_dirs=()) -> MorrowindContext:
+def load_context(export_root: str, masters=()) -> MorrowindContext:
     """Build a context from the converted masters, in master-list order.
 
     Each master's ids are re-keyed into THIS plugin's master list: the
@@ -320,8 +320,8 @@ def load_context(export_root: str, master_dirs=()) -> MorrowindContext:
     See: docs/commentary/tes4_export_morrowind.md#masters
     """
     paths = [p if os.path.isabs(p) else os.path.join(export_root, p)
-             for p in master_dirs]
-    slot_of = {n.lower(): i for i, n in enumerate(_master_list(paths))}
+             for _n, p in masters]
+    slot_of = {n.lower(): i for i, n in enumerate(_master_list(masters))}
     index = IdIndex()
     for slot, path in enumerate(paths):
         own = masters_from_export_header(path)
@@ -403,7 +403,7 @@ def run_export(file_name: str, source: str, export_dir: str,
 
 def converted_master_dirs(export_dir: str, plugin: str, source_path: str,
                           mode: str = SOURCE_VANILLA) -> tuple:
-    """(export dirs, unconverted names) for a Morrowind plugin's declared masters.
+    """([(name, export dir)], unconverted names) for the declared masters.
 
     The plugin's own MAST chain, in its order. In Morroblivion mode every
     converted `Morrowind_ob*` export comes first, then the compatibility patch
@@ -421,7 +421,7 @@ def converted_master_dirs(export_dir: str, plugin: str, source_path: str,
             continue
         path = str(record_dir(export_dir, name))
         if os.path.isfile(os.path.join(path, '_HEADER.txt')):
-            found.append(path)
+            found.append((name, path))
         else:
             missing.append(name)
     return found, missing
@@ -437,40 +437,37 @@ def morroblivion_exports(export_dir: str) -> list:
                                         n.lower()))
 
 
-def export_plugin(source_path: str, export_dir: str, master_dirs=()) -> dict:
+def export_plugin(source_path: str, export_dir: str, masters=()) -> dict:
     """Convert one Morrowind plugin into the standard export tree.
 
     Records land in `record_dir(export_dir, <plugin>)`, the same resolver every
     other stage uses, so nothing downstream needs to know the source was TES3.
     """
     plugin = os.path.basename(source_path)
-    ctx = load_context(export_dir, master_dirs)
+    ctx = load_context(export_dir, masters)
     records = read_file(source_path)[1]
     out = convert_plugin(records, ctx)
     out_dir = str(record_dir(export_dir, plugin))
     counts = write_export(out, out_dir)
-    write_header(out_dir, _master_list(master_dirs), sum(counts.values()),
+    write_header(out_dir, _master_list(masters), sum(counts.values()),
                  f'Converted from {plugin}')
     return {'plugin': plugin, 'output': out_dir, 'counts': counts,
             'dropped': sum(ctx.unresolved.values()),
             'unlinked_doors': ctx.unlinked_doors}
 
 
-def _master_list(master_dirs) -> list:
-    """The converted plugins whose records this one borrows.
+def _master_list(masters) -> list:
+    """The plugin NAMES this export declares as masters, in order.
 
-    Skyrim.esm is NOT listed: the writer adds it to every plugin, while a
-    `Master[]` line here means "a converted export to build overrides from"
-    and made the importer demand an output/Skyrim.esm that cannot exist.
-    Standalone Morrowind borrows nothing and declares nothing, exactly as
-    Oblivion.esm's own export header does.
+    Read from the pairs, never from a directory basename: a plugin inside an
+    imported mod lives in its GROUP's folder. Skyrim.esm is never listed.
+    See: docs/commentary/tes4_export_morrowind.md#masters
     """
-    masters = []
-    for path in master_dirs:
-        name = os.path.basename(str(path).rstrip('/\\'))
-        if name and name not in masters:
-            masters.append(name)
-    return masters
+    names = []
+    for name, _path in masters:
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def export_record(rec, ctx: MorrowindContext) -> list:

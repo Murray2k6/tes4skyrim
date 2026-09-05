@@ -173,14 +173,48 @@ Per spec, exactly two shapes:
 > archive root.**
 
 Shallowest `Data` wins, so a mod shipping `Docs\Data\` beside a real `Data\`
-resolves deterministically. Equal-depth ties are reported, never guessed.
+resolves deterministically. Equal-depth ties are reported, never guessed —
+unless every tied folder is an installer sub-package, which is the case below.
 Everything outside the payload root is ignored — readmes, screenshots,
 Elsweyr's `00 …ReadMe-Quests-Guide\`.
 
-Inside it, entries use the **same category split as the BSA extractor**,
-lower-cased: `meshes\`, `trees\`, `textures\`, `sound\`, everything else →
-`misc/`. Elsweyr's `DistantLOD\` lands in `misc/DistantLOD/` — where the BSA
-path would have put it.
+#### <a id="payload-roots"></a>BAIN sub-packages
+
+A BAIN "complex" package has no folder named `Data` at all. It ships each
+installable option in its own top-level folder, and the installer merges the
+ones the user picks:
+
+    00 Data Files\                  meshes, textures, icons, sound...
+    01 Data Files - Normal Maps\    textures
+
+**The numeric prefixes are cosmetic.** Wrye Bash never parses them — it sorts
+sub-packages by name and nothing more. The real rule is structural, taken from
+`Installer._reset_cache` in Wrye Bash's `Mopy/bash/bosh/bain.py`:
+
+* **Type 1 (simple)** — a loose file of an installable type at the archive
+  root, or a top-level folder that is itself a recognised data dir. The payload
+  is the archive root and there are no sub-packages. This check WINS: one loose
+  `.esp` at the root demotes the whole archive.
+* **Type 2 (complex)** — otherwise, every top-level folder whose own second
+  level is a recognised data dir, or which holds a top-level installable file.
+  All of them are payload roots.
+
+`DATA_DIRS` is Wrye Bash's `GameInfo.Bain.data_dirs`, the union of its Oblivion
+and Morrowind sets, so this works for both games.
+
+One deliberate divergence: Wrye Bash also accepts a docs-only folder as a
+sub-package, because it skips the docs afterwards. We drop docs outright, so a
+`ReadMe-Quests-Guide\` folder that qualified here would install as an empty
+sub-package — `_is_subpackage` requires a real asset or plugin.
+
+Because several roots can be active, `payload_root` is a LIST; a single `Data`
+folder is the one-element case, `[]` means the archive root, and an ordinary
+equal-depth `Data` tie is still reported as ambiguous rather than merged.
+
+Measured on Tamriel Data (HD) (2.3 GB, 46,864 files): with the old exact-`Data`
+rule no root matched and the whole tree landed in `misc/00 Data Files/…`, where
+no asset stage could see it. Now it reads as 30,930 meshes, 9,246 textures,
+1,565 sound, 5,122 misc.
 
 ### 3.2 Nested archives
 
