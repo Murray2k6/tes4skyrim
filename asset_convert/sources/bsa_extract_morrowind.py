@@ -17,6 +17,7 @@ Offsets in the size/offset table are relative to the end of the hash table.
 See: docs/commentary/tes4_export_morrowind.md#tes3-bsa
 """
 
+import shutil
 import struct
 from pathlib import Path
 
@@ -24,6 +25,35 @@ from pathlib import Path
 TES3_BSA_MAGIC = 0x00000100
 
 _HEADER_SIZE = 12
+
+#: Loose sound subfolder holding Morrowind's voice acting, which is not converted.
+_VOICE_DIR = 'vo'
+
+
+def copy_loose_sounds(data_dir, asset_dir) -> int:
+    """Copy `<data_dir>/Sound` into `<asset_dir>/sound`; how many files were new.
+
+    Morrowind ships its sounds loose rather than in the archive, in a Data
+    folder its expansions share, so only the masterless plugin owns them --
+    the caller gates on that, exactly as loose music does. Files already
+    present are left alone, and the voice folder is skipped.
+    See: docs/commentary/tes4_export_morrowind.md#sounds
+    """
+    source = Path(data_dir) / 'Sound'
+    if not source.is_dir():
+        return 0
+    copied = 0
+    for path in source.rglob('*'):
+        relative = path.relative_to(source)
+        if not path.is_file() or relative.parts[0].lower() == _VOICE_DIR:
+            continue
+        dest = Path(asset_dir) / 'sound' / relative
+        if dest.exists():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dest)
+        copied += 1
+    return copied
 
 
 def is_morrowind_bsa(bsa_path) -> bool:

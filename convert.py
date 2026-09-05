@@ -1794,7 +1794,7 @@ def _run_pipeline():
                 str(SCRIPT_DIR / "tools" / "release" / "create_lod.py")]
         if output_dir:
             _cmd += ["--output-dir", str(output_dir)]
-        ok = subprocess.call(_cmd) == 0
+        ok = subprocess.call(_cmd, **_POPEN_FLAGS) == 0
         if not ok:
             success = False
         # Recorded once, under the shared key: one artefact covers every

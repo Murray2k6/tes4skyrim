@@ -20,7 +20,7 @@ import struct
 import zlib
 from pathlib import Path
 from asset_convert.sources.bsa_extract_morrowind import (
-    is_morrowind_bsa, iter_bsa as iter_morrowind_bsa)
+    copy_loose_sounds, is_morrowind_bsa, iter_bsa as iter_morrowind_bsa)
 from asset_convert.audio.audio_converter import (
     organize_voice_files,
 )
@@ -519,6 +519,11 @@ def extract_assets_for_file(source_file, data_path, extract_dir, force=False):
 
     totals['music'] = extract_loose_music(source_file, data_path, extract_dir,
                                           asset_dir_name, force=force)
+    if (any(is_morrowind_bsa(b) for b in bsa_files)
+            and _is_masterless(extract_dir, source_file)):
+        totals['sounds'] = copy_loose_sounds(
+            data_path, Path(extract_dir) / asset_dir_name)
+        print(f"Loose Morrowind sounds: {totals['sounds']} files copied")
     return totals
 
 

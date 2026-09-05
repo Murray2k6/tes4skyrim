@@ -347,6 +347,11 @@ real data, or a failing-then-passing test.
 - Use multiprocessing, not threads, for pure-Python work; **ThreadPoolExecutor is
   only for I/O and subprocesses.** The output ESM must stay byte-reproducible.
   Rules and measured results: [docs/commentary/performance.md](docs/commentary/performance.md).
+- 🛑 **EVERY `subprocess` CALL IN THE PIPELINE PASSES `**POPEN_FLAGS`**
+  (`subprocess_flags.py`). Without it a per-file stage opens one console window
+  per file under `pythonw`. Loose assets in a shared Data folder belong to the
+  MASTERLESS plugin only — gate on `_is_masterless`, or every expansion
+  re-copies and re-transcodes its master's tree.
 - **Never exhaust memory**: some pool tools load the ~2.1 GB export index per
   worker. Cap `--workers` or run single-process.
 - **<a id="formid-drift"></a>FORMIDS ARE HASHED, NOT COUNTED.**
