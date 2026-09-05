@@ -37,6 +37,7 @@ from collision_options import (
     WINDING_FIX_DEFAULT_PLUGINS,
     default_for_plugin as _winding_default,
 )
+from gui_morrowind import add_source_menu as _add_morrowind_source_menu
 
 # ── Pipeline steps ─────────────────────────────────────────────────────────
 # (key, cli_flag, label, description, default_on, needs_file)
@@ -351,6 +352,13 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2)
+
+
+def save_setting(key: str, value) -> None:
+    """Write one key into the saved config, keeping every other key."""
+    updated = load_config()
+    updated[key] = value
+    save_config(updated)
 
 
 def scan_plugins(data_path: str) -> list:
@@ -769,8 +777,8 @@ def gui_main():
     # recognised values -- including the key being absent -- means "auto", the
     # per-plugin default this setting replaced a checkbox for.
     winding_mode_default = str(cfg.get(WINDING_CONFIG_KEY, "")).strip().lower()
-    if winding_mode_default not in WINDING_MODES:
-        winding_mode_default = WINDING_AUTO
+    winding_mode_default = (winding_mode_default if winding_mode_default in WINDING_MODES
+                            else WINDING_AUTO)
 
     # ── Root window ───────────────────────────────────────────────────────────
     # tkinterdnd2 supplies drag-and-drop by replacing the Tk root class. It is
@@ -1018,9 +1026,7 @@ def gui_main():
     # locally. Turning it off does NOT disable the cache itself: a zip dropped
     # in navmesh_cache/ is still installed, and an existing cache is still used.
     def _on_cache_dl_change():
-        updated = load_config()
-        updated["navmeshCacheDownload"] = bool(cache_dl_var.get())
-        save_config(updated)
+        save_setting("navmeshCacheDownload", bool(cache_dl_var.get()))
 
     settings_menu.add_checkbutton(
         label="Download navmesh cache", variable=cache_dl_var,
@@ -1031,10 +1037,8 @@ def gui_main():
     # visible immediately rather than only after the next launch. It only moves
     # the two packing boxes; every other step keeps whatever the user has set.
     def _on_pack_default_change():
-        updated = load_config()
         on = bool(pack_default_var.get())
-        updated[PACK_DEFAULT_CONFIG_KEY] = on
-        save_config(updated)
+        save_setting(PACK_DEFAULT_CONFIG_KEY, on)
         for key in PACKING_STEPS:
             step_vars[key].set(on)
         _update_run_btn()
@@ -1054,9 +1058,7 @@ def gui_main():
     # see collision_options). A radio group rather than a checkbox because
     # "follow the per-plugin default" is a third answer, not the absence of one.
     def _on_winding_mode_change():
-        updated = load_config()
-        updated[WINDING_CONFIG_KEY] = winding_mode_var.get()
-        save_config(updated)
+        save_setting(WINDING_CONFIG_KEY, winding_mode_var.get())
 
     winding_menu = tk.Menu(settings_menu, **_menu_opts)
     _auto_plugins = ", ".join(sorted(WINDING_FIX_DEFAULT_PLUGINS))
@@ -1068,6 +1070,7 @@ def gui_main():
             label=_label, value=_mode, variable=winding_mode_var,
             command=_on_winding_mode_change)
     settings_menu.add_cascade(label="Infer collision winding", menu=winding_menu)
+    _add_morrowind_source_menu(settings_menu, _menu_opts, cfg, load_config, save_config, EXPORT_DIR)
 
     # ── Converted ▸ (plugins already in output/) ──────────────────────────────
     # Picking one selects it AND ticks the steps its last conversion still owes,

@@ -135,7 +135,20 @@ def _read_record(mm, pos: int, file_size: int) -> Tes3Record:
     name = get_subrecord(rec, "NAME")
     if name is not None:
         rec.record_id = get_string(name)
+    elif sig == "SCPT":
+        rec.record_id = script_name(rec)
     return rec
+
+
+def script_name(rec: Tes3Record) -> str:
+    """A script's id: the 32-byte name at the head of SCHD.
+
+    See: docs/commentary/tes4_export_morrowind.md#scripts
+    """
+    schd = get_subrecord(rec, "SCHD")
+    if schd is None:
+        return ""
+    return schd.data[:32].split(b"\x00", 1)[0].decode("cp1252", errors="replace")
 
 
 def read_masters(filepath: str) -> list:

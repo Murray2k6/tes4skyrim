@@ -174,6 +174,24 @@ records (9,366 of 10,486); most of the remainder are engine markers, which are
 named rather than converted and handed to the existing
 `skyrim_overrides.TES4_MARKER_FORMID_TO_SKYRIM` table.
 
+## <a id="per-type-id-namespaces"></a>Morrowind namespaces IDs by type; FormIDs do not
+
+A TES3 string ID is unique only *within* a record type, so one name may denote
+two unrelated records. Vanilla has exactly one such name — `Sound_Boat_Creak`
+is both a `SOUN` and a `SCPT` — but the flat 32-bit FormID space has no
+namespaces at all, and keying derivation on the bare name gave both records
+`00712579`. Two records sharing a FormID is a malformed plugin: the later one
+silently replaces the earlier, so the sound went missing and the script was
+loaded as a sound.
+
+Derivation is therefore keyed on `<TES4 signature>:<id>`, matching the
+`wrld:` / `cell:` / `land:` / `refr:` prefixes every other derived id already
+carries. `register_own` keeps a *list* of signatures per name, and `resolve`
+takes the signature its call site already knows — `SCRI` names a script,
+`SNAM` a sound. An untyped cell reference passes none and gets the first
+registered type, which is correct because a reference can only place a
+placeable object; `SCPT` and `SOUN` are never placed.
+
 ## <a id="cell-references"></a>CELL references
 
 Morrowind has no REFR record: a cell's references follow its header fields as
@@ -310,12 +328,25 @@ Measured on `Morrowind.esm` (48,295 source records, ~7s):
 The base-record difference is the whole point: with Morroblivion present, 6,672
 objects are referenced rather than duplicated.
 
-10,258 references (3.2%) are deliberately dropped — their base object is an
-NPC, creature or levelled list, none of which this pass converts. A reference
-whose base record is missing crashes the engine, so `resolve` returns `''` for
-an unconverted base and the reference is skipped and counted rather than
-written. Verified: 305,858 references with **zero** dangling base or parent-cell
-ids in the standalone output, which is the weaker of the two paths.
+That first pass dropped 10,258 references (3.2%) whose base object was an NPC,
+creature or levelled list. With actors and leveled lists exported the
+standalone conversion of `Morrowind.esm` now writes (measured, 8.4s):
+
+| | count |
+|---|---|
+| Records | 343,016 |
+| Base records | 11,848 (NPC_ 2,675, CREA 260, LVLI 227, LVLC 116, KEYM 285, AMMO 68, SOUN 430, GLOB 73, FACT 22, CLAS 77 among them) |
+| Placements | 319,249 = REFR 315,343 + ACHR 3,043 + ACRE 863 |
+| ...of which synthesised door markers | 3,133, one per load door |
+| References dropped | **0** |
+| Dangling FormIDs across NAME, ParentCELL, XTEL.Door, XOWN.Owner, XLOC.Key, Item[], Entry[], Faction[], Relation[], CNAM.Class, SNAM/ANAM sounds | **0** |
+
+A reference whose base record is missing crashes the engine, so `resolve`
+still returns `''` for an unconverted base and such a reference is skipped and
+counted rather than written; nothing in Morrowind.esm reaches that path any
+more. `write_export` also deletes a record file left by an earlier run for a
+type the current run no longer emits (REPA/PROB/LOCK became MISC), which
+otherwise imported beside their replacements under the same FormIDs.
 
 Every ICON is rewritten `.tga` to `.dds`: Morrowind records name icons `.tga`
 but its archives ship `.dds` and the engine substitutes at load. Without the
@@ -323,10 +354,435 @@ rename all 2,908 icon references point at files that do not exist. Mesh paths
 need no such fix — 7,693 of 7,699 resolve, the six that do not being dangling
 in vanilla Morrowind itself.
 
-`TR_Mainland.esm` (four masters, 108,448 records) converts to 1,259,102 records
-in 26s with 98.2% of references kept, but ONLY because its masters are read
-first: a Morrowind plugin names its masters' objects by the same plain string it
-uses for its own, so without them 32% of its references would be dropped.
+## <a id="masters"></a>Masters
+
+**Code:** `export_morrowind.converted_master_dirs`, `load_context`,
+`morrowind_ids.load_index`.
+
+A Morrowind plugin names its masters' objects by the same plain string it uses
+for its own, so a dependent plugin can only reference what its masters
+supply. The rule is: **a master's object resolves only through that master's
+converted export**; an object whose master is not converted is dropped and
+counted, never minted. The first version registered every master record as
+the plugin's own and minted a derived FormID for each, which wrote 11,854
+`NAME=` lines on TR_Mainland pointing at records nothing defines -- a REFR
+whose base is missing crashes the engine.
+
+**An unconverted master REFUSES the export**, the same contract the import
+stage enforces with `MissingMasterOutputError`. The master list fixes the
+plugin's own load-order byte, so exporting without one does not merely drop
+references -- it renumbers every record into a master's id space. Measured
+before the gate existed: TR_Mainland, whose chain is four long, took byte
+`0x02` because only two of its masters were converted, putting its own records
+where Bloodmoon's belong. The refusal names each missing master and the command
+that converts it.
+
+The master list is the plugin's own `MAST` chain, in its order (`record_dir`,
+so an imported mod's folder resolves). The own load-order byte is the length of
+that list, the TES4 convention the importer's `load_master_export` re-keys
+against; a masterless plugin such as Morrowind.esm writes `0x00` exactly as
+Oblivion.esm does. Each
+master's index is re-keyed into the borrower's list the same way: the master's
+own byte (the length of ITS header's `Master[]` list) becomes its slot, and
+each of its masters is translated by name; a byte naming a file the borrower
+does not load is unreachable and skipped.
+
+The index answers under the raw Morrowind ID as well as the Morroblivion
+escape, because our own exports write the raw ID as `EditorID`; before that the
+converted-master tier resolved 0 of Morrowind.esm's 11,742 exported records.
+Cells are indexed too -- interiors under `cell:<name>`, exteriors under
+`cell:<x>:<y>` from `XCLC`, terrain under `land:<parent cell>` -- so a door or
+placement into a master's cell names the master's record, and a worldspace the
+master already defines is not emitted twice. When the borrower's cells reach
+past the master's `NAM0`/`NAM9`, the WRLD is emitted again under the master's
+FormID with the union bounds, which the importer applies as an override.
+
+**Source set** (`morrowindSource` in `conversion_config.json`, Settings ▸
+Morrowind source in the GUI): `vanilla` borrows from the declared masters;
+`morroblivion` puts every converted `Morrowind_ob*` export first and drops the
+three vanilla ESMs from the list, so a mod shares Morroblivion's objects
+instead of shipping a second copy of every static. Morroblivion's cells and
+worldspace use its own EditorIDs, so in that mode doors into vanilla interiors
+link only where the escaped name matches, and exteriors do not link at all.
+
+`TR_Mainland.esm` (four masters, 108,448 records) converts in 26s with 98.2%
+of references kept when all four masters are converted first.
+
+## <a id="morroblivion-gap-patch"></a>The Morroblivion gap patch
+
+**Code:** `tes4_export/morrowind_patch.py`.
+
+Morroblivion resolves **89.3%** of vanilla Morrowind's base records, so in
+Morroblivion mode a dependent plugin routinely places objects its master cannot
+supply. Measured against an index covering 89% of Morrowind.esm, Bloodmoon
+alone places **50 distinct such objects across 342 references**. Dropping them
+loses authored content; minting them in the plugin's own space makes every
+plugin needing the same object ship a rival copy, so two mods placing
+`ex_scrapwood01` would put two of it in the world.
+
+So each plugin exports one PATCH beside itself, `<plugin> - Morroblivion
+Patch.esp`, holding exactly the objects it references, a declared master
+defines, and the index cannot supply. A gap is judged on all four conditions:
+referenced by this plugin, not defined by it, absent from the index, present in
+a master's binary. An id absent from the master binaries too is genuinely
+missing and stays dropped and counted.
+
+**The fill id is derived from the authored Morrowind string** in the shared
+`mwpatch` site, never from the plugin's own id space, so every plugin that
+needs `ex_scrapwood01` names the SAME record. Two patches defining it are
+override-compatible rather than duplicates, which is what makes several
+Morroblivion mods loadable together. The key is the authored string, so the id
+is stable across machines and builds -- the same contract `derive_formid`
+states for every other generated record.
+
+The patch is generated only in Morroblivion mode. With all masters converted
+the index is complete, no gap exists, and no patch is written.
+
+## <a id="tes4-vocabulary"></a>Every exporter speaks the TES4 KEY vocabulary
+
+The importers read TES4's key names and nothing else: `convert_WEAP` reads
+`DATA.Type`/`DATA.Weight`/`DATA.Damage`, `convert_CONT` reads `DATA.Flags` and
+`Item[i].FormID`, `convert_LIGH` reads `DATA.Color.R` and so on. The first
+pass invented its own names (`Weight=`, `WeaponType=`, `ContainerFlags=`,
+`LightColor=`, `Item[i].Object=<string>`), so every stat on every Morrowind
+item was silently discarded on import -- weapons had type 0, lights had no
+color and radius 128, containers were empty. `tools/validate/import_sweep.py`
+and a grep of `get_int(rec, '...')` in `tes5_import/record_types/` are the
+contract; each Morrowind exporter now emits exactly those keys, with the
+Morrowind enum translated to the TES4 one where they differ:
+
+| Morrowind | TES4 key | Translation |
+|---|---|---|
+| WPDT type 0-13 | `DATA.Type` | short/long blade 1H -> 0, long blade 2H and spear -> 1, blunt 1H and axe 1H -> 2, blunt 2H and axe 2H -> 3, bow/crossbow -> 5, thrown -> 0; arrow/bolt become **AMMO** |
+| WPDT chop/slash/thrust max | `DATA.Damage` | the largest of the three |
+| WPDT enchant | `ANAM` | Morrowind stores points x10 |
+| LHDT color u32 | `DATA.Color.R/G/B` | little-endian RGBA bytes |
+| LHDT flags | `DATA.Flags` | identical bits; 0x10 (Fire) is masked by the importer |
+| CNDT weight, FLAG | `DATA.Weight`, `DATA.Flags` | Respawn 0x02 -> TES4 0x01 |
+| MCDT flags & 1 (key) | record becomes **KEYM** | 285 of 536 MISC records |
+| BKDT skill | `DATA.Teaches` | the 27-skill enum mapped onto TES4's 21 (medium armor -> heavy, axe/spear -> blunt, short blade -> blade, unarmored -> light armor, enchant -> mysticism) |
+| BKDT isScroll | `DATA.Flags` 0x01 | |
+| ALDT autocalc | `ENIT.Flags` | TES4's bit is "NO auto-calc", so it is inverted |
+| REPA / PROB / LOCK | **MISC** | Skyrim has no repair or probe items; the importer had no dispatch for these signatures, so their references dangled |
+
+Records the importer could not dispatch (REPA, PROB, LOCK) were being written
+by the exporter, registered as convertible, and REFERENCED -- every placed
+lockpick named a base record the import never wrote.
+
+## <a id="equipment-slots"></a>Equipment slots and weight class
+
+Morrowind has no biped mask; an armor's slot is its `AODT` type and a
+clothing's its `CTDT` type. Each maps onto TES4's `BMDT.BipedFlags`:
+
+| Type | TES4 bits |
+|---|---|
+| Helmet | Head + Hair (0x3) |
+| Cuirass, Shirt | Upper Body (0x4) |
+| Greaves, Pants, Skirt | Lower Body (0x8) |
+| Robe | Upper + Lower Body (0xC) |
+| Boots, Shoes | Foot (0x20) |
+| Gauntlet, Bracer, Glove | Hand (0x10) |
+| Shield | Shield (0x2000) |
+| Ring | Right Ring (0x40) |
+| Amulet | Amulet (0x100) |
+| Pauldron, Belt | none -- no slot exists in either later game |
+
+Weight class is not stored either; Morrowind derives it from weight against a
+per-type GMST (`iHelmWeight` 5, `iPauldronWeight` 10, `iCuirassWeight` 30,
+`iGauntletWeight` 5, `iGreavesWeight` 15, `iBootsWeight` 20, `iShieldWeight`
+15): light up to `fLightMaxMod` 0.6 of it, medium up to `fMedMaxMod` 0.9, else
+heavy. TES4 has only the heavy bit (`BMDT.GeneralFlags` 0x80), so medium and
+heavy both set it -- bonemold and orcish land in Heavy Armor, as Skyrim's own
+orcish does.
+
+### <a id="worn-models"></a>Worn models are assembled from body parts
+
+**Code:** `tes4_export/morrowind_armor.py`,
+`asset_convert/character/morrowind_armor.py`.
+
+Morrowind dresses an actor from per-body-part `BODY` meshes: each `ARMO`/`CLOT`
+carries `INDX` (part slot) + `BNAM`/`CNAM` (male/female BODY id) pairs, and the
+BODY's `MODL` is the mesh. Measured on Morrowind.esm's 280 ARMO: helmets,
+cuirasses, shields, gauntlets and bracers are one part each; greaves are 3-5
+(groin, upper legs, knees), boots 2-4 (feet, ankles), pauldrons 1-3. Every
+cuirass part is already skinned to `Bip01` bones; every other part is a RIGID
+mesh authored in the frame of the attach node the engine hangs it on
+(`Left Knee` under `Bip01 L Calf`, `Groin` under `Bip01 Pelvis`, ...).
+
+The exporter resolves the parts through the BODY records of the plugin and its
+masters, names a synthetic worn model per record
+(`armor\morrowind\m\<escaped id>.nif`, `f\` when any female part exists) as
+`Male/Female.BipedModel.MODL`, and lists the parts as
+`MorrowindPart[i].Slot/.Male/.Female`. Because the biped key is present the
+importer builds an ARMA exactly as for Oblivion armor. Parts are listed only
+for records with a biped slot; pauldrons and belts have none in either later
+game.
+
+The mesh stage assembles the model before the ordinary conversion runs
+(`assemble_armor`, called from `asset_pipeline.convert_meshes`): the rest-pose
+skeleton `base_anim.nif` supplies each attach node's parent bone and offset, a
+rigid part is baked into that bone's local frame and given a one-bone identity
+skin -- the same shape `add_prn_skin` gives an Oblivion helmet, so the worn
+path treats it as a Prn piece -- and a skinned part is re-bound to the shared
+skeleton. Shields are not skinned: the root carries `Prn=Shield` and the
+Oblivion shield path takes it. The result is written as a Morrowind-version
+NIF beside the source meshes, so everything downstream is unchanged.
+See: [asset_convert_armor.md#morrowind-armor-assembly](asset_convert_armor.md#morrowind-armor-assembly).
+
+Armor rating is `AODT.armor x 100`: TES4 stores hundredths and the importer
+passes the value straight to Skyrim's `DNAM`, which also stores hundredths.
+
+## <a id="actors-and-placements"></a>Actors and their placements
+
+`NPC_` and `CREA` export into the TES4 actor vocabulary (`ACBS.*`, `AIDT.*`,
+`DATA.<skill>`, `Faction[i]`, `Item[i]`), so `convert_NPC_`/`convert_CREA` and
+everything downstream of them -- outfits, vendor factions, Skyrim race
+override, the leveled-actor shells -- run unchanged. The race is named by the
+OBLIVION race FormID (`RNAM.Race=000191C1` for Dark Elf), because
+`_resolve_npc_race` maps that id through `TES4_RACE_FID_TO_EDID` and
+`RACE_MAP` to the Skyrim race; no RACE record is needed or written.
+
+| Morrowind | TES4 |
+|---|---|
+| FLAG Female 0x01 / Essential 0x02 / Respawn 0x04 / Autocalc 0x10 | `ACBS.Flags` 0x01 / 0x02 / 0x08 / 0x10 |
+| CREA FLAG Biped 0x01 / Respawn 0x02 / Weapon 0x04 / Essential 0x80 | `ACBS.Flags` 0x01 / 0x08 / 0x04 / 0x02 (swims, flies, walks keep their bits) |
+| NPDT 52-byte: level, 8 attributes, 27 skills, health, mana, fatigue, gold | `ACBS.Level`, `DATA.<attribute>`, `DATA.<skill>` (the 27 folded onto 21, taking the larger where two collide), `DATA.Health`, `ACBS.SpellPoints`, `ACBS.Fatigue`, `ACBS.BarterGold` |
+| NPDT 12-byte (autocalc): level, disposition, reputation, rank, gold | `ACBS.Level`, `ACBS.BarterGold`; stats come from the Autocalc bit |
+| AIDT hello, fight, flee, alarm, services | `AIDT.EnergyLevel` 50, `AIDT.Aggression`=fight, `AIDT.Confidence`=100-flee, `AIDT.Responsibility`=alarm, `AIDT.Services` with Morrowind-only bits (picks 0x20, probes 0x40, repair items 0x200, spellmaking 0x8000) cleared |
+| ANAM faction + NPDT rank | `Faction[0].FormID` / `.Rank` |
+| CREA NPDT type 0-3 | `DATA.Type` (the enums agree) |
+| CREA soul value | `DATA.Soul` by Morrowind's own gem capacities: 30 petty, 60 lesser, 100 common, 200 greater, else grand |
+| CREA attack min/max x3 | `DATA.AttackDamage` = the largest max |
+
+AI packages export as PACK records the actor lists in order (see
+[AI packages](#ai-packages)); the importer's default package list still gives
+every actor the vanilla sandbox fallback underneath them.
+
+A placed NPC is an **ACHR** and a placed creature an **ACRE**, decided by the
+base record's signature, which the ID index now records alongside the FormID.
+A REFR whose base is an actor is not a valid Skyrim record, and a placed
+leveled creature stays a REFR because the importer's Phase 0h turns those into
+shell ACHRs itself.
+
+## <a id="ai-packages"></a>AI packages
+
+**Code:** `tes4_export/record_types/morrowind_packages.py`.
+
+Morrowind stores an actor's packages inline on the actor (`AI_W` wander,
+`AI_T` travel, `AI_F` follow, `AI_E` escort, `AI_A` activate, each optionally
+followed by `CNDT`), where TES4 stores PACK records the actor lists by FormID.
+Measured on Morrowind.esm: 2,817 `AI_W`, 170 `AI_T`, 70 `AI_F`, 3 `CNDT`.
+Each `AI_*` becomes one PACK with a FormID derived from `pack:<actor>:<index>`
+and is listed in file order, because both later engines run the first package
+whose conditions pass.
+
+| Morrowind | TES4 PACK | Location / target |
+|---|---|---|
+| `AI_W` distance, duration | Wander (5) | near editor location, radius = distance |
+| `AI_T` x, y, z | Travel (6) | near an XMarker placed at the position |
+| `AI_F` id, duration [, x, y, z] | Follow (1) | the target's placed reference [+ marker] |
+| `AI_E` id, duration [, x, y, z] | Escort (2) | the same |
+| `AI_A` id | Find (0) | object id, which the importer turns into Activate |
+
+Coordinates are cell-local, and the package sits on the BASE actor, so a
+destination marker goes into the exterior grid the position falls in, else into
+the cell of the actor's first placement. A package whose marker cell or target
+placement cannot be found is dropped and counted (`package:<kind>` in the
+unresolved tally). The schedule is "any time" with Morrowind's duration in
+hours, which the importer converts to minutes; the per-package idle chances have
+no TES4 field and are left to Skyrim's own sandbox idles.
+
+### A dropped package must also drop the actor's reference
+
+The actor's `AIPackage[i]` lines are written while the actor is converted, but
+a package can only be resolved after the cells and placements exist, so
+`package_records` runs at the end of the export. A package that fails there was
+already named by its actor, leaving a `PKID` pointing at a PACK no record
+defines.
+
+Skyrim does not reject that at load. `TESNPC::InitItem` resolves each form
+pointer and, on failure, formats a warning -- `<SIG> Form '<EditorID>'
+(<FormID>)` against `"UNKNOWN form"` -- for every actor, every load. Measured
+from a live hang: one such NPC (`Navil Ienith`, a travel package with no
+resolvable destination cell) left the game spinning in
+`__stdio_common_vsprintf_s` under the data handler's per-form-type init loop,
+and it never reached the main menu.
+
+So `package_records` records each failure in `ctx.dropped_packages` and
+`prune_dropped_packages` rewrites the affected actors, renumbering the
+survivors so the indices stay contiguous. The invariant to hold: **every
+`AIPackage[i]` names a PACK the export actually writes** -- checked as
+references == records over `NPC_.txt` + `CREA.txt` against `PACK.txt`.
+
+## <a id="creatures"></a>Creatures: one NIF split into a creature folder
+
+**Code:** `tes4_export/record_types/morrowind_actors.py` (`export_CREA`),
+`asset_convert/havok/creature_split_morrowind.py`.
+
+The creature pipeline converts "any folder holding a skeleton.nif plus .kf
+animations" (`creature_pipeline.convert_creatures`), which is Oblivion's
+layout. A Morrowind creature is ONE self-contained NIF: `r\Guar.NIF` holds the
+`Bip01` skeleton, 17 skinned shapes, 50 `NiKeyframeController`s spanning a
+single 27 s timeline and one `NiTextKeyExtraData` whose 58 keys cut that
+timeline into animation groups (`Idle: Start` / `Loop Start` / `Loop Stop` /
+`Stop`, `Attack1: Hit`, `SoundGen: Left`). 52 of the 105 creature meshes
+instead pair an `x<name>.nif` model with an `x<name>.kf` (a
+`NiSequenceStreamHelper` whose extra-data chain names each controller's node),
+which the engine prefers when present.
+
+The exporter points each CREA at the folder layout the pipeline scans --
+`Model.MODL=r\<stem>\skeleton.nif`, `NIFZ[0]=<stem>.nif` -- and records the
+source as `MorrowindModel`. The split runs at the head of `--creatures-only`:
+it writes `skeleton.nif` (the tree without geometry, controllers or text
+keys), `<stem>.nif` (the same tree with the skinned shapes and no controllers)
+and one `.kf` per animation group, sampled at 30 fps over the group's range
+and written through `kf_writer.write_skyrim_kf`, so `decode_kf`,
+`classify_clips` and `read_animgroup` consume them exactly as Oblivion clips.
+A group with a loop segment ships only that segment (Skyrim gaits loop whole
+clips), everything else ships `Start`..`Stop`. Group names map onto the
+Oblivion stems the clip tables claim (`WalkForward` -> `forward`, `RunForward`
+-> `runforward`, `Hit1` -> `recoil`, `Knockdown` -> `stagger`, `Death1` ->
+`death`, `SpellCast` -> `casttarget`); `SoundGen: Left/Right` become
+`Enum: Left/Right` footfalls, `Attack: Hit` becomes `hit`, `Sound: X` is kept,
+and the other `SoundGen` cues are covered by the CREA sound slots below.
+
+Sound slots come from `SNDG` (per-creature sound generators), exported in the
+TES4 `SoundType[i].Type/.Sound` vocabulary: LeftFoot/RightFoot keep their
+slots, Moan -> Idle (4), Roar -> Attack (6), Scream -> Hit (7); the swim and
+Land cues have no TES4 slot.
+
+## <a id="scripts"></a>Scripts
+
+**Code:** `tes4_export/record_types/morrowind_scripts.py`, `tes3_reader.script_name`.
+
+A Morrowind SCPT carries its source text in `SCTX`, the field the script
+converter already consumes, so the record exports as a TES4 script: `SCTX`,
+`SCHR.Type=0` (every Morrowind script is attached like an object script or
+started by name), and `Variable[i].Index/.Name` from `SCVR`, whose order is
+the index. The record has no `NAME`: its id is the 32-byte name at the head of
+`SCHD`, which the reader lifts into `record_id` so scripts resolve like every
+other object. A record's `SCRI` becomes the TES4 `SCRI=` FormID line.
+
+The source grammar (`Begin name` blocks, `ref->command`) is Morrowind's, not
+Oblivion's. Measured on the first build: all 632 scripts "convert" and compile,
+but a `Begin <name>` block is not a TES4 block type, so its body is dropped
+and every script ships as declarations only (median 159 bytes of Papyrus). The
+records are attached (1,474 VMAD attachments) and inert. The converter needs a
+Morrowind block mode and the `->` member-call syntax before the bodies survive;
+Morrowind.esm carries 632 scripts, and 1,231 across the three ESMs.
+
+## <a id="leveled-lists"></a>Leveled lists
+
+`LEVI` -> `LVLI` and `LEVC` -> `LVLC` (which the importer writes as LVLN). The
+flag bits are NOT the same: Morrowind's item list has Each=0x01 and
+AllLevels=0x02 where TES4's `LVLF` has "calculate from all levels" 0x01 and
+"calculate for each item" 0x02, so the two swap; the creature list has only
+AllLevels=0x01, which is TES4's 0x01. `NNAM` is `LVLD.ChanceNone` unchanged.
+An entry whose object this pass does not convert is dropped rather than
+written as a null FormID.
+
+## <a id="teleport-doors"></a>Teleport doors
+
+A Morrowind door reference stores its destination as a position and rotation
+(`DODT`) plus, for an interior, the destination cell's name (`DNAM`). There is
+no destination door. Skyrim's `XTEL` REQUIRES one, and the importer emits no
+XTEL at all without `XTEL.Door` -- so none of Morrowind.esm's 3,133 load doors
+(2,022 into named cells, 1,111 into the exterior) led anywhere.
+
+The missing half is **authored, not synthetic**. Morrowind ships load doors in
+PAIRS: the `DODT` position is where the destination cell's own door back again
+stands. Measured over Morrowind.esm, all 3,127 teleport doors have another door
+reference within 1,024 units of their destination, 2,946 of them within 256. So
+`_partner_door` resolves the pair by position and `XTEL.Door` names it, with the
+door flagged persistent (`RecordFlags=1024`) as every vanilla load door is.
+
+An earlier pass minted an XMarker per door instead. That is wrong, and the
+vanilla census is one-sided: of Skyrim.esm's 1,722 XTEL references, **1,703
+point at another DOOR reference and not one points at an XMarker** (the other
+19 name 5 bases outside the dump). A door whose XTEL names a marker renders and
+activates, but only ever as a plain door -- the generic "open door" prompt with
+no load. 27 of 3,133 doors have no convertible destination or no partner there;
+they stay plain doors and the count is reported.
+
+The destination cell has to exist in the output: an interior by name (the
+plugin's own and its masters'), an exterior by the grid square under the
+destination position. A door whose destination is in neither stays a plain
+door, and the count is reported.
+
+### A persistent reference may not live in an exterior grid cell
+
+Making the doors persistent was correct -- Skyrim.esm's XTEL doors are
+1,722/1,722 persistent -- but persistence also decides WHICH cell a reference
+is filed under, and that is where the first attempt went wrong. Every exterior
+door and its minted marker stayed parented to the grid cell it stood in, and
+all 1,113 of Balmora's and everywhere else's exterior doors vanished from the
+game with no red triangle: the model loads, the reference is simply never
+attached.
+
+> "For an exterior cell, the persistent references are defined in a dummy cell
+> in the worldspace group." -- UESP, Mod File Format/CELL
+
+The census agrees and is one-sided. Skyrim.esm's XTEL doors by parent cell:
+
+| parent cell kind | vanilla | ours (before) | ours (after) |
+|---|---|---|---|
+| interior | 976 | 2,025 | 2,025 |
+| worldspace dummy persistent cell | 746 | 0 | 1,108 |
+| **exterior grid cell** | **0** | **1,108** | **0** |
+
+The engine loads a worldspace's persistent references by worldspace out of that
+one dummy cell, never by grid, so a persistent ref filed under a grid cell is
+unreachable from either path. This is Morrowind-specific only because TES4
+already ships such a cell and the converted plugin inherits it; the synthetic
+Morrowind worldspace had none, so `persistent_cell_record` mints one
+(`cell:persistent:<worldspace>`, no XCLC, `RecordFlags=1024`) and
+`_rehome_persistent` moves every persistent exterior reference into it. The
+importer already files a cell flagged persistent directly under the worldspace
+group rather than in the block tree.
+
+Note the flag is Persistent ONLY. Vanilla's dummy cells read `263168`, which is
+`0x400` Persistent plus `0x40000` Compressed -- compression is the importer's
+concern, not a property the export asserts.
+
+This is the same class of defect as the forced Persistent flag on exterior
+statics, which made buildings invisible while every record-level audit stayed
+clean. See [ck_vs_game_missing_objects.md](ck_vs_game_missing_objects.md).
+
+### DOOR also needs the FNAM flags byte
+
+TES5 DOOR has a required `FNAM` flags byte (xEdit marks it `True`); all 235
+vanilla doors carry one and 185 of them are `0`. We wrote it on 0 of 139,
+because TES3 has no door-flags field to carry over at all: Morrowind's own
+`FNAM` is the **display name**, a zstring, which `emit_common` already writes
+as FULL. `convert_DOOR` only writes the subrecord when the export supplies
+`FNAM.Flags`, so the field simply never appeared.
+
+This is Morrowind-specific for the same reason the persistent cell was: a TES4
+DOOR carries FNAM natively, so Oblivion's doors always had one.
+`export_DOOR` now writes the vanilla default `FNAM.Flags=0`.
+
+It is a real gap and worth closing, but it was **not** what restored the load
+prompt -- that was the XTEL target above. Adding FNAM alone changed nothing
+in game.
+
+`MODT` was ruled out on the way: it is absent from **every** record type we
+emit (0 of 3,238 STAT, 0 of 139 DOOR), including the statics that render
+correctly, so it cannot explain a door-only symptom.
+
+## <a id="sounds"></a>Sounds
+
+`SOUN` carries a filename relative to `Sound\` and three bytes: volume, minimum
+range, maximum range. Morrowind's ranges are in units of `fAudioMinDistanceMult`
+(20) and `fAudioMaxDistanceMult` (50), with 0 meaning the defaults
+`fAudioDefaultMinDistance` 5 and `fAudioDefaultMaxDistance` 40 -- so a typical
+sound reaches from 100 to 2,000 units. TES4's `SNDX` stores minimum in units of
+5 and maximum in units of 100, which the importer scales back, so the export
+writes `min x 4` and `max / 2`. Volume 0-255 becomes `SNDX.StaticAttenuation`
+in hundredths of a dB (`-2000 x log10(volume / 255)`), 0 at full volume.
+
+Morrowind's sounds are LOOSE files under `Data Files\Sound`, not in the BSA,
+so the extract stage copies that tree into `export/<plugin>/sound` where the
+audio stage expects to find every plugin's sounds.
 
 ## <a id="tes3-bsa"></a>The TES3 BSA
 

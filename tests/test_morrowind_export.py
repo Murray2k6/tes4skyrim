@@ -85,6 +85,24 @@ def test_derived_ids_are_stable_and_unique():
     assert len(set(forward)) == 3
 
 
+def test_one_id_under_two_types_is_two_records():
+    """TES3 ids are unique per type; a flat FormID space has to keep them apart.
+
+    `Sound_Boat_Creak` is both a SOUN and a SCPT in Morrowind.esm, and keying
+    derivation on the bare name gave both 00712579 -- one record silently
+    replacing the other.
+    See: docs/commentary/tes4_export_morrowind.md#per-type-id-namespaces
+    """
+    ctx = MorrowindContext()
+    ctx.register_own('Sound_Boat_Creak', 'SOUN')
+    ctx.register_own('Sound_Boat_Creak', 'SCPT')
+    sound = ctx.resolve('Sound_Boat_Creak', 'SOUN')
+    script = ctx.resolve('Sound_Boat_Creak', 'SCPT')
+    assert sound and script and sound != script
+    assert ctx.resolve('sound_boat_creak', 'SCPT') == script, 'case-insensitive'
+    assert ctx.resolve('Sound_Boat_Creak') == sound, 'untyped takes the first'
+
+
 def test_unconverted_base_object_is_never_referenced():
     """A reference whose base is missing crashes the engine, so it is dropped."""
     ctx = MorrowindContext()

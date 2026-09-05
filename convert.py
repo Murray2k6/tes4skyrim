@@ -540,7 +540,7 @@ def phase_export(file_name: str, tes4_data: str, export_dir: str,
 
     if is_tes3(source):
         from tes4_export.export_morrowind import run_export
-        return run_export(file_name, source, export_dir)
+        return run_export(file_name, source, export_dir, config)
 
     print(f"[{file_name}] Exporting...")
     t0 = time.time()

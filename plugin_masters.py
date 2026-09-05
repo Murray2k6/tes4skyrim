@@ -36,6 +36,25 @@ def get_masters_from_binary(filepath: str) -> list:
         return _tes4_masters(fh.read(data_size))
 
 
+def masters_from_export_header(record_dir: str) -> list:
+    """The `Master[N]=` names an export's `_HEADER.txt` declares, in order.
+
+    Empty when the export has no header, which is also what a plugin with no
+    masters writes.
+    """
+    header = os.path.join(record_dir, '_HEADER.txt')
+    if not os.path.isfile(header):
+        return []
+    names = []
+    with open(header, encoding='utf-8') as fh:
+        for line in fh:
+            if line.startswith('Master['):
+                name = line.partition('=')[2].strip()
+                if name:
+                    names.append(name)
+    return names
+
+
 def _tes4_masters(data: bytes) -> list:
     """Every MAST string in a TES4-family header record's data."""
     masters = []
