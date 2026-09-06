@@ -41,7 +41,7 @@ from asset_convert import paths
 from asset_convert.nif.geometry_sanitize import sanitize_geometry_data
 from asset_convert.nif.nif_converter_morrowind import (
     attach_morrowind_collision, build_skin_partitions, disable_specular,
-    is_morrowind, run_morrowind_fixups)
+    is_morrowind, run_morrowind_fixups, strip_collision_nodes)
 from asset_convert.nif.tex_paths import rewrite_tex_path
 from asset_convert.nif.shaders import (ALPHA_BLEND_ENABLED,
                                        ALPHA_DST_ONE, ALPHA_DST_SHIFT,
@@ -1154,6 +1154,7 @@ def _convert_roots(data, stats, fix_textures, src_path, creature,
         if was_morrowind:
             attach_morrowind_collision(data.roots[i], stats)
     if was_morrowind:
+        strip_collision_nodes(data, stats)
         disable_specular(data, stats)
 
 

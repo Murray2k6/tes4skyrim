@@ -790,6 +790,42 @@ This is the same class of defect as the forced Persistent flag on exterior
 statics, which made buildings invisible while every record-level audit stayed
 clean. See [ck_vs_game_missing_objects.md](ck_vs_game_missing_objects.md).
 
+### A worldspace has exactly ONE persistent cell
+
+The rehoming above is right for a MASTERLESS plugin, which owns its worldspace
+and therefore mints the dummy cell itself. A dependent plugin must not: a
+worldspace holds exactly one persistent cell, the engine resolves it as a
+single slot, and a second one is never attached.
+
+Tamriel Rebuilt hit this. Morrowind_ob already supplies the Morrowind
+worldspace `380000` and its persistent cell `380001` (`wrld + 1`, the vanilla
+convention -- 6 of 6 of Morroblivion's worldspaces with a persistent cell hold
+it). TR minted `WrldMorrowindPersistent` of its own and rehomed **3,465**
+exterior teleport doors into it; every one of them was gone in-game while
+`cell_grid_check --teleport-cells` reported all 9,832 XTEL destinations
+resolving cleanly. The symptom is exactly the grid-cell case above -- a clean
+record-level audit and no red triangle -- one level up.
+
+Two things kept the master's cell invisible to the export:
+
+* It is not indexed. `_add_record` keyed exterior cells on `XCLC` alone, and a
+  persistent cell carries `XCLC` too (Morrowind_ob's reads `(0, 0)`), so it was
+  filed as the real cell at grid (0, 0). `_add_cell` now checks the Persistent
+  bit first and keys it under `persistent_key(<worldspace>)`.
+* `persistent_cell_id` derived unconditionally. It now prefers
+  `index.lookup_persistent`, and `persistent_cell_record` emits nothing when
+  `owns_persistent_cell()` is false.
+
+### A door's partner may belong to a master
+
+`_partner_door` scanned `doors_by_cell`, which `export_placements` fills from
+THIS plugin's placements only. A dependent plugin's load door usually arrives
+in a cell the master owns, where the return door is the master's -- so the
+partner resolved to nothing and the door stayed plain. This is the
+master-export blindness described in CLAUDE.md. `load_master_doors` scans each
+converted master's `REFR.txt` for teleport doors and seeds `doors_by_cell` with
+them, re-keyed through the same remap as the id index.
+
 ### DOOR also needs the FNAM flags byte
 
 TES5 DOOR has a required `FNAM` flags byte (xEdit marks it `True`); all 235

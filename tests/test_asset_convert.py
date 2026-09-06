@@ -4592,3 +4592,145 @@ class TestFallbackWhiteIsNotAFlame:
             assert soft[n] == 0, (
                 f'{n} authors real white and must stay hard, or it fades '
                 f'against the surface it is mounted on')
+
+
+# ---------------------------------------------------------------------------
+# Legacy node types Skyrim has no RTTI for (= missing-model red triangle)
+# ---------------------------------------------------------------------------
+
+_TD_EXPORT_MESHES = Path('export/Tamriel Data (HD)/meshes')
+
+#: (mesh, legacy block type); covers sibling nodes and a legacy ROOT.
+_LEGACY_NODE_SAMPLES = [
+    ('tr/x/tr_ex_nec_ban_03.nif', 'NiBSAnimationNode'),
+    ('tr/f/tr_flora_sh_bush_06.nif', 'NiLODNode'),
+    ('tr/x/tr_ex_HM_blc_rail_02.nif', 'RootCollisionNode'),
+    ('tr/f/tr_flora_drumpear_02.nif', 'RootCollisionNode'),
+    ('tr/x/tr_ex_ind_build01.nif', 'RootCollisionNode'),
+    ('tr/f/tr_f_js_ventshroom_01.nif', 'NiLODNode'),
+]
+
+#: Carries a QUADRATIC NiUVData group, whose keys pyffi can only write LINEAR.
+_QUADRATIC_UV_SAMPLE = 'tr/x/tr_ex_velothi_temple03.nif'
+
+
+class TestMorrowindLegacyNodes:
+    """A block type the engine cannot instantiate rejects the whole file.
+
+    NiSwitchNode is the control: 88 vanilla Skyrim meshes carry one, so the
+    rule is per-type RTTI rather than "legacy nodes are bad".
+    See: docs/commentary/asset_convert_nif.md#morrowind-legacy-node-types
+    """
+
+    @pytest.mark.skipif(not _TD_EXPORT_MESHES.exists(),
+                        reason='Tamriel Data export meshes not available')
+    @pytest.mark.parametrize('rel_path,legacy_type', _LEGACY_NODE_SAMPLES)
+    def test_legacy_node_is_gone_and_switch_node_survives(
+            self, rel_path, legacy_type, tmp_path):
+        """The legacy type must be absent, and NiSwitchNode must remain."""
+        import time
+        if not hasattr(time, '_original_clock'):
+            time.clock = time.perf_counter
+        from pyffi.formats.nif import NifFormat as NF
+
+        src = _TD_EXPORT_MESHES / rel_path
+        if not src.exists():
+            pytest.skip(f'{src} not found')
+
+        src_data = NF.Data()
+        with open(str(src), 'rb') as f:
+            src_data.read(f)
+        src_names = [type(b).__name__ for b in src_data.blocks]
+        assert legacy_type in src_names, \
+            f'sample no longer carries {legacy_type} - test is stale'
+
+        dst = tmp_path / 'out.nif'
+        assert convert_nif(str(src), str(dst))['converted']
+        dst_data = NF.Data()
+        with open(str(dst), 'rb') as f:
+            dst_data.read(f)
+        names = [type(b).__name__ for b in dst_data.blocks]
+
+        assert legacy_type not in names, \
+            f'{legacy_type} survived - Skyrim has no RTTI for it'
+        if 'NiSwitchNode' in src_names:
+            assert 'NiSwitchNode' in names, \
+                'NiSwitchNode is vanilla-legal (88 meshes) and must be kept'
+
+    @pytest.mark.skipif(not _TD_EXPORT_MESHES.exists(),
+                        reason='Tamriel Data export meshes not available')
+    @pytest.mark.parametrize('rel_path,legacy_type', _LEGACY_NODE_SAMPLES)
+    def test_no_dangling_reference_to_the_rewritten_node(
+            self, rel_path, legacy_type, tmp_path):
+        """The rewrite must repoint every link, not just the child array.
+
+        A NiBSAnimationNode can be a skeleton bone: NiSkinInstance holds it
+        through skeleton_root and bones, which a children-only swap misses.
+        """
+        import time
+        if not hasattr(time, '_original_clock'):
+            time.clock = time.perf_counter
+        from pyffi.formats.nif import NifFormat as NF
+
+        src = _TD_EXPORT_MESHES / rel_path
+        if not src.exists():
+            pytest.skip(f'{src} not found')
+        dst = tmp_path / 'out.nif'
+        assert convert_nif(str(src), str(dst))['converted']
+
+        data = NF.Data()
+        with open(str(dst), 'rb') as f:
+            data.read(f)
+        present = {id(b) for b in data.blocks}
+        for block in data.blocks:
+            for ref in block.get_links(data):
+                assert id(ref) in present, (
+                    f'{type(block).__name__} links a block outside the tree - '
+                    f'the {legacy_type} rewrite left a dangling reference')
+
+    @pytest.mark.skipif(not _TD_EXPORT_MESHES.exists(),
+                        reason='Tamriel Data export meshes not available')
+    def test_quadratic_uv_curve_is_written_linear(self, tmp_path):
+        """A KeyGroup's declared key type must match the bytes emitted.
+
+        pyffi fixes the element layout when update_size allocates, so a
+        QUADRATIC group is declared 24 bytes per key and written as 8; the
+        engine then reads past the block and rejects the file.
+        See: docs/commentary/asset_convert_nif.md#morrowind-quadratic-uv-keys
+        """
+        import time
+        if not hasattr(time, '_original_clock'):
+            time.clock = time.perf_counter
+        from pyffi.formats.nif import NifFormat as NF
+
+        src = _TD_EXPORT_MESHES / _QUADRATIC_UV_SAMPLE
+        if not src.exists():
+            pytest.skip(f'{src} not found')
+
+        src_data = NF.Data()
+        with open(str(src), 'rb') as f:
+            src_data.read(f)
+        quadratic = [g for b in src_data.blocks
+                     if type(b).__name__ == 'NiUVData'
+                     for g in (b.uv_groups or [])
+                     if g is not None and g.num_keys and g.interpolation == 2]
+        assert quadratic, 'sample has no QUADRATIC UV group - test is stale'
+
+        dst = tmp_path / 'out.nif'
+        assert convert_nif(str(src), str(dst))['converted']
+
+        raw = dst.read_bytes()
+        hdr = _parse_sky_header(raw)
+        offset = hdr['block_data_offset']
+        checked = 0
+        for i in range(hdr['num_blocks']):
+            size = hdr['block_sizes'][i]
+            if hdr['block_types'][hdr['block_type_indices'][i]] == 'NiFloatData':
+                num_keys, interp = struct.unpack_from('<II', raw, offset)
+                per_key = {1: 8, 2: 24, 3: 20}.get(interp, 8)
+                assert size == 8 + num_keys * per_key, (
+                    f'NiFloatData block {i} declares {size} bytes but its own '
+                    f'interpolation {interp} implies {8 + num_keys * per_key}')
+                checked += 1
+            offset += size
+        assert checked, 'no NiFloatData emitted - test is stale'

@@ -37,6 +37,12 @@ _HELPER_TYPES = ('AvoidNode',)
 #: Node types whose collision comes from their first child only.
 _FIRST_CHILD_ONLY = ('NiSwitchNode', 'NiFltAnimationNode')
 
+#: Legacy nodes Skyrim has no RTTI for, rewritten as a plain NiNode.
+_REWRITE_AS_NINODE = ('NiBSAnimationNode', 'NiBSParticleNode')
+
+#: Legacy LOD selector; child 0 is the nearest level and the one kept.
+_LOD_NODE = 'NiLODNode'
+
 #: Root string extra prefix that disables collision ("NC", "NCC").
 _NO_COLLISION_PREFIX = 'nc'
 
@@ -292,6 +298,90 @@ def strip_helper_nodes(root, stats=None) -> int:
     return dropped
 
 
+def _as_ni_node(block):
+    """A plain NiNode carrying everything `block` held as a NiNode.
+
+    The legacy types add no fields of their own, so copying the NiNode
+    attributes is lossless.
+    """
+    node = NifFormat.NiNode()
+    node.name = block.name
+    node.flags = block.flags
+    node.translation = block.translation
+    node.rotation = block.rotation
+    node.scale = block.scale
+    node.collision_object = block.collision_object
+    node.controller = block.controller
+    for count, array in (('num_children', 'children'),
+                         ('num_extra_data_list', 'extra_data_list'),
+                         ('num_properties', 'properties'),
+                         ('num_effects', 'effects')):
+        source = getattr(block, array)
+        setattr(node, count, getattr(block, count))
+        getattr(node, array).update_size()
+        for i in range(getattr(block, count)):
+            getattr(node, array)[i] = source[i]
+    return node
+
+
+def _keep_nearest_lod(block) -> None:
+    """Drop every LOD level but the nearest, which child 0 always is."""
+    keep = [c for c in (block.children or []) if c is not None][:1]
+    _compact(block, 'num_children', 'children', keep)
+
+
+def convert_legacy_nodes(data, stats=None) -> int:
+    """Replace the node types Skyrim has no RTTI for; how many were rewritten.
+
+    A block type the engine cannot instantiate rejects the whole file, so the
+    mesh renders as the missing-model red triangle. NiSwitchNode is the
+    control: same family, 88 vanilla Skyrim meshes, and it is left alone.
+    See: docs/commentary/asset_convert_nif.md#morrowind-legacy-node-types
+    """
+    replaced = {}
+    for block in data.blocks:
+        name = type(block).__name__
+        if name == _LOD_NODE:
+            _keep_nearest_lod(block)
+        if name in _REWRITE_AS_NINODE or name == _LOD_NODE:
+            replaced[id(block)] = (block, _as_ni_node(block))
+    if not replaced:
+        return 0
+    holders = list(data.blocks) + [new for _, new in replaced.values()]
+    for old, new in replaced.values():
+        for block in holders:
+            block.replace_global_node(old, new)
+        data.roots = [new if r is old else r for r in data.roots]
+    _count(stats, 'mw_legacy_nodes', len(replaced))
+    return len(replaced)
+
+
+def strip_collision_nodes(data, stats=None) -> int:
+    """Drop every RootCollisionNode in the tree; how many were removed.
+
+    `attach_morrowind_collision` strips only the one the engine's direct-child
+    search finds, which decides the collision that gets BUILT. Walks the live
+    root graph, not `data.blocks`: that list is derived and omits a node the
+    earlier strip detached, hiding its still-attached sibling.
+    See: docs/commentary/asset_convert_nif.md#morrowind-legacy-node-types
+    """
+    removed = 0
+    seen = set()
+    pending = [r for r in data.roots if r is not None]
+    while pending:
+        node = pending.pop()
+        if id(node) in seen or not hasattr(node, 'children'):
+            continue
+        seen.add(id(node))
+        doomed = {id(c) for c in (node.children or [])
+                  if c is not None and is_collision_node(c)}
+        if doomed:
+            removed += _strip_children(node, doomed)
+        pending.extend(c for c in (node.children or []) if c is not None)
+    _count(stats, 'mw_nested_collision_stripped', removed)
+    return removed
+
+
 def raise_triangle_flags(data, stats=None) -> int:
     """Set `has_triangles` on shapes that carry triangles but declare none.
 
@@ -370,6 +460,7 @@ def disable_specular(data, stats=None) -> int:
 def run_morrowind_fixups(data, stats=None) -> None:
     """Apply the Morrowind-only repairs that must precede the version upgrade."""
     raise_triangle_flags(data, stats)
+    convert_legacy_nodes(data, stats)
     for root in data.roots:
         if hasattr(root, 'children'):
             strip_helper_nodes(root, stats)
