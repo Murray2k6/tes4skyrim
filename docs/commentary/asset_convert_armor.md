@@ -264,6 +264,25 @@ to a head slot.
 - [Distorted worn clothing — nested bones placed with the wrong operand order (SOLVED 2026-08-25)](#distorted-worn-clothing-nested-bones)
 - [Creature skin render crash — >80 skin bones per shape (SOLVED 2026-07-10)](#creature-skin-render-crash-80)
 
+## <a id="morrowind-armor-assembly"></a>Morrowind armor assembly
+
+**Code:** `asset_convert/character/morrowind_armor.py`.
+
+Morrowind has no single worn-armor mesh. A cuirass is a SET of body-part NIFs
+(chest, per-side pauldron, upper arm...) named by the ARMO record's index
+list, so the converter assembles one wearable from several files before any of
+the Oblivion armor path applies.
+
+Each assembled part is classified by how it is bound, not by its name: a part
+carrying `Prn` is a rigid attachment and takes the Prn path
+([#prn-attached-rigid-pieces](#prn-attached-rigid-pieces)); a skinned part is
+re-bound to the shared skeleton ([#nif-skin-retargeting](#nif-skin-retargeting)).
+Shields are never skinned -- the root carries `Prn=Shield` and the Oblivion
+shield path takes it ([#shield-attachment](#shield-attachment)).
+
+The result is written as a Morrowind-version NIF beside the source meshes, so
+every downstream stage sees the same shape of input it always has.
+
 ## NIF worn armor conversion
 <a id="nif-worn-armor-conversion"></a>
 - Worn armor (has_skin AND not _gnd AND in armor/clothes dir) must use **NiNode** root, NOT BSFadeNode

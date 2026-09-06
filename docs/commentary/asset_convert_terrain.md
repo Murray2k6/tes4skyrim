@@ -313,9 +313,160 @@ rank worldspaces, so every file under a worldspace's directory counts,
 `blocks` and `normals` subfolders included.
 
 
+## <a id="lod-suppliers-vs-contributors"></a>Overlay scoping must not scope ASSETS
+
+**Code:** `_plan_jobs` in `tools/release/create_lod.py`
+
+Two different questions get asked about the plugins around a worldspace's
+owner, and answering both with one list loses textures.
+
+*Which plugins are overlaid as RECORDS* is deliberately narrow. Depending on a
+worldspace's owner is not the same as editing it: `Morrowind_ob.esm` rests on
+`Oblivion.esm` and so passes the dependency gate for all 18 of its
+worldspaces, while placing nothing in any of them — 18 parses of a 206 MB file
+to merge zero records. A plugin whose ESM cannot be read is kept rather than
+dropped, because an unnecessary overlay costs time and a missing one costs LOD.
+
+*Which plugins SUPPLY assets* is wider, and scoping it the same way is wrong. A
+plugin that places no references can still define the base objects that another
+plugin's references point at. The Morroblivion compatibility patch is exactly
+that shape: **3,215 base records and no CELL or REFR dump at all**. Filtered
+out of the asset roots, it took its texture tree with it, and LODGen reported
+**73 LOD textures missing** — every one of them a file sitting in
+`output/Morrowind-Morroblivion-Compatibility.esp/textures/tes4/`.
+
+So `_plan_jobs` returns both: `contributors` (scoped, overlaid as records) and
+`suppliers` (every dependency-legal plugin, feeding `master_mesh_dirs`,
+`master_texture_dirs` and `far_nif_dirs`).
+
+The dependency gate itself is not optional in either list. A plugin that does
+not rest on the owner cannot legally touch its worldspace, and overlaying one
+anyway merges two unrelated games: `Nehrim.esm` is standalone, and stacking it
+onto Oblivion's `TES4Tamriel` would pull its FormIDs into Cyrodiil's tiles.
+
+## <a id="lodgen-rejects-animated-roots"></a>LODGen rejects animated NiNode roots
+
+**Code:** `_LODGEN_BAD_ROOTS` / `_ninode_root_names` in `asset_convert/lod/lod_gen.py`
+
+`_root_is_ninode` excludes meshes whose root block would crash LODGen's
+`NiNode` cast. It derived the accepted set from the pyffi class tree — every
+`NiNode` subclass — and that is too generous.
+
+`NiBSAnimationNode` **is** a `NiNode` subclass (`NiBSAnimationNode -> NiNode ->
+NiAVObject`), so it passed the guard, and LODGen still threw
+`NullReferenceException` in `ParseNif` (`LODApp.cs:1386`). These are
+Morrowind-era animated roots that survive conversion intact: the four models
+that killed a Tamriel Rebuilt bake one after another —
+`T_Mw_FloraOW_Bulbshroom_01`/`_03`, `T_Glb_TerrWater_Waterfall_01`/`_03` — all
+have one.
+
+Censused over 40,962 converted meshes (Tamriel Data + Morroblivion):
+
+| Root type | Count |
+|---|---|
+| BSFadeNode | 39,754 |
+| NiNode | 1,151 |
+| NiBSAnimationNode | 56 |
+| NiSwitchNode | 1 |
+
+57 meshes, but any ONE of them entering a bake costs the whole worldspace's
+object LOD — the failure is not proportional to the count.
+
+So the derived set is filtered by `_LODGEN_BAD_ROOTS`. The excluded types are
+the ones whose semantics are a controller or a selector rather than a plain
+transform: animation (`NiBSAnimationNode`, `NiBSParticleNode`), runtime
+selection (`NiSwitchNode`, `NiLODNode`, `NiBillboardNode`), and the non-render
+roots (`RootCollisionNode`, `AvoidNode`). An excluded mesh loses only its own
+distant LOD and pops in at load distance, which is what the pre-existing
+`skipped_unsafe` path already does for unreadable meshes.
+
+This is the pre-flight half of the defence; the retry
+([#lodgen-nullreference-retry](#lodgen-nullreference-retry)) covers roots that
+pass the guard and still throw.
+
+## <a id="lodgen-nullreference-retry"></a>LODGen dies on NullReferenceException, and the retry
+
+**Code:** `run_lodgen` in `asset_convert/lod/lod_gen.py`
+
+`LODGenx64.exe` 3.0.36.0 replaced 2.2.0.0 because 2.2 handles no exceptions: a
+model it cannot parse throws on a ThreadPool worker and kills the process, so
+every tile not yet written is silently lost. Measured on Nehrim: 28 of 418
+tiles baked, twice in a row, because of ONE model (`LeyawiinHouseLower01`, 5
+references in the entire game). The fault is inside LODGen, not the mesh —
+repairing that model's tangent flag and recomputing its normals each made 2.2
+crash EARLIER.
+
+3.x catches `ArgumentOutOfRangeException` per object, prints
+`Error processing <EditorID>` and carries on. It does NOT catch
+`NullReferenceException`, which unwinds the parallel loop and ends the run with
+the same total loss.
+
+Measured on the Morroblivion + Tamriel Data + Tamriel Rebuilt load order: an
+input of **286,985 references** produced **26 level-4 tiles in 7 seconds** and
+no level 8/16/32 at all, because `T_Glb_TerrWater_Waterfall_01` threw. The run
+looked clean — exit code carries no signal (3.x returns nonzero whenever any
+object failed, even on a complete bake), and "tiles > 0" was satisfied by the
+26. In game that is a worldspace with essentially no distant objects.
+
+So a run whose output contains `NullReferenceException` is retried with every
+model named in an `Error processing` line stripped from the input
+(`_drop_lodgen_refs`, matching the base EditorID at field index 9 of a
+reference row). Each attempt bans one more faulting model, bounded at 4; a
+clean run never retries. If it still dies, `run_lodgen` now returns False
+instead of reporting success on a truncated bake.
+
+This complements the pre-flight `skipped_unsafe` check, which excludes meshes
+that are unreadable or have a non-NiNode root. That predicts the crashes it
+can; the retry covers the ones it cannot.
+
+### <a id="lodgen-output-must-stream"></a>Its output must be STREAMED, not captured
+
+Parsing the output for `Error processing` and `NullReferenceException` is why
+it is piped rather than inherited — a piped child also cannot pop up its own
+console window under the console-less GUI launcher. But `capture_output=True`
+withholds every line until the child exits, and a worldspace bake runs for
+many MINUTES: the Morrowind run above printed its whole per-tile progress log
+(`Finished LOD level 4 coord ...`) in one dump at the end, so the pipeline
+looked hung throughout. `run_streamed` (`subprocess_flags.py`) echoes each
+line as it arrives and still returns the full text the retry logic parses.
+
+`--skyblivionTexPath` is deliberately NOT passed: it prepends an extra `tes4\`
+to texture paths already under `textures	es4\`, doubling the prefix and
+causing null-pointer crashes.
+
+## <a id="lod-for-plugins-that-only-edit"></a>LOD for plugins that only EDIT a worldspace
+
+**Code:** `_add_edited_worldspaces` in `asset_convert/lod/sibling_lod.py`
+
+`lod_capable_worldspaces` treats the SOURCE GAME's shipped LOD assets as the
+authority on which worldspaces deserve LOD. That reasoning holds for
+Oblivion-format content, where every plugin extending a landmass ships LOD for
+the master's worldspace, and it is why Oblivion LOD has always been correct.
+
+It fails for a plugin that adds land to someone else's worldspace while
+shipping no LOD of its own. Morroblivion ships Oblivion-format LOD for
+`WrldMorrowind` and qualifies. Tamriel Rebuilt is Morrowind-native, overrides
+that same worldspace (`00380000`), and ships no LOD assets at all, so
+`shipped_lod_worldspaces` returned `[]` and it contributed nothing to the bake.
+
+Measured: TR holds **10,368 LAND records** over grid X -42..99, Y -116..67,
+but the baked tiles covered only X -64..44, Y -32..56 -- Morroblivion's island.
+Every TR cell east, west and south of it rendered with no distant terrain.
+
+So after the per-plugin scan, a plugin joins any ALREADY-QUALIFIED worldspace
+it puts exterior cells in. The qualifying judgement still comes from a plugin
+that ships LOD -- this only widens who contributes to a worldspace already
+being built, and never invents one. That keeps the debug-worldspace false
+positives out (`TestGatekeeper` et al. are qualified by nobody) while letting
+Morrowind-native content ride on the grid its sibling established.
+
+Membership is read from the CELL dump's `ParentWRLD`, not the converted ESM:
+the scan runs before the bake and for plugins that may not be converted yet,
+and the dump is the same authored data the extent pass measures from.
+
 ## Why the WRLD scan includes masters
 
-**Code:** `_worldspace_edids` in `asset_convert/lod/terrain_lod.py`
+**Code:** `worldspace_edids` in `asset_convert/lod/terrain_lod.py`
 
 An OVERRIDE plugin ships LOD assets for a worldspace it does not itself define.
 The GOTY `DLCShiveringIsles.esp` is an 85-byte header-only stub -- every
@@ -599,6 +750,25 @@ comes close.
 TWMP Valenwood/Elsweyr ships **505 REFRs** carrying one or the other in DATA's
 RotZ. A MASTER's record reaches this parser without passing the import-side
 `get_float` clamp, so both screens are needed here too.
+
+## Level 16 is gated by size, not a header flag
+<a id="level-16-is-gated-by-size"></a>
+
+**Code:** `lod_gen._lod_meshes_for`, `lod_far_gen.generate_far_nifs`.
+
+Level 16 is the world-map ring. It used to be gated on record flag
+`0x10000000`, which the import set on every STAT/TREE over 1024 units as
+"Show in World Map". That flag does not exist (Skyrim.esm sets it on 143 FURN
+and 1 STAT of 9,720 — see
+[ck_vs_game_missing_objects.md](ck_vs_game_missing_objects.md#no-show-in-world-map-flag)),
+so the import stopped writing it. The LOD stage kept gating on it, and from
+that commit on every worldspace baked all-empty level-16 tiles: WrldMorrowind
+produced 87 tiles of 236 bytes each, and the LODGen input carried zero level-16
+model paths across 286,612 rows.
+
+The gate is now the same size gate level 8 uses (`LOD8_MIN_SIZE`): anything
+large enough to be baked two cells out is baked into the far ring as well,
+using its `_far16` tier when one was derived. Trees already worked this way.
 
 ## The parsed-ESM cache
 <a id="parsed-esm-cache"></a>

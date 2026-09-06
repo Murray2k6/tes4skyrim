@@ -15,13 +15,12 @@ import os
 import re as _re
 import shutil
 import struct
-import subprocess
 import sys
 from pathlib import Path
 
 from asset_convert.game_paths import win_join
-from asset_convert.lod.esm_scan import (FLAG_DISTANT_LOD, FLAG_WORLD_MAP,
-                                        parse_esm, parse_esm_cached)
+from asset_convert.lod.esm_scan import (FLAG_DISTANT_LOD, parse_esm,
+                                        parse_esm_cached)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -30,7 +29,7 @@ from asset_convert.lod.esm_scan import (FLAG_DISTANT_LOD, FLAG_WORLD_MAP,
 from asset_convert import paths
 
 sys.path.insert(0, str(paths.REPO))
-from subprocess_flags import POPEN_FLAGS, windows_cmd
+from subprocess_flags import run_streamed, windows_cmd
 
 #: LODGen 3.0.36.0; 2.2.0.0 let one bad model kill the process. See run_lodgen().
 LODGEN_EXE = paths.LODGEN
@@ -235,7 +234,7 @@ def _screenable_mesh_paths(refs, stats, cell_wrld, wrld_fid, keep_cells):
         model = stat.get('model', '')
         if not model:
             continue
-        if not (stat.get('flags', 0) & (FLAG_DISTANT_LOD | FLAG_WORLD_MAP)):
+        if not (stat.get('flags', 0) & FLAG_DISTANT_LOD):
             continue
         out.append(model)
         for explicit in ('lod4', 'lod8', 'lod16'):
@@ -321,7 +320,18 @@ def _prescreen_meshes(paths, output_meshes_dir: Path, workers: int = 16,
 _NINODE_ROOT_NAMES = None
 
 
+#: NiNode subclasses LODGen still rejects as a root; subclassing is not enough.
+_LODGEN_BAD_ROOTS = frozenset({
+    'NiBSAnimationNode', 'NiBSParticleNode', 'NiSwitchNode', 'NiLODNode',
+    'NiBillboardNode', 'RootCollisionNode', 'AvoidNode',
+})
+
+
 def _ninode_root_names():
+    """Root block type names LODGen can cast, minus the ones it throws on.
+
+    See: docs/commentary/asset_convert_terrain.md#lodgen-rejects-animated-roots
+    """
     global _NINODE_ROOT_NAMES
     if _NINODE_ROOT_NAMES is None:
         from asset_convert.lod.lod_far_gen import NifFormat
@@ -331,7 +341,7 @@ def _ninode_root_names():
             if (isinstance(cls, type)
                     and issubclass(cls, NifFormat.NiNode)):
                 names.add(attr)
-        _NINODE_ROOT_NAMES = names
+        _NINODE_ROOT_NAMES = names - _LODGEN_BAD_ROOTS
     return _NINODE_ROOT_NAMES
 
 
@@ -406,14 +416,20 @@ def _root_is_ninode(full: Path) -> bool:
 
 
 def _root_is_ninode_slow(full: Path) -> bool:
-    """Full-parse fallback for header shapes the fast path does not model."""
+    """Full-parse fallback for header shapes the fast path does not model.
+
+    Judged by CLASS NAME, not `isinstance`: the rejected roots are NiNode
+    subclasses, so an isinstance test accepts every one of them.
+    See: docs/commentary/asset_convert_terrain.md#lodgen-rejects-animated-roots
+    """
     try:
         from asset_convert.lod.lod_far_gen import NifFormat
         data = NifFormat.Data()
         with open(full, 'rb') as fh:
             data.read(fh)
         roots = data.roots
-        return bool(roots) and isinstance(roots[0], NifFormat.NiNode)
+        return (bool(roots) and isinstance(roots[0], NifFormat.NiNode)
+                and roots[0].__class__.__name__ not in _LODGEN_BAD_ROOTS)
     except Exception:
         return False
 
@@ -581,24 +597,14 @@ def _drop_staged_master_meshes() -> int:
 
 
 def _lod_meshes_for(stat: dict, output_meshes_dir: Path, master_meshes=None):
-    """
-    Return (lod4, lod8, lod16) mesh paths for a stat record.
+    """Return (lod4, lod8, lod16) mesh paths for a stat record.
 
-    - Trees use their billboard-card _far.nif, and are subject to the SAME
-      size gate as everything else: a card is only 8 verts, but it is baked
-      once per PLACEMENT, and Tamriel places 124,872 of them. Listing every
-      tree at every level put 73,672 tree cards into level-16 tiles — 72% of
-      everything reaching that level, and why a level-16 tile spans 256 cells
-      yet reached 371 MB. 26% of tree placements are shrubs under the gate
-      (ShrubBoxwood is 130 units and was being drawn ~8 km out).
-    - Other LOD objects (0x8000) get lod4; lod8 only if they're big enough
-      to matter at level-8 distances (LOD8_MIN_SIZE).
-    - World-map objects (0x10000000) additionally get lod16 so LODGenx64
-      bakes tiles for the far ring / world-map view.
-
-    `master_meshes` lets an override plugin rebuilding a whole tile use LOD
-    meshes that were only generated into a MASTER's output; each one found is
-    copied into this plugin's tree so LODGen can resolve it.
+    Every LOD object gets lod4. Objects of LOD8_MIN_SIZE or more also get
+    lod8 and lod16 (their `_far8`/`_far16` tiers when derived, else `_far`);
+    trees reuse their billboard card at every level. `master_meshes` are
+    searched for LOD meshes generated only into a master's output; each one
+    found is staged into this plugin's tree so LODGen can resolve it.
+    See: docs/commentary/asset_convert_terrain.md#level-16-is-gated-by-size
     """
     lod4  = stat.get('lod4', '')
     lod8  = stat.get('lod8', '')
@@ -618,29 +624,17 @@ def _lod_meshes_for(stat: dict, output_meshes_dir: Path, master_meshes=None):
     from asset_convert.lod.lod_far_gen import is_tree_model, _tier_path, TIER8, TIER16
     is_tree = is_tree_model(stat)
 
-    flags = stat.get('flags', 0)
-    big_enough = obnd_max_dim(stat) >= LOD8_MIN_SIZE
-    lod8_mesh = lod16_mesh = ''
-    if big_enough:
-        # A billboard card has no coarser tier to fall back to: it is already
-        # two crossed quads, so the same card serves every level it reaches.
-        if is_tree:
-            lod8_mesh = far
-        else:
-            far8 = str(_tier_path(Path(far), TIER8['suffix']))
-            lod8_mesh = (far8 if _import_master_mesh(far8, output_meshes_dir,
-                                                     master_meshes) else far)
-    # Trees carry no world-map flag, so gate their far ring on size alone —
-    # otherwise every tree drops out at level 16 and distant forests vanish
-    # from the world map.
-    if (flags & 0x10000000) or (is_tree and big_enough):
-        if is_tree:
-            lod16_mesh = far
-        else:
-            far16 = str(_tier_path(Path(far), TIER16['suffix']))
-            lod16_mesh = (far16 if _import_master_mesh(far16, output_meshes_dir,
-                                                       master_meshes) else far)
-    return far, lod8_mesh, lod16_mesh
+    if obnd_max_dim(stat) < LOD8_MIN_SIZE:
+        return far, '', ''
+    if is_tree:
+        return far, far, far
+
+    def tier(spec):
+        """The tier's mesh path if it resolves, else the base `_far` mesh."""
+        path = str(_tier_path(Path(far), spec['suffix']))
+        return (path if _import_master_mesh(path, output_meshes_dir,
+                                            master_meshes) else far)
+    return far, tier(TIER8), tier(TIER16)
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +849,7 @@ def write_lodgen_input(esm_path: Path, output_dir: Path,
             continue
 
         stat_flags_val = stat.get('flags', 0)
-        stat_is_lod = bool(stat_flags_val & (FLAG_DISTANT_LOD | FLAG_WORLD_MAP))
+        stat_is_lod = bool(stat_flags_val & FLAG_DISTANT_LOD)
         if not stat_is_lod:
             continue
         # Resolve this BASE once (see base_cache): which LOD meshes it uses,
@@ -966,74 +960,106 @@ def write_lodgen_input(esm_path: Path, output_dir: Path,
 
 _LODGEN_ERR_RE = _re.compile(r'Error processing (\S+)')
 
+#: One line per finished tile; counting them detects a run that died partway.
+_LODGEN_TILE_RE = _re.compile(r'Finished LOD level \d+ coord ')
+
+#: The one fault 3.x does not catch per object — it unwinds the whole run.
+_LODGEN_FATAL = 'NullReferenceException'
+
 
 def run_lodgen(lodgen_input: Path, output_dir: Path) -> bool:
     """Invoke LODGen to bake the worldspace's object-LOD .bto tiles.
 
-    `LODGenx64.exe` is 3.0.36.0. It replaced the 2.2.0.0 build because 2.2
-    handles no exceptions: a model it cannot parse throws on a ThreadPool
-    worker and kills the whole process, so every tile not yet written is
-    silently lost. Measured on Nehrim: 28 of 418 tiles baked, twice in a
-    row, because of ONE model
-    (`LeyawiinHouseLower01`, 5 references in the entire game). 3.x catches the
-    same `ArgumentOutOfRangeException` per object, prints
-    `Error processing <EditorID>`, and carries on with the rest — so one bad
-    model costs only its own LOD copy (it pops in at load distance) instead of
-    the entire worldspace.
-
-    The fault is inside LODGen, not the mesh: repairing that model's tangent
-    flag and recomputing its missing normals each made 2.2 crash EARLIER.
-
-    Verified equivalent, not merely tolerable: on the same input 3.x emits the
-    same tile set with the same block structure as 2.2 (39 BSSegmentedTriShape
-    / BSMultiBoundNode per tile, NIF 20.2.0.7), differing only in slightly
-    tighter mesh reduction.
-
-    Note 3.x's exit code is NOT a success signal — it returns 0 on a clean run
-    but a nonzero value when any object failed, even though the bake completed
-    and every tile was written. Success is therefore judged by tiles produced.
+    Success is judged by tiles produced, never the exit code: 3.x returns
+    nonzero whenever any object failed even on a complete bake. A run killed
+    by `NullReferenceException` loses every unwritten tile, so it is retried
+    with the faulting models stripped from the input; False means the bake is
+    still incomplete.
+    See: docs/commentary/asset_convert_terrain.md#lodgen-nullreference-retry
     """
     if not LODGEN_EXE.exists():
         print(f"  ERROR: LODGen not found at {LODGEN_EXE}")
         return False
 
-    # PathOutput is embedded in the input file; LODGen reads it from there.
+    banned: set = set()
+    for attempt in range(_LODGEN_MAX_ATTEMPTS):
+        out, code = _invoke_lodgen(lodgen_input)
+        skipped = sorted(set(_LODGEN_ERR_RE.findall(out)))
+        if skipped:
+            print(f"  WARNING: LODGen could not process {len(skipped)} "
+                  f"model(s); they have no distant LOD and will pop in at "
+                  f"load distance: {', '.join(skipped)}")
+
+        fatal = [e for e in skipped if e not in banned]
+        if _LODGEN_FATAL not in out or not fatal:
+            break
+        banned |= set(fatal)
+        print(f"  LODGen died on {_LODGEN_FATAL} after "
+              f"{len(_LODGEN_TILE_RE.findall(out))} tile(s) — every later tile "
+              f"was lost. Re-running without {', '.join(fatal)} "
+              f"(attempt {attempt + 2}).")
+        if not _drop_lodgen_refs(lodgen_input, banned):
+            break
+
+    tiles = _lodgen_output_dir(lodgen_input)
+    baked = len(list(tiles.glob('*.bto'))) if tiles else 0
+    if not baked:
+        print(f"  WARNING: LODGen produced no .bto tiles (exit code {code})")
+        return False
+    if banned and _LODGEN_FATAL in out:
+        print(f"  WARNING: LODGen still died after excluding {len(banned)} "
+              f"model(s); object LOD is INCOMPLETE ({baked} tiles).")
+        return False
+    return True
+
+
+#: Bounds a pathological input; a clean run never retries at all.
+_LODGEN_MAX_ATTEMPTS = 4
+
+
+def _invoke_lodgen(lodgen_input: Path):
+    """Run LODGen once; return (combined stdout+stderr, exit code).
+
+    PathOutput is embedded in the input file, so LODGen reads it from there.
+    Output is streamed, not captured: a bake runs for minutes.
+    See: docs/commentary/asset_convert_terrain.md#lodgen-output-must-stream
+    """
     cmd = [
         str(LODGEN_EXE),
         str(lodgen_input),
         "--dontFixTangents",
         "--removeUnseenFaces",
-        # --skyblivionTexPath is NOT used: it prepends an extra 'tes4\\' to texture paths
-        # already under textures\\tes4\\, doubling the prefix and causing null-ptr crashes.
     ]
     print(f"  Running: {' '.join(cmd)}")
-    # Capture output so it reaches the GUI log instead of a popped-up console
-    # window (which never exists under the console-less GUI launcher).
-    result = subprocess.run(windows_cmd(cmd), cwd=str(LODGEN_EXE.parent),
-                            capture_output=True, text=True, **POPEN_FLAGS)
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="")
+    return run_streamed(windows_cmd(cmd), cwd=str(LODGEN_EXE.parent))
 
-    # Objects LODGen could not parse. It skipped them and kept going; report
-    # them so a model that loses its distant LOD is visible in the log rather
-    # than silently absent in-game.
-    skipped = sorted(set(_LODGEN_ERR_RE.findall(
-        (result.stdout or "") + (result.stderr or ""))))
-    if skipped:
-        print(f"  WARNING: LODGen could not process {len(skipped)} model(s); "
-              f"they have no distant LOD and will pop in at load distance: "
-              f"{', '.join(skipped)}")
 
-    # Tiles on disk are the only trustworthy success signal (see docstring).
-    tiles = _lodgen_output_dir(lodgen_input)
-    baked = len(list(tiles.glob('*.bto'))) if tiles else 0
-    if not baked:
-        print(f"  WARNING: LODGen produced no .bto tiles "
-              f"(exit code {result.returncode})")
+def _drop_lodgen_refs(lodgen_input: Path, banned: set) -> bool:
+    """Rewrite the input without `banned` EditorIDs. True if anything changed.
+
+    A reference row is the 9 REFR fields followed by `base_entry`, so the base
+    record's EditorID — which is the name LODGen prints in its error — sits at
+    index 9. Header lines carry no tab and are copied through untouched.
+    """
+    try:
+        text = lodgen_input.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return False
+    lines = text.splitlines()
+    kept = [ln for ln in lines
+            if len(ln.split('\t')) <= _LODGEN_EDID_FIELD
+            or ln.split('\t')[_LODGEN_EDID_FIELD] not in banned]
+    if len(kept) == len(lines):
+        return False
+    try:
+        lodgen_input.write_text('\n'.join(kept) + '\n', encoding='utf-8')
+    except OSError:
         return False
     return True
+
+
+#: Index of the base EditorID in a LODGen reference row (9 REFR fields first).
+_LODGEN_EDID_FIELD = 9
 
 
 def _lodgen_output_dir(lodgen_input: Path):

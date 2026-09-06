@@ -24,6 +24,11 @@ To fix this everywhere in one place:
     On Windows it returns ``cmd`` unchanged. Off Windows, if ``cmd[0]`` is a
     ``.exe``, it prepends ``wine``.
 
+  * ``run_streamed(cmd, ...)`` — for a LONG-running bundled tool whose
+    progress must reach the log as it happens rather than in one dump when the
+    child finally exits, while still returning the full text a caller needs to
+    parse afterwards.
+
   * ``to_wine_path(path)`` — some of those bundled tools are old Windows
     console apps (confirmed under Wine 11.0: hkxcmd, xWMAEncode) that parse
     their own argv and treat a leading ``/`` as a switch prefix, silently
@@ -42,7 +47,7 @@ import subprocess
 import sys
 
 __all__ = ["POPEN_FLAGS", "configure_multiprocessing", "windows_cmd",
-          "to_wine_path"]
+          "run_streamed", "to_wine_path"]
 
 # Flags to hide the console window of any subprocess we spawn on Windows.
 POPEN_FLAGS: dict = {}
@@ -118,6 +123,25 @@ def windows_cmd(cmd: list) -> list:
             f"wine` / `pacman -S wine` / `brew install --cask wine-stable`)."
         )
     return [wine, exe] + list(cmd[1:])
+
+
+def run_streamed(cmd: list, **kwargs) -> tuple:
+    """Run ``cmd``, echoing each output line as it arrives; return (text, code).
+
+    stderr is folded into stdout so the echoed order matches the child's own.
+    A caller that must both SHOW progress live and PARSE the whole output uses
+    this instead of ``capture_output``, which withholds every line until the
+    child exits.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            errors='replace', **kwargs, **POPEN_FLAGS)
+    lines = []
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        lines.append(line)
+    return ''.join(lines), proc.wait()
 
 
 def to_wine_path(path) -> str:

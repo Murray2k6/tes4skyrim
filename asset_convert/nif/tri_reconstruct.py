@@ -30,16 +30,19 @@ def _role_key(uv):
 
 
 def fix_missing_triangles(tri_data):
-    # TODO: This should only apply to grass/plant meshes
-    """Rebuild tri_data.triangles when has_triangles is unset.
+    """Rebuild tri_data.triangles when the index array is really absent.
 
     Returns True if triangles were reconstructed, False if nothing to do.
     Raises ValueError when the mesh doesn't match the reconstructible
     blade-list pattern (caller should surface the file for inspection).
+
+    Emptiness is decided on the array itself, never on `has_triangles`:
+    that flag does not exist below 10.1.0.0, so it reads False on every
+    Morrowind mesh and would condemn geometry that is perfectly present.
     """
     if not hasattr(tri_data, 'has_triangles'):
         return False
-    if tri_data.has_triangles or not tri_data.num_triangles:
+    if len(tri_data.triangles) or not tri_data.num_triangles:
         return False
 
     nt = tri_data.num_triangles

@@ -25,6 +25,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
+from plugin_masters import masters_from_export_header
 from .constants import IMPORT_DISPATCH, SKIP_TYPES, TYPE_MAP
 from .master_manifest import write_manifest
 from .overrides import (DELETED_FLAG as OVERRIDE_DELETED_FLAG,
@@ -334,29 +335,23 @@ def _creature_sound_slots(export_dir: str) -> dict:
         return {}
 
 
-def _read_tes4_masters(export_dir: str) -> list:
-    """The plugin's TES4 master NAMES, from the export's _HEADER.txt.
+def _reconcile_masters(masters: list, tes4_master_names: list) -> list:
+    """`masters` reduced to the export header's list, plus Skyrim.esm.
 
-    The export header is the authority, not the source binary: the binary lives
-    in the configured Oblivion data folder and may simply not be there (a Nehrim
-    plugin against a Steam Oblivion install), in which case the caller's
-    binary-derived master list comes back EMPTY while the export still says the
-    plugin has masters. Trusting the count from one source and the names from
-    the other made `masters[len(masters) - count:]` slice off the tail of
-    ['Skyrim.esm'] and demand a converted `output/Skyrim.esm/Skyrim.esm` —
-    Translation.esp aborted with "convert the master first: Skyrim.esm".
+    The header is the authority on what this plugin was BUILT against; the
+    caller's binary-derived list can name files the conversion replaced.
+    See: docs/commentary/tes4_export_morrowind.md#masters
     """
-    path = os.path.join(export_dir, '_HEADER.txt')
-    if not os.path.isfile(path):
-        return []
-    names = []
-    with open(path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.startswith('Master['):
-                _, _, val = line.partition('=')
-                if val.strip():
-                    names.append(val.strip())
-    return names
+    if not tes4_master_names:
+        return masters
+    wanted = {n.lower() for n in tes4_master_names}
+    if [n.lower() for n in masters] == [n.lower() for n in tes4_master_names]:
+        return masters
+    kept = [m for m in masters
+            if m.lower() not in wanted and m.lower() == 'skyrim.esm']
+    merged = kept + tes4_master_names
+    print(f"  Masters (from export header): {', '.join(merged)}")
+    return merged
 
 
 def import_plugin(export_dir: str, output_path: str, masters: list = None,
@@ -422,24 +417,9 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
             print(f"    [phase0] {label}: {now - _step_t:.1f}s")
         _step_t = now
 
-    # How many masters the file had in TES4. Everything at a load-order index
-    # below this is an override of one of those masters; the plugin's own
-    # records sit at exactly this index.
-    tes4_master_names = _read_tes4_masters(export_dir)
+    tes4_master_names = masters_from_export_header(export_dir)
     num_tes4_masters = len(tes4_master_names)
-    # Reconcile the caller's master list with the export header. The caller
-    # derives its list from the SOURCE BINARY, which may be missing from the
-    # configured data folder; the header always ships with the export. Whenever
-    # they disagree, the header's TES4 masters are appended so the trailing
-    # `num_tes4_masters` entries really are those masters.
-    if num_tes4_masters:
-        tail = masters[len(masters) - num_tes4_masters:]
-        if [n.lower() for n in tail] != [n.lower() for n in tes4_master_names]:
-            new_masters = [m for m in masters
-                           if m.lower() not in
-                           {n.lower() for n in tes4_master_names}]
-            masters = new_masters + tes4_master_names
-            print(f"  Masters (from export header): {', '.join(masters)}")
+    masters = _reconcile_masters(masters, tes4_master_names)
     ctx = None
     if num_tes4_masters:
         print(f"  TES4 masters: {num_tes4_masters} "

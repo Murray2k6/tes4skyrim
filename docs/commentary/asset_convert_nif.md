@@ -1775,3 +1775,383 @@ The Skyrim equivalent is a frame-strip atlas texture plus a
 (`CONST`) keys. The converter composes the source frames into a
 horizontal-strip DDS and emits that controller, so the animation survives with
 no `NiFlipController` in the output.
+
+<a id="morrowind-num-uv-sets"></a>
+
+## Morrowind (4.0.0.2): the duplicated `Num UV Sets`
+
+**Code:** `asset_convert/nif/pyffi_monkey_patch.py` Patch 11.
+
+pyffi read **0 of 60** Morrowind meshes before this patch. The cause is not the
+version gate and not the boolean width -- 4.0.0.2 booleans genuinely are four
+bytes, and forcing them to one only moves the failure.
+
+`nif.xml` declares `Num UV Sets` on `NiGeometryData` **twice**, with different
+widths *and* different positions:
+
+- a `byte` before `Has Normals`, since 10.0.1.0
+- a `ushort` after `Vertex Colors`, until 4.2.2.0
+
+`StructBase.__init__` keeps one value object per attribute NAME and skips
+duplicates -- its own comment requires duplicates to share a type, which these
+do not -- so the stored object is always the `UByte`. At 4.0.0.2 the version
+filter correctly yields the *ushort* attribute, but the read goes through the
+byte object and consumes one byte where the file has two. Measured: pyffi read
+the count at 2489->2490 where the file ends it at 2491, shifting every later
+field by one and overrunning the block.
+
+The fix gives BOTH declarations one shared version-aware type rather than
+renaming either. Renaming is not viable: two candidate patches that renamed a
+declaration read Morrowind 60/60 but broke **80/80** Oblivion and Skyrim files.
+
+Measured after the patch: **60/60** sampled Morrowind meshes read (5798/5798
+over the full corpus), 29,852 `NiTriShapeData` blocks structurally consistent,
+and Oblivion/Skyrim round-trips byte-identical to before.
+
+<a id="morrowind-collision"></a>
+
+## Morrowind collision: `RootCollisionNode` (2026-09-01)
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py`;
+`attach_morrowind_collision` is called from `_convert_roots` AFTER each
+root's Oblivion collision pass.
+
+### Attached after conversion, not before
+
+The first pass built the collision in `_run_source_fixups`. Two things then
+happened to it: `collision.py::_convert_shape` unwrapped the
+`bhkMoppBvTreeShape` as "stale Oblivion MOPP data" (the block list of every
+built mesh had a bare `bhkCompressedMeshShape` under the body, which no
+vanilla mesh ever has), and `_to_fade_node` swapped the root so the CMS
+`target` pointed at a NiNode no longer in the tree (pyffi: *"NiNode block is
+missing from the nif tree: omitting reference"*). Attaching after
+`_convert_one_root` fixes both, and also means the triangles are read from
+the FINAL geometry, so a root whose rotation `_wrap_root_transform` baked
+into a child needs no separate frame correction. The BSXFlags the
+collision-less tree earned are dropped and recomputed by `add_bsx_flags`.
+
+One consequence of attaching late: when `_wrap_root_transform` HAS baked a
+rotation (84 of 5,798 Morrowind meshes), the source root's children -- the
+RootCollisionNode among them -- now sit under one inner NiNode carrying the
+root's name, and the engine's direct-child search run on the BSFadeNode finds
+nothing. Measured on a 308-mesh sample of the first full build: 4 meshes
+(`in_dwrv_wall00`, `in_r_l_int_lcorner_03`, `in_r_s_int_wall_01`,
+`ex_strongholdruin_wall02`) still rendered their collision node and had no
+collision. `source_children_owner` recognises the wrapper and searches (and
+strips) there instead.
+
+Morrowind ships no Havok data whatsoever. Collision is an ordinary triangle
+mesh parked under a `RootCollisionNode`, which the engine consumes and never
+draws. Left alone that node ships to Skyrim as *visible* geometry and the
+object gets no collision at all -- both halves wrong at once.
+
+### Detection is by BLOCK TYPE, never by name
+
+The 217 collision nodes found in a strided sample of the corpus **all carry an
+empty name string**, so the `_STRIPPED_NODE_PREFIXES` name idiom silently
+matches nothing -- a name-based census returned 0 and looked like proof that
+Morrowind does not use the node at all. pyffi reads it as its own
+`RootCollisionNode` class, exactly as the engine registers it
+(`references/openmw/components/nif/niffile.cpp:68`), so `type(b).__name__` is
+the reliable test.
+
+### What the engine actually does
+
+`references/openmw/components/nifbullet/bulletnifloader.cpp:170-177`:
+
+- a `RootCollisionNode` is found -> its triangles ARE the collision
+- **no** node -> `mGenerateCollision = true`; collision comes from the RENDER
+  mesh
+- an EMPTY node -> camera collision only, generated from render geometry
+
+`findRootCollisionNode` (`node.cpp:209`) searches **direct children only, in
+reverse**; recursion is opt-in through an `RCN` string extra.
+
+### Measured corpus split (strided sample, 484 of 5,798 meshes)
+
+| | count |
+|---|---|
+| has `RootCollisionNode` | 217 (45%) |
+| ...as a direct child of the root | 217 (100%) |
+| ...holding real geometry | 217 (100%) |
+| no node -> engine builds from render mesh | 267 (55%) |
+
+Collision meshes are small: 2 triangles minimum, **48 median**, 2,219 maximum.
+
+With render-mesh generation in place, a 308-mesh stride of the full 5,834-mesh
+output has collision on 291 (94%), every one a `bhkMoppBvTreeShape` + CMS with
+0 bare CMS, 0 leftover `RootCollisionNode`s and 0 specular flags on a
+Morrowind-sourced shader (the 4 that remain are the vanilla book reading rigs
+`book_inam` generates). The 17 without collision are the skinned meshes
+(banners, creature parts) plus the `NC`-flagged ones, exactly the set the
+engine itself does not collide with.
+
+### The scale is `1 / 69.9904`, not `0.1`
+
+`collision.py`'s `_HAVOK_SCALE` (0.1) converts OBLIVION havok units (7 game
+units each) into Skyrim havok units (69.9904 each). Morrowind authors its
+collision mesh in plain render units, so the factor is `1 / GAME_UNITS_PER_HAVOK`
+-- the same `_HAVOK_SCALE / 7.0` that `_visual_tri_soup` applies to Oblivion
+render geometry. The first pass applied 0.1 to render units and every
+collision shape came out **7.0x too large**: `ex_hlaalu_b_12.nif` renders
++/-536 units wide and its CMS spanned +/-53.9 havok units (37,700 game units)
+instead of +/-7.66. Measured after the fix on the same mesh: CMS bounds
+`(-7.70, -4.91, -4.55)..(7.70, 4.91, 7.71)` against render bounds
+`(-539, -344, -318)..(539, 343, 540)` / 69.9904.
+
+The rigid body is the vanilla static block already established by the
+SpeedTree generator -- identity transform, mass 0, layer 1 (`SKYL_STATIC`),
+motion system 5 -- and the triangles go through the real Havok bridge
+(`cms_builder.build_cms_collision`), so the result is a genuine
+`bhkMoppBvTreeShape` + CMS rather than an approximation. Material is
+`SKY_HAV_MAT_STONE`, the same fallback `convert_materials` uses for an unknown
+material: Morrowind records no havok material, so nothing finer is recoverable.
+
+The node is stripped whether or not a shape was built -- it must never render.
+
+### No node: the render mesh IS the collision
+
+`bulletnifloader.cpp:170-230` is followed branch for branch by
+`collision_source`:
+
+| Source | Collision |
+|---|---|
+| root has an `NC`/`NCC` string extra | none (`NCC` is camera-only, which Skyrim lacks) |
+| `RootCollisionNode` with children | its triangles |
+| `RootCollisionNode` with none | none (camera-only) |
+| no node | the RENDER geometry |
+
+Generated collision skips what the engine skips: `AvoidNode` subtrees (AI
+hints), skinned shapes (actors), every child but the first of a
+`NiSwitchNode`/`NiFltAnimationNode`, and shapes named `Tri EditorMarker*` when
+the root carries an `MRK` extra. Triangles are taken in the ROOT frame
+(`get_transform(root)`), not the collision node's, so a transformed node no
+longer offsets the shape. Every mesh goes through the same Havok bridge, so
+the generated case is a real MOPP + CMS too.
+
+
+## Morrowind specular
+<a id="morrowind-specular"></a>
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py::disable_specular`,
+called from `_convert_nif` after the roots are converted.
+
+Converted Morrowind meshes rendered "super shiny". Every one takes the shared
+flat `default_n.dds` (Morrowind ships no normal maps), whose constant 64/255
+specular mask is applied under `_set_material_defaults` (glossiness 80,
+strength 1.0) with `SLSF1_Specular` set -- a coherent hard highlight on every
+flat wall.
+
+The authored indicator is the source engine itself: *"While NetImmerse and
+Gamebryo support specular lighting, Morrowind has its support disabled"*
+(`references/openmw/components/nifosg/nifloader.cpp:2892-2895`, which forces
+the material specular to black regardless of `NiSpecularProperty`). Measured
+on `ex_hlaalu_b_12.nif` / `ex_hlaalu_b_01.nif`: `NiMaterialProperty`
+glossiness 0.0, specular (0,0,0), no `NiSpecularProperty`. So every
+`BSLightingShaderProperty` on a 4.0.0.2 source gets `SLSF1_Specular` cleared;
+glossiness and strength keep the vanilla defaults, exactly as vanilla's own
+non-specular shapes do.
+
+
+## Morrowind triangle flag
+<a id="morrowind-triangle-flag"></a>
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py::raise_triangle_flags`
+
+`Has Triangles` does not exist in NIF 4.0.0.2. Morrowind writes the index array
+unconditionally, so pyffi reads the triangles correctly but leaves
+`has_triangles = False` on every shape. The field DOES exist at the Skyrim version
+we upgrade to, where pyffi writes the array only when the flag is set — so the
+converted mesh kept `Num Triangles` and shipped no indices at all.
+
+Measured on the first build: **294 of 300 output meshes (98%)** had at least one
+shape with `num_triangles > 0` and `len(triangles) == 0`. `base_anim.nif` alone had
+26. The same scanner reported 0 mismatches on vanilla Skyrim meshes and on
+Oblivion-converted meshes, so the reader was never in question.
+
+The engine aborts the process on this. Captured with
+`tools/live/crash_capture.py`: `c0000409` / `FAST_FAIL_INVALID_ARG`, subcode 5, from
+`ucrtbase!invalid_parameter` — an `errno = 0x22` (EINVAL) bounds check in
+`SkyrimSE+0x109a4e`. The caller copies `count * 2` bytes (u16 indices) into a
+buffer sized from the real data, with a sibling `count * 3` stride for triangle
+points: `rbx = 0x30` (48 bytes declared) against `r12 = 0x18` (24 vertices). No
+CrashLogger log is produced, because a fast-fail bypasses the exception filter.
+
+Emptiness is judged on the ARRAY, never on the flag — the same rule
+`tri_reconstruct.py` already states in its docstring. A shape whose array is
+genuinely empty is left to that module to rebuild or drop.
+
+
+## Morrowind skin partitions
+<a id="morrowind-skin-partitions"></a>
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py::build_skin_partitions`
+
+`NiSkinPartition` postdates NIF 4.0.0.2, so no Morrowind mesh has one. Skyrim's
+renderer walks the partition for its bone and vertex mapping and dereferences
+the null when it is absent:
+
+`EXCEPTION_ACCESS_VIOLATION` at `SkyrimSE+0E552FA`, `mov r13, [rax+0x18]` with
+`rax = 0`, on `furn_bannerd_wa_shop_01.nif` (an `NiSkinInstance` over `Bone02` /
+`Bone03`). The call chain is the SAME one the earlier triangle-flag fast-fail
+took — `+0E561B3`, `+0E53D52`, `+0E03602`, `+0206790` — so fixing the indices
+simply moved the failure one step deeper into the same mesh load.
+
+Measured, at the point of the crash:
+
+| corpus | skinned instances | with partition |
+|---|---|---|
+| vanilla Skyrim | 246 | 246 (100%) |
+| Oblivion output (works in game) | 1,630 | 1,630 (100%) |
+| Morrowind output | 325 | **0** |
+
+Oblivion meshes already ship partitions, which is why nothing in
+`asset_convert/` ever built one.
+
+**Two contracts, both measured, both easy to get wrong:**
+
+1. **The partition hangs off the `NiSkinInstance`, not the `NiSkinData`.** In 146
+   vanilla skinned instances it is on the instance and in 0 on the data.
+   pyffi's `update_skin_partition` writes it to the DATA block, so it is moved.
+2. **It must be built AFTER the version upgrade.** `Data.write` rebuilds
+   `self.blocks` from the roots via `_makeBlockList`, following `get_refs()`;
+   at 4.0.0.2 the schema has no `skin_partition` ref on the instance, so a
+   partition built pre-upgrade is unreachable and silently never written.
+   Appending it to `data.blocks` by hand does not help — the writer discards
+   that list. `num_weights_per_vertex = 4` in 300 of 300 vanilla partitions.
+
+## Morrowind quadratic UV keys
+<a id="morrowind-quadratic-uv-keys"></a>
+
+**Code:** `asset_convert/nif/shaders.py::_uv_group_to_float_data`
+
+A `NiUVData` key group copied straight into a `NiFloatData` shipped a block the
+engine could not parse, and the mesh loaded as the missing-model red triangle.
+
+`nif.xml` makes a `Key`'s `Forward`/`Backward` fields conditional on `#ARG#`,
+supplied by `KeyGroup`'s `arg="Interpolation"`. pyffi fixes the element layout
+when `Array.update_size()` allocates and never re-evaluates that arg, so the
+keys stay LINEAR-shaped (8 bytes) whatever `interpolation` is set to, and in
+whatever order. Measured on a freshly built `NiFloatData` with `num_keys = 9`,
+`interpolation = 2`:
+
+| order of assignment | `keys[0].arg` | `get_size` | bytes written |
+|---|---|---|---|
+| interpolation before `update_size` | 1 | 80 | 80 |
+| interpolation after `update_size` | 1 | 80 | 80 |
+| interpolation, then re-`update_size` | 1 | 80 | 80 |
+
+So the block was written 80 bytes with `interp = 2` in its own payload. The
+engine sizes a quadratic float key at 24 bytes and computes `8 + 9*24 = 224`,
+then reads 144 bytes past the block and rejects the file. Confirmed on the
+shipped output: `declared=80 num_keys=9 interp=2 implied=224` in
+`tr_ex_velothi_temple03.nif` and `tr_ex_nec_w_01.nif` (block 21 in both).
+
+The tangents are therefore unrepresentable through this path, and the copy loop
+that tried to carry them was dead — `hasattr(dst, 'forward')` is never true.
+Writing the group as LINEAR makes the declared type match the bytes that are
+actually emitted. The curve keeps every key's time and value; only the
+tangents, which were already being dropped silently, are gone.
+
+## Morrowind legacy node types
+<a id="morrowind-legacy-node-types"></a>
+
+**Code:** `asset_convert/nif/nif_converter_morrowind.py::convert_legacy_nodes`
+
+Three node types reached the output that Skyrim's engine has no RTTI for. A
+block type the engine cannot instantiate rejects the whole file, which is the
+missing-model red triangle. Census over `references/Skyrim Meshes` (17,216
+files) against the Morrowind output tree:
+
+| block type | vanilla Skyrim | Morrowind output | disposition |
+|---|---|---|---|
+| `NiBSAnimationNode` | **0** | 512 | rewrite as `NiNode` |
+| `NiLODNode` | **0** | 499 | collapse to nearest LOD level |
+| `RootCollisionNode` | **0** | 208 | strip (collision already consumed) |
+| `NiSwitchNode` | 88 | 1,413 | **legal — keep** |
+
+`NiSwitchNode` is the control: it is the same family and it survives, so the
+rule is per-type RTTI, not "legacy nodes are bad".
+
+`nif.xml` corroborates each: `NiBSAnimationNode` is `module="BSLegacy"`
+`until="V10_0_1_0"` and inherits `NiNode` adding no fields, so a plain `NiNode`
+is lossless. `RootCollisionNode` is `versions="V4_0_0_2"` — Morrowind only.
+`NiLODNode` inherits `NiSwitchNode` but stores its levels differently per
+version: `LOD Center` plus inline `LOD Levels` `until="10.0.1.0"`, and a
+`NiLODData` ref `since="10.1.0.0"`. Stamping version 20.2.0.7 over the 4.0.0.2
+form leaves that ref unwritten, and there are **0** `NiLODData` blocks in
+vanilla Skyrim, so the ref can never be satisfied. The authored children are
+the LOD levels — `tr_flora_sh_bush_06.nif` carries `blend` over 0–500 and
+`test` over 500–∞ — so keeping child 0 keeps the level that renders nearest.
+
+### The `RootCollisionNode` strip missed nested nodes
+
+`attach_morrowind_collision` already stripped a `RootCollisionNode`, but only
+via `find_collision_node`, which searches DIRECT children of
+`source_children_owner(root)`. 208 output files kept one because it sits
+deeper. Measured on the source meshes:
+
+| mesh | `RootCollisionNode` depth | found by the direct-child search |
+|---|---|---|
+| `tr_ex_velothi_temple03.nif` | 1 | yes |
+| `tr_ex_nec_w_01.nif` | 1 | yes |
+| `tr_ex_HM_blc_rail_02.nif` | 2 | **no** |
+| `tr_flora_drumpear_02.nif` | 3 | **no** |
+
+A nested one loses collision as well as shipping the illegal block, since
+`collision_source` reports "no collision node" and falls back to colliding with
+the render mesh. The strip is therefore by block type over the whole tree,
+matching how the node is detected everywhere else in this file, while the
+engine-faithful direct-child search still decides what collision is BUILT.
+
+### 🛑 `data.blocks` is DERIVED — never sweep a tree edit over it
+
+A first pass over `data.blocks` cleared most of the corpus but left a
+measured residue: 54 `NiBSAnimationNode`, 98 `NiLODNode`, 27
+`RootCollisionNode` and 1 `NiBSParticleNode` files still shipped one after a
+full `--meshes-only` rebuild. `data.blocks` is recomputed from the root graph,
+so it is a SNAPSHOT, and it breaks a sweep in two distinct ways:
+
+1. **A replacement is not in it.** `convert_legacy_nodes` rewrites a node by
+   building a new `NiNode` and repointing every link with pyffi's own
+   `replace_global_node`. When a legacy node's PARENT is itself replaced, the
+   parent's new copy holds the old child, and it is not in the stale list — so
+   the child's own swap never reaches it. `tr_f_js_ventshroom_01.nif` is the
+   case: its ROOT is a `NiBSAnimationNode` and its `NiLODNode` survived.
+   Fix: apply the swaps over `data.blocks` PLUS the new nodes.
+2. **A detached node's sibling is skipped.** `tr_ex_ind_build01.nif` and
+   `tr_ex_mh_building06.nif` carry TWO `RootCollisionNode` siblings under one
+   root. `attach_morrowind_collision` detaches one; the recomputed
+   `data.blocks` then omits it, and the parent is never revisited for the
+   second. Fix: `strip_collision_nodes` walks the live root graph.
+
+The general rule: a pass that MUTATES the graph must walk the graph it is
+mutating, not a list derived from it. Verified by converting each named mesh
+and asserting zero illegal block types, and by
+`TestMorrowindLegacyNodes::test_no_dangling_reference_to_the_rewritten_node`,
+which fails on the exact residue.
+
+### Source census (`export/Tamriel Data (HD)/meshes`, 30,309 files)
+
+`nif_block_scan.py` only parses the Skyrim header — it reports 30,309
+header-parse failures on a 4.0.0.2 tree, so its zero counts there are
+meaningless. Counted by raw block-type-table scan instead:
+
+| block type | blocks | files |
+|---|---|---|
+| `RootCollisionNode` | 14,096 | 14,089 |
+| `NiSwitchNode` | 1,361 | 1,361 |
+| `NiBSAnimationNode` | 796 | 492 |
+| `NiBSParticleNode` | 623 | 427 |
+| `NiLODNode` | 489 | 381 |
+| `NiFltAnimationNode` | 0 | 0 |
+
+`NiBSParticleNode` is why the rewrite list is not just the three types the
+reported meshes happened to carry.
+
+### Collapsing `NiLODNode` is lossless at the near level
+
+Over the 120 source files sampled, every one of the 154 LOD nodes has
+`lod_levels[0].near_extent == 0.0`, so child 0 is always the level that renders
+at the camera. Child-count histogram: 77 nodes have 1 child (nothing to drop),
+76 have 2, 1 has 3.

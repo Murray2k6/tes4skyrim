@@ -70,6 +70,9 @@ _LOD_TIER_SUFFIXES = ('_far', '_far8', '_far16')
 #: NiUVData.uv_groups: the same curves a NiTextureTransformController carries.
 _UV_GROUP_OPS = (TT_TRANSLATE_U, TT_TRANSLATE_V, TT_SCALE_U, TT_SCALE_V)
 
+#: KeyType LINEAR_KEY. See: docs/commentary/asset_convert_nif.md#morrowind-quadratic-uv-keys
+_LINEAR_KEY = 1
+
 #: The vanilla "read the curve, not the constant" NiFloatInterpolator sentinel.
 _USE_DATA_SENTINEL = -3.4028234663852886e+38
 
@@ -200,17 +203,21 @@ class _SyntheticTexTransform:
 
 
 def _uv_group_to_float_data(group):
-    """One NiUVData key group copied into a standalone NiFloatData."""
+    """One NiUVData key group copied into a standalone LINEAR NiFloatData.
+
+    pyffi fixes a KeyGroup's element layout when `update_size` allocates and
+    never re-reads `interpolation`, so a QUADRATIC group is declared 24 bytes
+    per key and always written as 8; the engine then reads past the block and
+    rejects the file.
+    See: docs/commentary/asset_convert_nif.md#morrowind-quadratic-uv-keys
+    """
     fdata = NifFormat.NiFloatData()
     fdata.data.num_keys = group.num_keys
-    fdata.data.interpolation = group.interpolation
+    fdata.data.interpolation = _LINEAR_KEY
     fdata.data.keys.update_size()
     for dst, src_key in zip(fdata.data.keys, group.keys):
         dst.time = src_key.time
         dst.value = src_key.value
-        for extra in ('forward', 'backward'):
-            if hasattr(dst, extra) and hasattr(src_key, extra):
-                setattr(dst, extra, getattr(src_key, extra))
     return fdata
 
 

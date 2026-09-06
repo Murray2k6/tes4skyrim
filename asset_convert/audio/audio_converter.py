@@ -485,7 +485,7 @@ def convert_sounds(
             r = subprocess.run(
                 [ffmpeg, '-y', '-loglevel', 'error', '-i', str(src),
                  '-acodec', 'pcm_s16le', str(dst)],
-                capture_output=True, timeout=120)
+                capture_output=True, timeout=120, **POPEN_FLAGS)
             return r.returncode == 0 and dst.is_file() and dst.stat().st_size > 0
 
         # I/O- and subprocess-bound: threads are the right pool here.

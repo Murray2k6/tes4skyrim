@@ -26,11 +26,15 @@ def bs_pp_texture_slots(prop):
     return slot(0), slot(1), slot(2)
 
 
+#: Source extensions that always ship as DDS, whatever the mesh calls them.
+_IMAGE_EXTS = ('tga', 'bmp')
+
+
 def rewrite_tex_path(raw_bytes):
     """Prepend tes4\\ to a texture path that doesn't already have it.
 
     Separators are normalised FIRST; a leading 'data\\' and a 'lowres\\'
-    segment are dropped.
+    segment are dropped, and a .tga/.bmp name becomes .dds.
     See: docs/commentary/asset_convert_shader.md#rewrite-tex-path
     """
     path = raw_bytes.decode('utf-8', errors='replace').replace('/', '\\')
@@ -44,7 +48,20 @@ def rewrite_tex_path(raw_bytes):
         rest = path
     if rest.lower().startswith('lowres\\'):
         rest = rest[len('lowres\\'):]
+    rest = as_dds(rest)
 
     if rest.lower().startswith('tes4\\'):
         return 'Textures\\' + rest
     return 'Textures\\tes4\\' + rest
+
+
+def as_dds(path: str) -> str:
+    """A texture path with a .tga or .bmp extension changed to .dds.
+
+    Morrowind names textures .tga but its archives ship .dds, substituting at
+    load; without this every converted path names a file that does not exist.
+    """
+    stem, dot, ext = path.rpartition('.')
+    if dot and ext.lower() in _IMAGE_EXTS:
+        return stem + '.dds'
+    return path

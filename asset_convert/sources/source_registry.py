@@ -48,7 +48,7 @@ import os
 from pathlib import Path
 
 REGISTRY_NAME = 'sources.json'
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2
 
 # Subfolder of export/<plugin>/ holding the plugin binary and the retained
 # archive. Deliberately not the export root: `_source` can never collide with
@@ -56,6 +56,10 @@ REGISTRY_VERSION = 1
 # parse_export_directory from ever seeing a stray .esp.
 SOURCE_SUBDIR = '_source'
 
+
+# ---------------------------------------------------------------------------
+#  Reading, upgrading and writing the registry file
+# ---------------------------------------------------------------------------
 
 def registry_path(export_dir) -> Path:
     return Path(export_dir) / REGISTRY_NAME
@@ -104,12 +108,38 @@ def _load_raw(export_dir) -> dict:
         sources = data.get('sources')
         if not isinstance(sources, dict):
             data['sources'] = {}
+        _upgrade(data)
         # One entry is enough: every call in a run uses the same export dir,
         # and a stale key can never be read (the stat is part of the key).
         _CACHE.clear()
         _CACHE[key] = data
         hit = data
     return hit
+
+
+def _upgrade(data: dict) -> None:
+    """Bring an older registry's entries up to `REGISTRY_VERSION`, in memory.
+
+    Read-time only: the file is rewritten when something next calls `save`, so
+    a version bump costs nothing until the registry is edited anyway.
+
+    v1 -> v2: `payload_root` became a LIST of BAIN sub-package prefixes, and
+    the sub-package selection joined it. An entry written at v1 records the
+    old string and no selection, so a re-import of a complex archive offered
+    no options at all.
+    See: docs/commentary/asset_convert_mod_ingest.md#payload-roots
+    """
+    if data.get('version', 1) >= REGISTRY_VERSION:
+        return
+    for entry in data.get('sources', {}).values():
+        if not isinstance(entry, dict):
+            continue
+        root = entry.get('payload_root')
+        if isinstance(root, str):
+            entry['payload_root'] = [root] if root else []
+        entry.setdefault('subpackages', None)
+        entry.setdefault('subpackages_all', None)
+    data['version'] = REGISTRY_VERSION
 
 
 def _sources(export_dir) -> dict:

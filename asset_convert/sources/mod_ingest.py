@@ -21,7 +21,10 @@ difference.
 Layout rule (the one thing mods disagree about):
 
     If a `Data` folder exists anywhere in the archive, the payload is that
-    folder's contents, however deeply nested. Otherwise the payload is the
+    folder's contents, however deeply nested. A BAIN/installer archive names
+    those folders `00 Data Files`, `01 Data Files - Normal Maps` and so on;
+    every such folder at the shallowest depth is a payload root, and they
+    merge into one tree in numbered order. Otherwise the payload is the
     archive root.
 
 Verified against three real Oblivion mods, which use three different layouts:
@@ -79,7 +82,7 @@ class ArchiveManifest:
     def __init__(self, path, is_folder=False):
         self.path = Path(path)
         self.is_folder = is_folder
-        self.payload_root = ''      # '' = archive root, else 'X/Data'
+        self.payload_root = []
         self.data_folder = None     # the Data dir found, for display
         self.plugins = []           # member paths, payload-relative
         self.bsas = []              # member paths, payload-relative
@@ -88,6 +91,9 @@ class ArchiveManifest:
         self.total_bytes = 0
         self.fomod = None           # payload-relative ModuleConfig.xml, or None
         self.ambiguous_data = []    # >1 equally shallow Data dirs
+        self.all_subpackages = []
+        self.raw_members = []
+        self.max_depth = 0
         self.members = []           # all Member objects (payload-relative)
 
     @property
@@ -142,8 +148,8 @@ class ArchiveManifest:
 
     def _wrapper_folder(self):
         """The single top-level folder the payload lives under, if any."""
-        if self.payload_root:
-            head = self.payload_root.split('/')[0]
+        if len(self.payload_root) == 1:
+            head = self.payload_root[0].split('/')[0]
             if head.lower() != 'data':
                 return head
         return None
@@ -156,39 +162,159 @@ class ArchiveManifest:
         return ', '.join(bits)
 
 
-def _find_payload_root(member_paths):
-    """Apply the layout rule. Returns (payload_root, ambiguous_list).
+#: Data subdirectories BAIN recognises, from Wrye Bash `GameInfo.Bain.data_dirs`.
+DATA_DIRS = frozenset({
+    'ini', 'meshes', 'music', 'sound', 'textures', 'video',
+    'distantlod', 'facegen', 'fonts', 'menus', 'obse', 'pluggy', 'scripts',
+    'shaders', 'trees', 'config', 'mapmarkers', 'lsdata',
+    'animation', 'bookart', 'distantland', 'icons', 'mwse', 'splash',
+    'docs', 'screenshots', 'screens', 'ss',
+})
 
-    payload_root is '' for "archive root", else a forward-slash prefix.
+#: Loose top-level extensions that make an archive a simple (type 1) package.
+TOP_FILE_EXTS = frozenset({'.bsl', '.ckm', '.csv', '.ini', '.modgroups',
+                           '.bsa', *PLUGIN_EXTS})
+
+#: Documentation extensions, allowed at a sub-package's top without demoting it.
+DOC_EXTS = frozenset({'.txt', '.rtf', '.htm', '.html', '.doc', '.docx',
+                      '.odt', '.mht', '.pdf', '.css', '.md', '.rst', '.url'})
+
+
+def _is_payload_dir(name: str) -> bool:
+    """Whether one path segment names a plain `Data` folder."""
+    return name.strip().lower() == 'data'
+
+
+def _is_simple_package(frags: list) -> bool:
+    """Whether one member proves the archive installs straight into Data.
+
+    A loose file of an installable type at the root, or a top-level folder
+    that is itself a data dir: either makes the package SIMPLE (type 1).
     """
-    # Every directory named "Data", by depth. A path contributes its Data dir
-    # whether or not the archive carries explicit directory entries -- some
-    # archives (and every folder walk) only list files.
+    first = frags[0].lower()
+    if len(frags) == 1:
+        return os.path.splitext(first)[1] in TOP_FILE_EXTS
+    return first in DATA_DIRS
+
+
+def _is_subpackage(frags: list) -> bool:
+    """Whether one member puts its top-level folder inside a sub-package.
+
+    Docs alone do not qualify. Wrye Bash accepts them because it skips them
+    afterwards; we drop docs outright, so a readme folder that qualified here
+    would install as an empty sub-package.
+    """
+    if len(frags) < 2:
+        return False
+    second = frags[1].lower()
+    if len(frags) > 2:
+        return second in DATA_DIRS
+    return os.path.splitext(second)[1] in TOP_FILE_EXTS
+
+
+def _bain_subpackages(member_paths) -> list:
+    """The BAIN sub-packages of a complex (type 2) archive, else [].
+
+    Wrye Bash's own rule, from `Installer._reset_cache` in
+    `Mopy/bash/bosh/bain.py`. Numeric prefixes are cosmetic: BAIN never parses
+    them, it only sorts sub-packages by name.
+    See: docs/commentary/asset_convert_mod_ingest.md#payload-roots
+    """
+    subs = {}
+    for path in member_paths:
+        frags = path.split('/')
+        if _is_simple_package(frags):
+            return []
+        if frags[0] not in subs and _is_subpackage(frags):
+            subs[frags[0]] = True
+    return sorted(subs)
+
+
+def _find_payload_root(member_paths):
+    """Apply the layout rule. Returns (payload_roots, ambiguous_list).
+
+    payload_roots is [] for "archive root", else the forward-slash prefixes
+    whose contents make up the payload: one `Data` folder, or every
+    sub-package of a complex BAIN archive.
+    """
     candidates = {}
-    for p in member_paths:
-        parts = p.split('/')
+    for path in member_paths:
+        parts = path.split('/')
         for i, part in enumerate(parts[:-1]):      # never the filename itself
-            if part.lower() == 'data':
-                prefix = '/'.join(parts[:i + 1])
-                candidates.setdefault(prefix, i)   # i = depth (0 = top level)
+            if _is_payload_dir(part):
+                candidates.setdefault('/'.join(parts[:i + 1]), i)
 
-    if not candidates:
-        return '', []
+    if candidates:
+        shallowest = min(candidates.values())
+        tied = sorted(p for p, d in candidates.items() if d == shallowest)
+        return tied[:1], (tied if len(tied) > 1 else [])
 
-    shallowest = min(candidates.values())
-    tied = sorted(p for p, d in candidates.items() if d == shallowest)
-    # A single shallowest Data dir wins. Several at the same depth is genuinely
-    # ambiguous -- report it rather than silently picking one.
-    return tied[0], (tied if len(tied) > 1 else [])
+    return _bain_subpackages(member_paths), []
 
 
-def _payload_relative(member_path, payload_root):
-    """Strip payload_root from a member path, or None if outside it."""
-    if not payload_root:
+def _recount_members(man) -> None:
+    """Rebuild the payload-relative member list, counts and totals.
+
+    Everything outside the active payload roots is dropped, so re-running this
+    after a sub-package choice describes exactly what will be installed.
+    """
+    man.members, man.plugins, man.bsas, man.nested = [], [], [], []
+    man.counts, man.total_bytes, man.fomod = {}, 0, None
+    for m in man.raw_members:
+        rel = _payload_relative(m.path, man.payload_root)
+        if rel is None:
+            continue
+        man.members.append(archive.Member(rel, m.size, False))
+        man.total_bytes += m.size
+        ext = os.path.splitext(rel)[1].lower()
+        if ext in PLUGIN_EXTS:
+            man.plugins.append(rel)
+        elif ext == '.bsa':
+            man.bsas.append(rel)
+        elif ext in archive.ARCHIVE_EXTS and man.max_depth > 0:
+            man.nested.append(rel)
+        if rel.lower().endswith('fomod/moduleconfig.xml'):
+            man.fomod = rel
+        cat, _ = bsa_extract.split_category(rel)
+        man.counts[cat] = man.counts.get(cat, 0) + 1
+    man.plugins.sort(key=str.lower)
+    man.bsas.sort(key=str.lower)
+    man.nested.sort(key=str.lower)
+
+
+def select_subpackages(man, chosen):
+    """`man` re-scanned with only `chosen` BAIN sub-packages active.
+
+    Re-runs the member walk rather than filtering in place, so the counts,
+    plugin list and byte total describe exactly what will be installed.
+    See: docs/commentary/asset_convert_mod_ingest.md#payload-roots
+    """
+    keep = [r for r in man.all_subpackages if r in set(chosen)]
+    if not man.all_subpackages or keep == man.payload_root:
+        return man
+    man.payload_root = keep
+    _recount_members(man)
+    return man
+
+
+def layout_description(payload_roots) -> str:
+    """How the layout reads in an import log or dialog."""
+    if not payload_roots:
+        return 'archive root'
+    if len(payload_roots) == 1:
+        return f'Data folder {payload_roots[0]}'
+    return (f'{len(payload_roots)} BAIN sub-packages: '
+            + ', '.join(payload_roots))
+
+
+def _payload_relative(member_path, payload_roots):
+    """Strip whichever payload root contains `member_path`, else None."""
+    if not payload_roots:
         return member_path
-    prefix = payload_root + '/'
-    if member_path.lower().startswith(prefix.lower()):
-        return member_path[len(prefix):]
+    for root in payload_roots:
+        prefix = root + '/'
+        if member_path.lower().startswith(prefix.lower()):
+            return member_path[len(prefix):]
     return None
 
 
@@ -233,30 +359,13 @@ def inspect(path, max_depth=MAX_NEST_DEPTH) -> ArchiveManifest:
 
     root, ambiguous = _find_payload_root([m.path for m in files])
     man.payload_root = root
-    man.data_folder = root or None
+    man.data_folder = ', '.join(root) or None
     man.ambiguous_data = ambiguous
+    man.all_subpackages = list(root) if len(root) > 1 else []
 
-    for m in files:
-        rel = _payload_relative(m.path, root)
-        if rel is None:
-            continue                       # outside the payload: readmes etc.
-        man.members.append(archive.Member(rel, m.size, False))
-        man.total_bytes += m.size
-        ext = os.path.splitext(rel)[1].lower()
-        if ext in PLUGIN_EXTS:
-            man.plugins.append(rel)
-        elif ext == '.bsa':
-            man.bsas.append(rel)
-        elif ext in archive.ARCHIVE_EXTS and max_depth > 0:
-            man.nested.append(rel)
-        if rel.lower().endswith('fomod/moduleconfig.xml'):
-            man.fomod = rel
-        cat, _ = bsa_extract.split_category(rel)
-        man.counts[cat] = man.counts.get(cat, 0) + 1
-
-    man.plugins.sort(key=str.lower)
-    man.bsas.sort(key=str.lower)
-    man.nested.sort(key=str.lower)
+    man.raw_members = files
+    man.max_depth = max_depth
+    _recount_members(man)
 
     # A mod with NO plugin is still a mod: texture/mesh replacers and resource
     # packs ship assets only (e.g. "Tamriel Landscape Pack" = one BSA of 2,018
@@ -424,6 +533,59 @@ def _place_payload(staged_root, plugin_dir, counts, log, index=None,
     return placed
 
 
+def _copy_folder_payload(src, staged, manifest) -> None:
+    """Copy a folder import's payload subtree into the staging tree.
+
+    The LAST sub-package holding a path wins, matching `_extract_payload` and
+    the installer; taking the first meant a later sub-package could never
+    override an earlier one.
+    """
+    root = Path(src)
+    bases = [root / r for r in manifest.payload_root] or [root]
+    for m in manifest.members:
+        hits = [b / m.path for b in bases if (b / m.path).is_file()]
+        if not hits:
+            continue
+        dstf = archive.safe_join(staged, m.path)
+        dstf.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(hits[-1], dstf)
+
+
+def _extract_payload(src, staged, manifest) -> None:
+    """Extract the archive, lifting each payload root into the staging tree.
+
+    Roots are applied in order, so a later BAIN sub-package overlays an
+    earlier one exactly as the installer would -- FILE by file. Replacing
+    whole top-level directories instead loses everything the earlier package
+    put in a category the later one also uses, and sub-packages almost always
+    share `meshes/` and `textures/`.
+    """
+    if not manifest.payload_root:
+        archive.extract_all(src, staged)
+        return
+    with tempfile.TemporaryDirectory(prefix='tesconv_arc_') as tmp:
+        archive.extract_all(src, tmp)
+        bases = [Path(tmp) / r for r in manifest.payload_root]
+        if not any(b.is_dir() for b in bases):
+            raise IngestError(
+                f'expected {manifest.payload_root!r} inside '
+                f'{Path(src).name}, but it was not extracted')
+        for base in (b for b in bases if b.is_dir()):
+            _overlay(base, Path(staged))
+
+
+def _overlay(base, staged) -> None:
+    """Move every file under `base` into `staged`, merging directories."""
+    for src_file in base.rglob('*'):
+        if src_file.is_dir():
+            continue
+        dest = staged / src_file.relative_to(base)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+        shutil.move(str(src_file), str(dest))
+
+
 def _stage(src, staged, manifest, log, depth=0, budget=None):
     """Unpack `src`'s payload into `staged/`, recursing into nested archives.
 
@@ -434,16 +596,7 @@ def _stage(src, staged, manifest, log, depth=0, budget=None):
         budget = [MAX_TOTAL_BYTES]
 
     if manifest.is_folder:
-        # Copy the payload subtree out of the folder.
-        root = Path(src)
-        base = root / manifest.payload_root if manifest.payload_root else root
-        for m in manifest.members:
-            srcf = base / m.path
-            if not srcf.is_file():
-                continue
-            dstf = archive.safe_join(staged, m.path)
-            dstf.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(srcf, dstf)
+        _copy_folder_payload(src, staged, manifest)
         return
 
     if manifest.total_bytes > budget[0]:
@@ -452,26 +605,7 @@ def _stage(src, staged, manifest, log, depth=0, budget=None):
             f'{manifest.total_bytes / 1024**3:.1f} GB, over the '
             f'{MAX_TOTAL_BYTES / 1024**3:.0f} GB import limit.')
     budget[0] -= manifest.total_bytes
-
-    if manifest.payload_root:
-        # Extract only the payload subtree, then lift it to the staging root.
-        with tempfile.TemporaryDirectory(prefix='tesconv_arc_') as tmp:
-            archive.extract_all(src, tmp)
-            base = Path(tmp) / manifest.payload_root
-            if not base.is_dir():
-                raise IngestError(
-                    f'expected {manifest.payload_root!r} inside '
-                    f'{Path(src).name}, but it was not extracted')
-            for item in base.iterdir():
-                dest = Path(staged) / item.name
-                if dest.exists():
-                    if dest.is_dir():
-                        shutil.rmtree(dest)
-                    else:
-                        dest.unlink()
-                shutil.move(str(item), str(dest))
-    else:
-        archive.extract_all(src, staged)
+    _extract_payload(src, staged, manifest)
 
     # Nested archives: unpack each into the SAME staging tree. The outer
     # archive's files were written first, so `_place_payload` moving files out
@@ -533,7 +667,7 @@ def _resolve_members(requested, man):
 
     by_full, by_name = {}, {}
     for rel in man.plugins:
-        full = f'{man.payload_root}/{rel}' if man.payload_root else rel
+        full = f'{man.payload_root[0]}/{rel}' if man.payload_root else rel
         by_full[full.lower()] = rel
         by_name.setdefault(os.path.basename(rel).lower(), rel)
 
@@ -565,27 +699,57 @@ def new_index():
     return {'files': {}, 'overwrites': [], 'per_source': {}}
 
 
+def _registry_entry(man, path, name, key, group_id, group_name, rel,
+                    chosen, retained, counts, caps, primary_dir, export_dir):
+    """One plugin's `sources.json` entry.
+
+    `counts` and `capabilities` describe the SHARED asset tree, so every member
+    of a group carries them; keying them on the primary left a
+    --plugin-member import's siblings reading zero. `group_plugins` likewise
+    lists EVERY plugin the archive holds, not just this run's selection.
+    """
+    return {
+        'kind': 'folder' if man.is_folder else 'archive',
+        'archive_original': str(path),
+        'archive_retained': retained,
+        'archive_size': key.get('size', 0),
+        'archive_sha1': key.get('sha1', ''),
+        'plugin': name if chosen else '',
+        'plugin_member': rel,
+        'payload_root': man.payload_root,
+        'subpackages': man.payload_root,
+        'subpackages_all': man.all_subpackages,
+        'plugin_path': (os.path.relpath(
+            primary_dir / source_registry.SOURCE_SUBDIR / name,
+            export_dir.parent).replace(chr(92), '/') if chosen else ''),
+        'group_id': group_id,
+        'group_label': man.label,
+        'group_plugins': ([Path(q).name for q in man.plugins]
+                          if chosen else []),
+        'group_dir': group_name,
+        'counts': counts,
+        'capabilities': caps,
+        'ingested_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    }
+
+
 def ingest(path, export_dir, plugin_members=None, keep_archive=True,
            force=False, log=print, manifest=None, asset_target=None,
-           index=None):
+           index=None, subpackages=None):
     """Import `path` (archive or folder) into `export_dir`.
 
-    `plugin_members`: which plugins to register (default: all found).
-    `keep_archive`:   retain a copy of the archive under `_source/` so the
-                      import can be re-run after the download is deleted.
-    `asset_target`:   name of the export tree the ASSETS go to, overriding
-                      the per-plugin default.  This is what lets several
-                      sources be imported IN ORDER into one tree, later
-                      ones overwriting earlier -- the same precedence a
-                      mod manager applies, resolved once at import time so
-                      the converter sees a single coherent stack.  Plugins
-                      are unaffected and still register individually.
-    `index`:          a `new_index()` dict to record provenance into.
+    `plugin_members` selects plugins (default: all), `subpackages` selects
+    BAIN options (default: all), `keep_archive` retains the archive under
+    `_source/`, `asset_target` overrides the export tree the ASSETS go to so
+    several sources stack in order, and `index` records provenance.
     Returns a dict of per-plugin results.
+    See: docs/commentary/asset_convert_mod_ingest.md#payload-roots
     """
     path = Path(path)
     export_dir = Path(export_dir)
     man = manifest or inspect(path)
+    if subpackages is not None:
+        man = select_subpackages(man, subpackages)
 
     chosen = _resolve_members(plugin_members, man)
 
@@ -619,7 +783,7 @@ def ingest(path, export_dir, plugin_members=None, keep_archive=True,
             return {n: {'cached': True} for n in names}
 
     log(f"Importing {path.name}")
-    log(f"  Layout: {'Data folder ' + man.payload_root if man.payload_root else 'archive root'}")
+    log(f"  Layout: {layout_description(man.payload_root)}")
     if chosen:
         log(f"  Plugins: {', '.join(names)}")
     else:
@@ -690,42 +854,13 @@ def ingest(path, export_dir, plugin_members=None, keep_archive=True,
             shutil.copy2(path, dest)
         retained = os.path.relpath(dest, export_dir.parent).replace('\\', '/')
 
-    stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    caps = capabilities_for(primary_dir, has_plugin=bool(chosen))
-    # `counts` above tallies only the LOOSE files this pass placed; anything
-    # that came out of a contained BSA was written by extract_bsa. Recount the
-    # finished tree so the reported total is what actually landed.
     counts = _count_tree(primary_dir)
+    caps = capabilities_for(primary_dir, has_plugin=bool(chosen))
     for i, name in enumerate(names):
-        rel = chosen[i] if chosen else ''
-        entry = {
-            'kind': 'folder' if man.is_folder else 'archive',
-            'archive_original': str(path),
-            'archive_retained': retained,
-            'archive_size': key.get('size', 0),
-            'archive_sha1': key.get('sha1', ''),
-            'plugin': name if chosen else '',
-            'plugin_member': rel,
-            'payload_root': man.payload_root,
-            'plugin_path': (os.path.relpath(
-                primary_dir / source_registry.SOURCE_SUBDIR / name,
-                export_dir.parent).replace('\\', '/') if chosen else ''),
-            'group_id': group_id,
-            'group_label': man.label,
-            # EVERY plugin the archive holds -- not just the ones this run
-            # imported. Recording the narrowed selection made a --plugin-member
-            # import disagree with the entries a full import had written.
-            'group_plugins': ([Path(q).name for q in man.plugins]
-                              if chosen else []),
-            'group_dir': group_name,
-            # The counts describe the SHARED asset tree, so every member
-            # carries them. Keying on `name == primary` meant a
-            # --plugin-member import stamped them on whichever single plugin
-            # it happened to import and left the siblings reading zero.
-            'counts': counts,
-            'capabilities': caps,
-            'ingested_utc': stamp,
-        }
+        entry = _registry_entry(man, path, name, key, group_id, group_name,
+                                chosen[i] if chosen else '', bool(chosen),
+                                retained, counts, caps, primary_dir,
+                                export_dir)
         source_registry.put(export_dir, name, entry)
         _write_manifest(primary_dir, {'key': key, 'group_id': group_id})
         results[name] = {'cached': False, 'counts': counts,
@@ -807,26 +942,89 @@ def available_steps(capabilities) -> set:
     return out
 
 
-def reingest(plugin, export_dir, log=print, force=False):
+def known_subpackages(plugin, export_dir) -> list:
+    """Every BAIN sub-package `plugin`'s source offers, backfilling the entry.
+
+    A missing answer is COMPUTED and written back, so a mod imported before
+    sub-packages existed still lists them. Raises `IngestError` when the
+    source is gone, never an empty list.
+    See: docs/commentary/asset_convert_mod_ingest.md#payload-roots
+    """
+    export_dir = Path(export_dir)
+    entry = source_registry.get(export_dir, plugin) or {}
+    if entry.get('subpackages_all') is not None:
+        return entry['subpackages_all']
+    found = inspect(_reimport_source(export_dir, plugin, entry)).all_subpackages
+    entry['subpackages_all'] = found
+    if entry.get('subpackages') is None:
+        entry['subpackages'] = entry.get('payload_root') or found
+    source_registry.put(export_dir, plugin, entry)
+    return found
+
+
+def _reimport_source(export_dir, plugin, entry):
+    """The archive or folder `plugin` was imported from, else `IngestError`.
+
+    A folder-kind mod has no retained archive -- its source IS the directory
+    it came from -- so resolving only the archive reported every such mod as
+    having no sub-packages.
+    """
+    src = source_registry.retained_archive(export_dir, plugin)
+    if src:
+        return src
+    original = entry.get('archive_original')
+    if original and Path(original).is_dir():
+        return Path(original)
+    raise IngestError(
+        f'{plugin} was imported without keeping a copy of its source, and '
+        f'{original or "the original"} is no longer there. Re-import it from '
+        f'the download to choose sub-packages.')
+
+
+def _clear_payload(group_dir, log) -> None:
+    """Delete a mod's installed assets, keeping `_source/`.
+
+    `_source/` holds the very archive being re-imported from, so it is the one
+    thing the wipe must spare.
+    """
+    group_dir = Path(group_dir)
+    if not group_dir.is_dir():
+        return
+    for child in group_dir.iterdir():
+        if child.name == source_registry.SOURCE_SUBDIR:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    log(f"  Cleared previous payload in {group_dir}")
+
+
+def reingest(plugin, export_dir, log=print, force=False,
+             subpackages=None):
     """Re-run the import for an already-registered plugin.
 
-    This is what `--extract-only` calls for an imported mod: it replaces BSA
-    extraction, using the retained archive so it works long after the original
-    download is gone.
+    Uses the retained archive, so it works long after the download is gone.
+    `subpackages` re-picks the BAIN options; omitted, the last selection is
+    kept.
+
+    `force` WIPES the old payload first, rebuilding the tree from the archive
+    alone: placement only overwrites, so otherwise a dropped sub-package's
+    files survive. `--extract-only` passes force=False for the cheap skip.
     """
     export_dir = Path(export_dir)
     entry = source_registry.get(export_dir, plugin)
     if not entry:
         raise IngestError(f'{plugin} is not an imported mod')
 
-    src = source_registry.retained_archive(export_dir, plugin)
-    if src is None:
-        original = entry.get('archive_original') or '(unrecorded)'
-        raise IngestError(
-            f"{plugin} was imported from {original}, but no copy remains. "
-            f"Re-import the mod (Mods > Import Mod Archive...) to restore it.")
-
+    src = _reimport_source(export_dir, plugin, entry)
     man = inspect(src)
+    if subpackages is None:
+        subpackages = entry.get('subpackages')
+    if subpackages is not None:
+        man = select_subpackages(man, subpackages)
+    if force:
+        _clear_payload(source_registry.asset_root(export_dir, plugin), log)
     members = entry.get('group_plugins') or (
         [entry['plugin']] if entry.get('plugin') else [])
 

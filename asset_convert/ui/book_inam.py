@@ -616,11 +616,25 @@ def _find_source_texture(extract_roots, tex_rel):
     rel = tex_rel.lower().replace('/', '\\')
     if not rel.startswith('textures\\'):
         rel = 'textures\\' + rel
-    for root in _as_roots(extract_roots):
-        p = os.path.join(root, *rel.split('\\'))
-        if os.path.isfile(p):
-            return p
+    roots = list(_as_roots(extract_roots))
+    for candidate in _texture_names(rel):
+        for root in roots:
+            p = os.path.join(root, *candidate.split('\\'))
+            if os.path.isfile(p):
+                return p
     return None
+
+
+def _texture_names(rel):
+    """The names a texture may ship under: as written, then as DDS.
+
+    Morrowind meshes name textures .tga while its archives ship .dds, so the
+    authored name alone finds nothing for any Morrowind book.
+    """
+    yield rel
+    stem, dot, ext = rel.rpartition('.')
+    if dot and ext in ('tga', 'bmp'):
+        yield stem + '.dds'
 
 
 def _as_roots(roots):

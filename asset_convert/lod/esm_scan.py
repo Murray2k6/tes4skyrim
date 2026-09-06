@@ -19,9 +19,6 @@ from tes5_import.tes5_reader import masters, walk, zstr
 #: Has Distant LOD -- SSELodGen bakes LOD for this object.
 FLAG_DISTANT_LOD = 0x00008000
 
-#: Show in World Map -- the object appears on the world map.
-FLAG_WORLD_MAP = 0x10000000
-
 #: Placement values beyond this are junk, not geometry.
 _PLACEMENT_LIMIT = 1e9
 

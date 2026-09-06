@@ -29,7 +29,8 @@ from asset_convert.collision.collision_winding import (
 # ---------------------------------------------------------------------------
 
 _HAVOK_SCALE = 0.1
-_GAME_UNITS_PER_HAVOK = 69.9904  # Skyrim: 1 Havok unit = 69.9904 game units
+#: Skyrim: one Havok unit is this many game units.
+GAME_UNITS_PER_HAVOK = 69.9904
 # Oblivion->game unit scale, used to divide authored ragdoll MASS on creature
 # blend bodies.  Must stay equal to hkx_ragdoll._OB_MASS_DIV: skeleton.nif and
 # skeleton.hkx describe the SAME bodies and vanilla ships identical masses in
