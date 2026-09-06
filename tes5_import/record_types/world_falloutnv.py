@@ -6,7 +6,10 @@ JailPants -- so these substitutions must never reach a TES4 plugin. The table
 is selected per source, not merged into TES4_MARKER_FORMID_TO_SKYRIM.
 
 See: docs/commentary/tes4_export_falloutnv.md#marker-base-objects
+See: docs/commentary/tes4_export_falloutnv.md#child-worldspaces
 """
+
+from .common import get_float, get_int
 
 _XMARKER = 0x0000003B
 _XMARKER_HEADING = 0x00000034
@@ -45,3 +48,36 @@ def marker_substitute(name_raw: int):
     if not _IS_FALLOUT_SOURCE:
         return None
     return FALLOUT_MARKER_FORMID_TO_SKYRIM.get(name_raw)
+
+
+#: TES5 PNAM bits: land, LOD, map, water, climate, sky cell (bit 5 is FO3-only).
+TES5_PARENT_USE_MASK = 0x5F
+
+#: What a child worldspace borrows when its source authored no PNAM: the map.
+DEFAULT_PARENT_USE = 0x04
+
+#: DATA bits TES4, FO3/FNV and TES5 all define: Small World, Can't Fast Travel.
+_SHARED_WORLD_FLAGS = 0x03
+
+
+def parent_use_flags(rec: dict) -> int:
+    """PNAM for a child worldspace: the authored FO3/FNV bits, else the map.
+
+    See: docs/commentary/tes4_export_falloutnv.md#child-worldspaces
+    """
+    flags = get_int(rec, 'PNAM.Flags', None)
+    if flags is None:
+        return DEFAULT_PARENT_USE
+    return flags & TES5_PARENT_USE_MASK
+
+
+def world_map_offset(rec: dict) -> tuple:
+    """ONAM (scale, x, y, z): the authored FO3/FNV map offset, else identity."""
+    return (get_float(rec, 'ONAM.Scale', 1.0),
+            get_float(rec, 'ONAM.CellXOffset'),
+            get_float(rec, 'ONAM.CellYOffset'), 0.0)
+
+
+def tes5_world_flags(flags: int) -> int:
+    """WRLD DATA flags rebased onto the TES5 bit layout."""
+    return (flags & _SHARED_WORLD_FLAGS) | (0x08 if flags & 0x10 else 0)

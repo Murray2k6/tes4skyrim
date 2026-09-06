@@ -151,10 +151,11 @@ def detect_terrain_worldspaces(esm_path: Path, include_children: bool = False):
     is 'TES4Tamriel'; Nehrim.esm's is 'NehrimWorldspace', not 'Nehrim'), so the
     WRLD records have to be read.
 
-    Child worldspaces (those with a WNAM 'Parent Worldspace') render using their
-    parent's terrain LOD grid — e.g. AnvilWorld/BravilWorld sit inside the
-    Tamriel LOD — so generating separate LOD for them is wrong and they are
-    excluded by default. Pass include_children=True to list every worldspace.
+    A child worldspace whose PNAM borrows the parent's LOD renders inside the
+    parent's terrain grid, so it is excluded by default; a child that keeps
+    its own LOD (FNV's Freeside, the Strip) is listed like a root. Pass
+    include_children=True to list every worldspace.
+    See: docs/commentary/asset_convert_terrain.md#child-worldspaces-with-their-own-lod
 
     Reads ONLY the top-level WRLD block: the WRLD records themselves and the
     size of each one's child group. It deliberately does NOT walk into cell
@@ -199,6 +200,23 @@ def _top_wrld_group(raw):
     return None
 
 
+#: WRLD PNAM bit: the child renders inside its parent's LOD grid.
+PARENT_USE_LOD_DATA = 0x02
+
+
+def _borrows_parent_lod(rec) -> bool:
+    """True when this child worldspace renders inside its parent's LOD grid.
+
+    A WRLD carrying no PNAM predates the importer emitting one and keeps the
+    old reading.
+    See: docs/commentary/asset_convert_terrain.md#child-worldspaces-with-their-own-lod
+    """
+    pnam = rec.sub(b'PNAM')
+    if not pnam or len(pnam) < 2:
+        return True
+    return bool(struct.unpack_from('<H', pnam)[0] & PARENT_USE_LOD_DATA)
+
+
 def _scan_wrld_block(raw, include_children: bool):
     """The WRLD-block reader behind `detect_terrain_worldspaces`."""
     if len(raw) < 24:
@@ -233,7 +251,7 @@ def _scan_wrld_block(raw, include_children: bool):
             if edid:
                 edid_by_fid[rec.form_id] = edid
             wnam = rec.sub(b'WNAM')
-            if wnam and len(wnam) >= 4:
+            if wnam and len(wnam) >= 4 and _borrows_parent_lod(rec):
                 parent_by_fid[rec.form_id] = struct.unpack_from('<I', wnam)[0]
             cur = rec.form_id
         q = nxt
@@ -242,7 +260,7 @@ def _scan_wrld_block(raw, include_children: bool):
     for fid in edid_by_fid:
         parent = parent_by_fid.get(fid, 0)
         if parent and not include_children:
-            continue   # child worldspace -> uses the parent's LOD grid
+            continue
         ranked.append((size_by_fid.get(fid, 0), fid,
                        edid_by_fid.get(fid, f'{fid:08X}')))
     ranked.sort(key=lambda t: (-t[0], t[2].lower()))

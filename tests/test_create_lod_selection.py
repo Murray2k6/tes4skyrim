@@ -360,3 +360,33 @@ class TestModAddedWorldspacesAreOffered:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '--tb=short'])
+
+
+class TestChildWorldspaceLod:
+    """See docs/commentary/asset_convert_terrain.md#child-worldspaces-with-their-own-lod."""
+
+    class _Rec:
+        """A WRLD record stub exposing only the PNAM subrecord."""
+
+        def __init__(self, pnam):
+            """Hold the raw PNAM bytes, or None for a PNAM-less record."""
+            self._pnam = pnam
+
+        def sub(self, sig):
+            """The subrecord bytes for `sig`; only PNAM is modelled."""
+            return self._pnam if sig == b'PNAM' else None
+
+    def test_map_only_child_keeps_its_own_lod(self):
+        """PNAM 0x04 (map only) means the child renders its own LOD."""
+        from asset_convert.lod.terrain_lod import _borrows_parent_lod
+        assert _borrows_parent_lod(self._Rec(b'\x04\x00')) is False
+
+    def test_use_lod_data_child_borrows(self):
+        """PNAM with Use LOD Data set renders inside the parent's grid."""
+        from asset_convert.lod.terrain_lod import _borrows_parent_lod
+        assert _borrows_parent_lod(self._Rec(b'\x06\x00')) is True
+
+    def test_pnam_less_esm_keeps_the_old_reading(self):
+        """A WRLD written before PNAM was emitted still counts as borrowing."""
+        from asset_convert.lod.terrain_lod import _borrows_parent_lod
+        assert _borrows_parent_lod(self._Rec(None)) is True

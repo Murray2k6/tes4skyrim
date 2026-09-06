@@ -11,7 +11,8 @@ See: docs/commentary/tes4_export_falloutnv.md
 import struct
 
 from ..tes4_reader import Record, get_formid_str, get_string, get_subrecord
-from .common import emit_model, emit_raw_hex, emit_script, emit_string
+from .common import (emit_float, emit_model, emit_raw_hex,
+                     emit_script, emit_string, emit_u16)
 
 #: HEDR.Version reported by FO3/FNV plugins; Oblivion reports 0.8 or 1.0.
 FALLOUT_HEDR_MIN = 1.2
@@ -109,6 +110,24 @@ def _emit_weap_deltas(lines: list, rec: Record):
         lines.append(f"DATA.ClipSize={d[14]}")
 
 
+def _emit_wrld_deltas(lines: list, rec: Record):
+    """WRLD fields TES4 lacks: parent-use flags, map offset, LOD water, defaults.
+
+    See: docs/commentary/tes4_export_falloutnv.md#child-worldspaces
+    """
+    emit_u16(lines, "PNAM.Flags", get_subrecord(rec, "PNAM"))
+    onam = get_subrecord(rec, "ONAM")
+    if onam and len(onam.data) >= 12:
+        emit_float(lines, "ONAM.Scale", onam, 0)
+        emit_float(lines, "ONAM.CellXOffset", onam, 4)
+        emit_float(lines, "ONAM.CellYOffset", onam, 8)
+    emit_float(lines, "NAM4.LODWaterHeight", get_subrecord(rec, "NAM4"))
+    dnam = get_subrecord(rec, "DNAM")
+    if dnam and len(dnam.data) >= 8:
+        emit_float(lines, "DNAM.DefaultLandHeight", dnam, 0)
+        emit_float(lines, "DNAM.DefaultWaterHeight", dnam, 4)
+
+
 def _emit_navm_deltas(lines: list, rec: Record):
     """NAVM's authored geometry: the cell it covers, its vertices and triangles.
 
@@ -157,6 +176,7 @@ _DELTA_DISPATCH = {
     "WEAP": _emit_weap_deltas,
     "NAVM": _emit_navm_deltas,
     "NAVI": _emit_navi_deltas,
+    "WRLD": _emit_wrld_deltas,
 }
 
 #: Types carrying an OBND that TES4 has no field for; Skyrim reads it natively.

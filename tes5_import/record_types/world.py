@@ -11,7 +11,8 @@ from ..constants import (
 )
 from ..locations import WORLD_NAMES
 from ..skyrim_overrides import TES4_MARKER_FORMID_TO_SKYRIM
-from .world_falloutnv import marker_substitute
+from .world_falloutnv import (marker_substitute, parent_use_flags,
+                              tes5_world_flags, world_map_offset)
 from .items import get_base_origin_shift
 from ..text_reader import get_hex_bytes, remap_formid
 from .common import (
@@ -27,6 +28,7 @@ from .common import (
     pack_record,
     pack_string_subrecord,
     pack_subrecord,
+    pack_uint16_subrecord,
     pack_uint8_subrecord,
     music_for_enum,
     region_was_emitted,
@@ -671,6 +673,7 @@ def convert_WRLD(rec: dict) -> bytes:
     wnam = get_formid(rec, 'WNAM.Parent')
     if wnam:
         subs += pack_formid_subrecord('WNAM', wnam)
+        subs += pack_uint16_subrecord('PNAM', parent_use_flags(rec))
 
     subs += pack_formid_subrecord('CNAM', _world_climate(rec))
 
@@ -690,10 +693,10 @@ def convert_WRLD(rec: dict) -> bytes:
     nam2 = get_formid(rec, 'NAM2.Water') or 0x00000018
     subs += pack_formid_subrecord('NAM2', nam2)
     subs += pack_formid_subrecord('NAM3', 0x00000018)
-    subs += pack_float_subrecord('NAM4', 0.0)
-
-    # DNAM — land/water defaults
-    subs += pack_subrecord('DNAM', struct.pack('<ff', -2048.0, 0.0))
+    subs += pack_float_subrecord('NAM4', get_float(rec, 'NAM4.LODWaterHeight'))
+    subs += pack_subrecord('DNAM', struct.pack(
+        '<ff', get_float(rec, 'DNAM.DefaultLandHeight', -2048.0),
+        get_float(rec, 'DNAM.DefaultWaterHeight')))
 
     # MODL — "Cloud Model", the mesh the WORLD MAP drapes over the terrain.
     # xEdit places the Cloud Model struct after the LOD/land data and before the
@@ -715,19 +718,12 @@ def convert_WRLD(rec: dict) -> bytes:
     if mnam is not None:
         subs += pack_subrecord('MNAM', mnam)
 
-    # ONAM — World Map Offset Data (after MNAM per xEdit order)
-    subs += pack_subrecord('ONAM', struct.pack('<ffff', 1.0, 0.0, 0.0, 0.0))
+    subs += pack_subrecord('ONAM', struct.pack('<ffff', *world_map_offset(rec)))
 
     # NAMA — Distant LOD multiplier
     subs += pack_float_subrecord('NAMA', 1.0)
 
-    # DATA — flags (after NAMA per xEdit order)
-    data_flags = get_int(rec, 'DATA.Flags')
-    data_flags &= ~0x04  # Clear Oblivion flag (bit 2)
-    # Move No LOD Water: bit $10 → bit $08
-    if data_flags & 0x10:
-        data_flags = (data_flags & ~0x10) | 0x08
-    subs += pack_uint8_subrecord('DATA', data_flags)
+    subs += pack_uint8_subrecord('DATA', tes5_world_flags(get_int(rec, 'DATA.Flags')))
 
     # NAM0 — World Object Bounds Min (X, Y as raw world-unit floats).
     # NAM9 — World Object Bounds Max. Required by SSELodGen for world map generation.

@@ -6740,3 +6740,50 @@ class TestObjectiveText:
                     if 'pack_string_subrecord' in line or '_encode_string' in line:
                         assert 'short_objective' in line, \
                             f"NNAM written without short_objective: {line.strip()}"
+
+
+class TestWorldspaceParentFlags:
+    """See docs/commentary/tes4_export_falloutnv.md#child-worldspaces."""
+
+    def _rec(self, **over):
+        """A child-worldspace export record with `over` applied."""
+        rec = {'Signature': 'WRLD', 'FormID': '0002C107', 'RecordFlags': '0',
+               'EditorID': 'ICMarketDistrict', 'WNAM.Parent': '0000003C'}
+        rec.update(over)
+        return rec
+
+    def test_tes4_child_borrows_only_the_map(self):
+        """A TES4 child (no authored PNAM) gets Use Map Data alone."""
+        from tes5_import.record_types.world import convert_WRLD
+        pnam = _find_subrecord(convert_WRLD(self._rec()), b'PNAM')
+        assert pnam is not None, 'no PNAM = engine uses EVERYTHING from the parent'
+        assert struct.unpack('<H', pnam)[0] == 0x04
+
+    def test_fnv_pnam_is_authored_without_image_space_bit(self):
+        """FNV bit 5 (Use Image Space) has no TES5 meaning and is masked."""
+        from tes5_import.record_types.world import convert_WRLD
+        out = convert_WRLD(self._rec(**{'PNAM.Flags': '39'}))
+        assert struct.unpack('<H', _find_subrecord(out, b'PNAM'))[0] == 0x07
+
+    def test_root_worldspace_writes_no_pnam(self):
+        """PNAM belongs to the Parent Worldspace struct; roots have none."""
+        from tes5_import.record_types.world import convert_WRLD
+        rec = self._rec()
+        del rec['WNAM.Parent']
+        assert _find_subrecord(convert_WRLD(rec), b'PNAM') is None
+
+    def test_authored_map_offset_and_lod_water_height(self):
+        """FNV's ONAM and NAM4 pass through instead of the TES4 constants."""
+        from tes5_import.record_types.world import convert_WRLD
+        out = convert_WRLD(self._rec(**{
+            'ONAM.Scale': '0.7', 'ONAM.CellXOffset': '-16000.0',
+            'ONAM.CellYOffset': '103000.0', 'NAM4.LODWaterHeight': '-2300.0'}))
+        onam = struct.unpack('<ffff', _find_subrecord(out, b'ONAM'))
+        assert onam == pytest.approx((0.7, -16000.0, 103000.0, 0.0))
+        assert struct.unpack('<f', _find_subrecord(out, b'NAM4'))[0] == -2300.0
+
+    def test_source_only_data_bits_are_dropped(self):
+        """0x93: bits 0/1 kept, bit 4 becomes bit 3, bit 7 (No Grass in TES5) dropped."""
+        from tes5_import.record_types.world import convert_WRLD
+        out = convert_WRLD(self._rec(**{'DATA.Flags': '147'}))
+        assert _find_subrecord(out, b'DATA')[0] == 0x0B

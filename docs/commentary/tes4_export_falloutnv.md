@@ -356,3 +356,43 @@ Several FNV slots collapse onto one Skyrim slot because Skyrim has no
 equivalent: both hands share 33-Hands, and the four head-accessory bits
 distribute across Circlet/Ears/Head by where the item actually sits. Weapon
 (bit 5) is dropped outright — an ARMO occupying it would block the weapon.
+
+## <a id="child-worldspaces"></a>Child worldspaces: the engine defaults PNAM to *everything*
+
+`TESWorldSpace::Load` (SkyrimSE.exe GOG/AE, RVA `0x2c5620`) handles WNAM at
+`+0x2c5c43`: it stores the parent FormID and then writes **0xFFFF** into the
+parent-use flags (`mov word ptr [r15+0xa2], 0xffff` at `+0x2c5c79`). A PNAM
+chunk, which follows WNAM in every authored file, overwrites that field at
+`+0x2c5c86`. `InitializeData` (`+0x2c5120`) zeroes the same field, so 0xFFFF is
+specifically the "has a parent but said nothing" default. Skyrim.esm authors
+PNAM on 34/34 child worldspaces and xEdit marks it `SetRequired`, so nothing
+vanilla ever exercises that default.
+
+`convert_WRLD` wrote WNAM without PNAM, so every converted child worldspace
+borrowed its parent's **land, LOD, map, water, climate and sky cell**. On FNV
+that is the "entering Freeside puts me somewhere else in the Mojave" report:
+FreesideNorthWorld's 108 LAND records were ignored for WastelandNV's terrain
+at Freeside's own coordinates (the gate ref sits at (9450, -7035), wasteland
+grid (2, -2)). Every record involved was correct: the door REFR lands in the
+child's persistent cell with a matching XTEL, and the 172 cells and 2,102
+REFRs all sit under the child's group, which is why record audits found
+nothing.
+
+| Field | FNV authored | TES5 written |
+|---|---|---|
+| PNAM | `0x0004` Use Map Data, on all 10 children | authored `& 0x5F` (FO3 bit 5 *Use Image Space* has no TES5 bit) |
+| PNAM | absent (TES4 has no PNAM) | `0x0004`: the map is what Oblivion's parent link provides; every TES4 child (IC districts, SE worlds) carries its own LAND |
+| ONAM | scale 0.7, offset (-16000, 103000) for the Freeside worlds | authored (scale, x, y, 0); was a constant (1, 0, 0, 0) |
+| NAM4 | -2300 on WastelandNV | authored; TES4 sea level stays 0 |
+| DNAM | authored land/water defaults | authored; TES4 keeps (-2048, 0) |
+| DATA | bit 5 No LOD Noise, bit 6 no NPC fall damage, bit 7 needs water adjustment | bits 0-1 shared, bit 4 to bit 3 (No LOD Water), the rest dropped; bit 7 would have read as TES5 *No Grass* on WastelandNV (`DATA=0x80`) |
+
+ONAM is how FNV places a child on the parent's map: Freeside's gate at
+0.7 x (9450, -7035) + (-16000, 103000) = (-9385, 98075) against the wasteland
+gate's (-9815, 102729). The identity ONAM put the marker at raw child
+coordinates instead.
+
+Oblivion's own children were affected the same way (ICMarketDistrict rendered
+Tamriel's island terrain under its own); they now get `0x0004`, and see
+[asset_convert_terrain.md](asset_convert_terrain.md#child-worldspaces-with-their-own-lod)
+for the LOD consequence.

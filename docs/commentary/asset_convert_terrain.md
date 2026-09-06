@@ -463,6 +463,23 @@ Morrowind-native content ride on the grid its sibling established.
 Membership is read from the CELL dump's `ParentWRLD`, not the converted ESM:
 the scan runs before the bake and for plugins that may not be converted yet,
 and the dump is the same authored data the extent pass measures from.
+## <a id="child-worldspaces-with-their-own-lod"></a>Child worldspaces with their own LOD
+
+`detect_terrain_worldspaces` skipped every WNAM child on the belief that it
+renders inside its parent's LOD grid. That holds only when PNAM sets *Use LOD
+Data* (0x02), and it only looked true because the importer wrote no PNAM at
+all, which the engine takes as "use everything from the parent"
+([tes4_export_falloutnv.md](tes4_export_falloutnv.md#child-worldspaces)).
+
+FNV ships LOD for 9 of its 10 child worldspaces, all authored PNAM `0x0004`
+(map only): FreesideWorld 40 tiles, FreesideNorthWorld 27, FreesideFortWorld
+27, TheStripWorldNew 337, WastelandNVmini 337, Lucky38World 135,
+BoulderCityWorld 17, GamorrahWorld 1. The converted output had terrain LOD for
+WastelandNV alone. The scan now reads PNAM from the converted ESM and skips a
+child only when it borrows LOD, or carries no PNAM (an ESM written before the
+importer emitted one). Oblivion's children stay LOD-less: `shipped_lod_worldspaces`
+is still the authority and Oblivion ships no tiles for them.
+
 
 ## Why the WRLD scan includes masters
 
