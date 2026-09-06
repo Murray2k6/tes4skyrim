@@ -530,6 +530,18 @@ def build_wrld_cloud_modl(rec: dict, edid: str = None):
                                center=center, land_rect=rect, write=False)
 
 
+def build_cell_data(rec: dict) -> bytes:
+    # TES4's Oblivion-interior and editor-only flags do not carry across.
+    return struct.pack('<H', get_int(rec, 'DATA.Flags') & ~0x48 & 0xFFFF)
+
+
+def build_cell_grid(rec: dict):
+    x = get_int(rec, 'XCLC.X', None)
+    if x is None:
+        return None
+    return struct.pack('<iiI', x, get_int(rec, 'XCLC.Y'), get_int(rec, 'XCLC.LandFlags', 0))
+
+
 def convert_CELL(rec: dict) -> bytes:
     """Convert CELL record."""
     subs = b''
@@ -541,17 +553,13 @@ def convert_CELL(rec: dict) -> bytes:
         subs += pack_string_subrecord('FULL', full)
 
     # DATA — TES5 uses uint16 flags (not uint8)
-    flags = get_int(rec, 'DATA.Flags')
-    flags &= ~0x08  # Remove Oblivion interior flag
-    flags &= ~0x40  # Remove Hand Changed flag
-    subs += pack_subrecord('DATA', struct.pack('<H', flags & 0xFFFF))
+    subs += pack_subrecord('DATA', build_cell_data(rec))
 
     # XCLC — grid coordinates (exterior cells)
     x = get_int(rec, 'XCLC.X', None)
     if x is not None:
         y = get_int(rec, 'XCLC.Y')
-        land = get_int(rec, 'XCLC.LandFlags', 0)
-        subs += pack_subrecord('XCLC', struct.pack('<iiI', x, y, land))
+        subs += pack_subrecord('XCLC', build_cell_grid(rec))
 
     # Interior lighting (XCLL) — shared with the override path
     xcll_payload = build_cell_xcll(rec)
@@ -672,6 +680,14 @@ def convert_WRLD(rec: dict) -> bytes:
     wnam = get_formid(rec, 'WNAM.Parent')
     if wnam:
         subs += pack_formid_subrecord('WNAM', wnam)
+        # TES4's parent supplies the landscape, LOD and world map. TES5
+        # requires explicit inheritance bits; WNAM alone does not enable it.
+        parent_flags = 0x07
+        if not get_formid(rec, 'NAM2.Water'):
+            parent_flags |= 0x08
+        if not get_formid(rec, 'CNAM.Climate'):
+            parent_flags |= 0x50  # climate and sky cell
+        subs += pack_subrecord('PNAM', bytes((parent_flags, 0)))
 
     # CNAM — Climate.  57 of 84 TES4 worldspaces author no CNAM at all —
     # including Tamriel itself, every Imperial City district and every walled

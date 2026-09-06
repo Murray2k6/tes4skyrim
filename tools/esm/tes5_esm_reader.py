@@ -110,10 +110,19 @@ def _parse_subrecords(data: bytes) -> list:
     subs = []
     pos = 0
     n = len(data)
+    extended_size = None
     while pos + SUB_HDR <= n:
         tag  = data[pos:pos + 4].decode('ascii', errors='replace')
         size = struct.unpack_from('<H', data, pos + 4)[0]
         pos += SUB_HDR
+        if tag == 'XXXX':
+            if size != 4 or pos + size > n:
+                break
+            extended_size = struct.unpack_from('<I', data, pos)[0]
+            pos += size
+            continue
+        if extended_size is not None:
+            size, extended_size = extended_size, None
         if pos + size > n:
             break
         subs.append(Sub(type=tag, data=data[pos:pos + size]))
@@ -608,19 +617,20 @@ def _dec_spit(data: bytes) -> list:
     spell_type= struct.unpack_from('<I', data,  8)[0]
     charge    = struct.unpack_from('<f', data, 12)[0]
     cast_type = struct.unpack_from('<I', data, 16)[0]
-    effect_sz = struct.unpack_from('<I', data, 20)[0]
-    range_    = struct.unpack_from('<I', data, 24)[0]
-    half_perk = struct.unpack_from('<I', data, 28)[0]
-    menu_disp = struct.unpack_from('<I', data, 32)[0]
+    delivery  = struct.unpack_from('<I', data, 20)[0]
+    duration  = struct.unpack_from('<f', data, 24)[0]
+    range_    = struct.unpack_from('<f', data, 28)[0]
+    half_perk = struct.unpack_from('<I', data, 32)[0]
     cast_names  = {0:'Constant',1:'FireForget',2:'Concentration',3:'Scroll'}
-    stype_names = {0:'Spell',3:'Power',8:'LesserPower'}
+    stype_names = {0:'Spell',1:'Disease',2:'Power',3:'LesserPower',4:'Ability',
+                   5:'Poison',10:'Addiction',11:'Voice'}
     return [
         f'SPIT.BaseCost={cost}', f'SPIT.Flags=0x{flags:08X}',
         f'SPIT.Type={spell_type} ({stype_names.get(spell_type, "?")})',
         f'SPIT.ChargeTime={charge:.4f}',
         f'SPIT.CastType={cast_type} ({cast_names.get(cast_type, "?")})',
-        f'SPIT.EffectType={effect_sz}', f'SPIT.CastRange={range_}',
-        f'SPIT.HalfCostPerk={half_perk:08X}', f'SPIT.MenuDispObject={menu_disp:08X}',
+        f'SPIT.Delivery={delivery}', f'SPIT.CastDuration={duration:.4f}',
+        f'SPIT.Range={range_:.4f}', f'SPIT.HalfCostPerk={half_perk:08X}',
     ]
 
 

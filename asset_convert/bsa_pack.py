@@ -208,7 +208,7 @@ _KNOWN_DIRS: frozenset = frozenset(
     n.lower()
     for spec in _BSA_SPECS
     for n in spec[0]
-) | frozenset(['meshes'])
+) | frozenset(['meshes', 'skse'])
 
 
 def _loader_stem(plugin_stem: str, index: int) -> str:
@@ -412,6 +412,10 @@ def pack_bsas(
     specs.append((['meshes'] + misc_dirs, '', False))
 
     results: dict = {'packed': [], 'skipped': [], 'errors': [], 'loaders': []}
+    from .distribution_pack import asset_files, file_state, record_pack, RECEIPT
+    source_state = file_state(plugin_dir, asset_files(plugin_dir))
+    # A failed/interrupted pack must never leave a valid-looking old receipt.
+    (plugin_dir / RECEIPT).unlink(missing_ok=True)
 
     # The texture keep-set.  Building it needs the export text, so a caller
     # without one (or a build whose mesh pass never ran) packs the full tree
@@ -532,6 +536,8 @@ def pack_bsas(
               f"They must be enabled in the load order (after {source_name}) "
               f"for the overflow BSAs to be mounted.")
 
+    if not results['errors']:
+        record_pack(plugin_dir, source_state, results['packed'])
     return results
 
 

@@ -14,9 +14,8 @@ Oblivion's bound-item family, in two independent ways:
    plus the Mythic Dawn set) is inert under the native path however it is cast.
 
 2. ARCHETYPE 17 ONLY FIRES ON A CAST.  Oblivion also delivers bound gear via
-   Abilities (SPIT.Type 4) and Lesser Powers (Type 3), which Skyrim applies
-   passively and never casts — so even a bound WEAPON dies when delivered that
-   way.  (Vanilla census: archetype 17 appears under Type 0 only.)
+   Abilities (SPIT.Type 4), which Skyrim applies passively. Lesser Powers
+   (Type 3) cast normally and keep the native bound-weapon path.
 
 This script is the archetype-1 (Script) stand-in for both cases.  A bound
 weapon on an ordinary castable spell keeps the engine's own implementation.
@@ -68,6 +67,12 @@ Weapon displacedRight
 Weapon displacedLeft
 
 Event OnEffectStart(Actor akTarget, Actor akCaster)
+  ; OBSE can replace a bound effect's used object before it is applied.
+  ; Cache that selection on this instance so cleanup removes the same item.
+  Form currentItem = TES4Runtime.GetMagicEffectUsedObject(GetBaseObject())
+  If currentItem != None
+    BoundItem = currentItem
+  EndIf
   If akTarget == None || BoundItem == None
     Return
   EndIf

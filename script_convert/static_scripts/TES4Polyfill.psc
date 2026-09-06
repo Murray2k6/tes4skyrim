@@ -221,6 +221,21 @@ Float Function GetAngle(ObjectReference akRef, String axis) Global
   Return 0.0
 EndFunction
 
+Function Rotate(ObjectReference akRef, String axis, Int speed, Float elapsed = -1.0) Global
+  If akRef == None || akRef.GetParentCell() == None
+    Return
+  EndIf
+  If !akRef.Is3DLoaded()
+    Return
+  EndIf
+  If elapsed < 0.0
+    elapsed = TES4Runtime.GetFrameSeconds()
+  EndIf
+  Float angle = GetAngle(akRef, axis) + speed * elapsed
+  angle -= Math.Floor(angle / 360.0) * 360.0
+  SetAngle(akRef, axis, angle)
+EndFunction
+
 Function SetAngle(ObjectReference akRef, String axis, Float afValue) Global
   Float x = akRef.GetAngleX()
   Float y = akRef.GetAngleY()
@@ -475,18 +490,22 @@ EndFunction
 ; Magic / Actor State
 ; ==========================================================================
 
-; TES4 IsSpellTarget: "is this actor currently affected by spell X".  The
-; converter resolves X to the Skyrim MGEF the imported spell actually carries
-; and passes its Skyrim.esm FormID here.
-Bool Function HasMagicEffectByID(Actor akActor, Int aiFormID) Global
-  If akActor == None
+; Read the converted spell's effects, including generated script/aimed variants.
+; A vanilla alias cannot identify the custom effects on a converted spell.
+Bool Function HasSpellEffect(Actor akActor, Form akForm) Global
+  Spell akSpell = akForm as Spell
+  If akActor == None || akSpell == None
     Return False
   EndIf
-  MagicEffect fx = Game.GetFormFromFile(aiFormID, "Skyrim.esm") as MagicEffect
-  If fx == None
-    Return False
-  EndIf
-  Return akActor.HasMagicEffect(fx)
+  Int i = 0
+  While i < akSpell.GetNumEffects()
+    MagicEffect fx = akSpell.GetNthEffectMagicEffect(i)
+    If fx && akActor.HasMagicEffect(fx)
+      Return True
+    EndIf
+    i += 1
+  EndWhile
+  Return False
 EndFunction
 
 ; TES4 GetIsCreature: Skyrim marks people with the ActorTypeNPC keyword
@@ -683,11 +702,33 @@ EndFunction
 ; ==========================================================================
 
 ; OBSE `IsModLoaded "Foo.esp"` asks whether a plugin is in the load order.
-; Vanilla Papyrus has no direct query, but Game.GetFormFromFile returns None
-; for a file that is not loaded, so asking it for the plugin's own header
-; record (0x00000000 in that file's local space) answers the same question.
+; The TES4 header is not a runtime Form. Use SKSE's load-order query.
 Bool Function IsModLoaded(String asPlugin) Global
-  Return Game.GetFormFromFile(0x00000000, asPlugin) != None
+  Return Game.IsPluginInstalled(asPlugin)
+EndFunction
+
+Form Function GetFormFromMod(String asPlugin, String asHexID) Global
+  Int formID = 0
+  Int i = 0
+  If StringUtil.Substring(asHexID, 0, 2) == "0x"
+    i = 2
+  EndIf
+  While i < StringUtil.GetLength(asHexID)
+    String ch = StringUtil.Substring(asHexID, i, 1)
+    Int digit = StringUtil.Find("0123456789abcdef", ch)
+    If digit < 0
+      digit = StringUtil.Find("0123456789ABCDEF", ch)
+    EndIf
+    If digit < 0
+      Return None
+    EndIf
+    formID = Math.LogicalAnd(formID * 16 + digit, 0xFFFFFF)
+    i += 1
+  EndWhile
+  If formID == 0x14 && asPlugin == "Oblivion.esm"
+    Return Game.GetPlayer()
+  EndIf
+  Return Game.GetFormFromFile(formID, asPlugin)
 EndFunction
 
 ; ==========================================================================

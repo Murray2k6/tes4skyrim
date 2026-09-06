@@ -118,7 +118,7 @@ def load_door_model_sounds(meshes_dir, by_type) -> int:
     has only the record channel, so the mesh-authored names have to be lifted
     onto it or those doors convert silent (see asset_convert.door_sounds).
 
-    The EditorID is resolved against this plugin's own SOUN records, so an
+    The EditorID is resolved against the supplied effective SOUN records, so an
     unknown name simply yields no sound rather than a dangling reference.
     Returns the number of models that contributed a sound.
     """
@@ -132,10 +132,6 @@ def load_door_model_sounds(meshes_dir, by_type) -> int:
     except ImportError as exc:
         print(f"  Door sounds: asset_convert unavailable ({exc}), skipping")
         return 0
-    if not os.path.isdir(meshes_dir):
-        print(f"  Door sounds: meshes dir not found ({meshes_dir}), skipping")
-        return 0
-
     # Only doors that need the fallback are worth parsing: a record naming its
     # own open AND close sound already has everything TES5 can express.
     wanted = set()
@@ -401,19 +397,30 @@ def load_furniture_models(meshes_dir, by_type) -> int:
     _BASE_ORIGIN_SHIFT.clear()
     try:
         from asset_convert.furniture_markers import (furniture_model_info_job,
-                                                     scan_marker_nifs)
+                                                     _has_marker_header)
+        from asset_convert.mesh_metadata import resolve_mesh_paths
     except ImportError as exc:
         print(f"  Furniture seats: asset_convert unavailable ({exc}), using fallback")
         return 0
-    if not os.path.isdir(meshes_dir):
-        print(f"  Furniture seats: meshes dir not found ({meshes_dir}), using fallback")
-        return 0
-
-    marker_models = scan_marker_nifs(meshes_dir)
+    model_keys = {_furn_model_key(get_str(rec, 'Model.MODL'))
+                  for recs in by_type.values() for rec in recs
+                  if get_str(rec, 'Model.MODL')}
+    furniture_keys = {_furn_model_key(get_str(rec, 'Model.MODL'))
+                      for rec in by_type.get('FURN', [])
+                      if get_str(rec, 'Model.MODL')}
+    model_paths = resolve_mesh_paths(meshes_dir, model_keys)
+    for key in sorted(furniture_keys - model_paths.keys()):
+        print(f"  Furniture seats: source model not found in plugin or masters: {key}")
+    # Select the winning file BEFORE inspecting markers. A child can replace
+    # a master's chair with a decorative model containing no furniture blocks.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=32) as ex:
+        has_markers = ex.map(_has_marker_header, model_paths.values())
+        jobs = [(key, path) for (key, path), marked in
+                zip(model_paths.items(), has_markers)
+                if marked or key in furniture_keys]
     # PyFFI parsing is CPU-bound pure Python — run the per-NIF parses across
     # a process pool (threads would serialise on the GIL).
-    jobs = [(key, os.path.join(meshes_dir, key.replace('/', os.sep)))
-            for key in sorted(marker_models)]
     model_shift: dict = {}
     resolved = 0
 

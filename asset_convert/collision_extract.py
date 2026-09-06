@@ -705,24 +705,18 @@ def _worker_both(args: tuple):
     nif_path, rel_key = args
     try:
         data = read_nif_data(nif_path)
-    except Exception:
-        return rel_key, None, None
+    except Exception as exc:
+        return rel_key, None, None, f'{type(exc).__name__}: {exc}'
     try:
         bounds = bounds_from_data(data)
-    except Exception:
-        bounds = None
-    if bounds is not None:
-        try:
+        if bounds is not None:
             phys = physics_flags_from_data(data)
-        except Exception:
-            phys = 0
-        if phys:
-            bounds = bounds + (phys,)
-    try:
+            if phys:
+                bounds = bounds + (phys,)
         col = collision_from_data(data)
-    except Exception:
-        col = None
-    return rel_key, bounds, col
+    except Exception as exc:
+        return rel_key, None, None, f'{type(exc).__name__}: {exc}'
+    return rel_key, bounds, col, None
 
 
 # ---------------------------------------------------------------------------
@@ -742,6 +736,7 @@ _DIGESTS: Dict[str, str] = {}
 
 
 def _serialize(results: Dict[str, dict]) -> bytes:
+    import numpy as np
     buf = bytearray()
     buf += _MAGIC
     buf += struct.pack('<I', len(results))
@@ -751,10 +746,10 @@ def _serialize(results: Dict[str, dict]) -> bytes:
         buf += struct.pack('<H', len(kb))
         buf += kb
         buf += struct.pack('<II', len(w) // 9, len(b) // 9)
-        if w:
-            buf += struct.pack('<%df' % len(w), *w)
-        if b:
-            buf += struct.pack('<%df' % len(b), *b)
+        if len(w):
+            buf += np.asarray(w, dtype='<f4').tobytes()
+        if len(b):
+            buf += np.asarray(b, dtype='<f4').tobytes()
     return zlib.compress(bytes(buf), 6)
 
 
@@ -810,7 +805,7 @@ def _list_nifs(mesh_dir_norm: str):
 
 
 def scan_mesh_data(mesh_dir: str, collision_cache: str, bounds_cache: str,
-                   workers: int = None):
+                   workers: int = None, relative_paths=None):
     """Scan the CONVERTED mesh dir ONCE, writing both caches.
 
     Bounds and collision used to be two separate phases, each with its own
@@ -822,42 +817,65 @@ def scan_mesh_data(mesh_dir: str, collision_cache: str, bounds_cache: str,
     The two caches stay SEPARATE files in their existing formats, so every
     consumer (load_collision / mesh_bounds.load_mesh_bounds) is unchanged.
 
-    Returns (n_collision, n_bounds).
+    With relative_paths and current caches, replace only those model entries.
+    Missing selected files remove their old entries. Otherwise scan the whole
+    output tree to establish complete caches. Parse failures leave both caches
+    untouched and fail the stage. Returns (n_collision, n_bounds).
     """
     mesh_dir_norm = os.path.normpath(mesh_dir)
     if not os.path.isdir(mesh_dir_norm):
         print(f"  Mesh scan: mesh dir not found ({mesh_dir}), skipping")
         return 0, 0
 
-    nif_files = _list_nifs(mesh_dir_norm)
-    if not nif_files:
-        print(f"  Mesh scan: no .nif files found in {mesh_dir}")
-        return 0, 0
+    col_results: Dict[str, dict] = {}
+    bnd_results: Dict[str, tuple] = {}
+    if (relative_paths is not None and os.path.isfile(collision_cache)
+            and bounds_cache_is_current(bounds_cache)):
+        with open(collision_cache, 'rb') as fh:
+            col_results = _deserialize(fh.read())
+        with open(bounds_cache, encoding='utf-8') as fh:
+            bnd_results = json.load(fh)
+        bnd_results.pop(_BOUNDS_SCHEMA_KEY, None)
+        nif_files = []
+        for rel_key in sorted(set(relative_paths)):
+            col_results.pop(rel_key, None)
+            bnd_results.pop(rel_key, None)
+            path = os.path.join(mesh_dir_norm, *rel_key.split('/'))
+            if os.path.isfile(path):
+                nif_files.append((path, rel_key))
+    else:
+        nif_files = _list_nifs(mesh_dir_norm)
 
     n = len(nif_files)
     if workers is None:
         workers = worker_count()
     print(f"  Scanning {n} NIFs for bounds + collision ({workers} workers)...")
 
-    col_results: Dict[str, dict] = {}
-    bnd_results: Dict[str, tuple] = {}
-    with ProcessPoolExecutor(max_workers=workers) as ex:
-        done = 0
-        for rel_key, bounds, col in ex.map(_worker_both, nif_files,
-                                           chunksize=16):
+    errors = []
+    def consume(results):
+        for done, (rel_key, bounds, col, error) in enumerate(results, 1):
+            if error:
+                errors.append((rel_key, error))
+                print(f"  Mesh metadata ERROR: {rel_key}: {error}", flush=True)
             if col is not None:
                 col_results[rel_key] = col
             if bounds is not None:
                 bnd_results[rel_key] = bounds
-            done += 1
-            if done % 1000 == 0:
-                print(f"    {done}/{n} processed...")
+            if done % 1000 == 0 or done == n:
+                print(f"    {done}/{n} processed...", flush=True)
+    if n <= 3 or workers == 1:
+        consume(map(_worker_both, nif_files))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            consume(ex.map(_worker_both, nif_files, chunksize=16))
+    if errors:
+        raise RuntimeError(f'{len(errors)} mesh metadata failures; caches were not replaced')
 
     tw = sum(len(e['w']) // 9 for e in col_results.values())
     tb = sum(len(e['b']) // 9 for e in col_results.values())
-    print(f"  Collision: {len(col_results)} / {n} NIFs "
+    print(f"  Collision cache: {len(col_results)} NIFs "
           f"({tw} walkable, {tb} blocking tris)")
-    print(f"  Mesh bounds: {len(bnd_results)} / {n} NIFs computed")
+    print(f"  Mesh bounds cache: {len(bnd_results)} NIFs")
 
     os.makedirs(os.path.dirname(os.path.abspath(collision_cache)),
                 exist_ok=True)
@@ -919,24 +937,31 @@ def scan_collision(mesh_dir: str, cache_path: str, workers: int = None) -> int:
     return len(results)
 
 
-def load_collision(cache_path: str, quiet: bool = False) -> int:
-    """Load the collision cache into this process's module cache."""
+def load_collision(cache_path, quiet: bool = False) -> int:
+    """Replace collision state from ordered caches, masters before overrides.
+
+    Bounds enumerate every converted model, including collisionless ones. An
+    overriding collisionless model must remove its master's collision soup.
+    """
     global _COLLISION, _DIGESTS
-    if not os.path.exists(cache_path):
-        if not quiet:
-            print(f"  Collision: cache not found ({cache_path})")
-        return 0
-    try:
-        with open(cache_path, 'rb') as fh:
-            _COLLISION = _deserialize(fh.read())
-        _DIGESTS = {}          # memo belongs to the cache that was just replaced
-        if not quiet:
-            print(f"  Collision: loaded {len(_COLLISION)} entries")
-        return len(_COLLISION)
-    except (OSError, ValueError, zlib.error, struct.error) as exc:
-        if not quiet:
-            print(f"  Collision: could not load cache ({exc})")
-        return 0
+    _COLLISION = {}
+    _DIGESTS = {}
+    paths = [cache_path] if isinstance(cache_path, (str, os.PathLike)) else cache_path
+    for path in paths:
+        try:
+            bounds = os.path.join(os.path.dirname(path), 'mesh_bounds_cache.json')
+            if os.path.isfile(bounds):
+                with open(bounds, encoding='utf-8') as fh:
+                    for key in json.load(fh):
+                        _COLLISION.pop(key, None)
+            with open(path, 'rb') as fh:
+                _COLLISION.update(_deserialize(fh.read()))
+        except (OSError, ValueError, zlib.error, struct.error) as exc:
+            if not quiet:
+                print(f"  Collision: could not load {path} ({exc})")
+    if not quiet:
+        print(f"  Collision: loaded {len(_COLLISION)} entries")
+    return len(_COLLISION)
 
 
 def get_collision(path_key: str) -> Optional[dict]:

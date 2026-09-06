@@ -131,14 +131,13 @@ def scan_door_models(meshes_dir, model_keys):
     (e.g. ``architecture/stonewall/stonewallgatedoor01.nif``) — only door
     models are handed in, so this never walks the whole mesh tree.
     """
-    jobs = []
-    for key in sorted(model_keys):
-        path = os.path.join(meshes_dir, key.replace('/', os.sep))
-        if os.path.isfile(path) and has_sound_key(path):
-            jobs.append((key, path))
+    from .mesh_metadata import resolve_mesh_paths
+    paths = resolve_mesh_paths(meshes_dir, model_keys)
+    jobs = [(key, path) for key, path in paths.items() if has_sound_key(path)]
 
     out = {}
-    errors = []
+    errors = [(key, 'source model not found in plugin or masters')
+              for key in sorted(set(model_keys) - paths.keys())]
     if not jobs:
         return out, errors
 

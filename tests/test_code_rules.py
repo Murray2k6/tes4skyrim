@@ -28,6 +28,14 @@ def sites(source, rule):
     return sorted(s[1] for s in found.get(rule, ()))
 
 
+def test_local_imports_cannot_hide_in_nested_scopes():
+    """Function and class imports are local; platform guards at module scope are not."""
+    assert sites('def f():\n    import os\n', 'local-imports') == [2]
+    assert sites('def f():\n    def g():\n        from os import path\n', 'local-imports') == [3]
+    assert sites('class Thing:\n    import os\n', 'local-imports') == [2]
+    assert sites('if True:\n    import os\n', 'local-imports') == []
+
+
 def blame(before, after, touched, rule):
     """Lines an edit owns for `rule`, given the lines it changed."""
     text, tree = CR._parse(FAKE, after)
@@ -562,9 +570,9 @@ def test_a_class_docstring_is_judged_too():
     assert sites(_cite(DOC, 'class Thing'), 'anchorless-citations') == [4]
 
 
-def test_a_module_docstring_may_cite_a_whole_file():
-    """Module-wide really does mean the whole document; an anchor would lie."""
-    assert sites('"""M.\n\nSee: %s\n"""\n' % DOC, 'anchorless-citations') == []
+def test_a_module_docstring_requires_an_anchor():
+    """Every docstring citation names the section carrying its contract."""
+    assert sites('"""M.\n\nSee: %s\n"""\n' % DOC, 'anchorless-citations') == [1]
 
 
 def test_a_short_docstring_with_an_anchor_is_never_charged():
@@ -611,10 +619,10 @@ def test_a_local_import_is_charged_like_a_top_level_one():
     assert sites(src, 'private-imports') == [6]
 
 
-def test_a_test_file_may_reach_a_private_helper():
-    """A test is allowed to know more than a caller, as with file length."""
-    got = CR.rule_sites(Path(__file__).resolve(), with_tools=False)
-    assert 'private-imports' not in got
+def test_test_files_cannot_import_private_helpers():
+    """Test imports follow the same public-interface contract."""
+    got = CR.rule_sites(Path(__file__).resolve(), 'from other import _helper\n', with_tools=False)
+    assert got['private-imports'][0][1] == 1
 
 
 def test_an_untouched_private_import_is_not_owed():

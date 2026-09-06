@@ -30,6 +30,19 @@ _GLOBAL_CALL_RE = re.compile(r'^(?:Game|Utility|Debug|Math)\.')
 
 def emit_command(conv, ref_name, func_name: str, extends: str, args=()) -> str:
     """Convert one TES4 command invocation."""
+    previous = conv._arg_nodes
+    try:
+        result = _emit_command(conv, ref_name, func_name, extends, args)
+        if result and all(not line.strip() or line.lstrip().startswith(';')
+                          for line in result.splitlines()):
+            conv._line_comments.extend(line.strip() for line in result.splitlines() if line.strip())
+            return '0'
+        return result
+    finally:
+        conv._arg_nodes = previous
+
+
+def _emit_command(conv, ref_name, func_name, extends, args):
     call = Call(conv, ref_name, func_name, extends, args)
     conv._arg_nodes = call.args
 
@@ -56,7 +69,9 @@ def emit_command(conv, ref_name, func_name: str, extends: str, args=()) -> str:
         if crow is not None and crow.subj == MAP:
             args_txt = _convert_args(conv, call) if len(call) else ''
             out = f'{crow.emit}({args_txt})'
-            return f'{out}  {crow.note}' if crow.note else out
+            if crow.note:
+                conv._line_comments.append(crow.note)
+            return out
 
     # A command only a dedicated handler converts, reaching here, has fallen
     # past that handler -- the receiver form of a bare-only command, say.  It
@@ -129,7 +144,9 @@ def _emit_mapped(conv, call, ref_name, func_name: str, extends: str) -> str:
                  f'.{papyrus_func}({args})'
     else:
         result = _bare(conv, call, papyrus_func, args, needs_self, extends)
-    return f'{result}  {note}' if note else result
+    if note:
+        conv._line_comments.append(note)
+    return result
 
 
 def _receiver(conv, call, ref_name, papyrus_func: str, extends: str) -> str:
@@ -138,6 +155,12 @@ def _receiver(conv, call, ref_name, papyrus_func: str, extends: str) -> str:
     papyrus_low = (papyrus_func or '').lower()
     is_actor_func = (call.name in _ACTOR_ONLY_FUNCTIONS
                      or papyrus_low in _ACTOR_ONLY_FUNCTIONS)
+    if conv.type_of(ref) == 'Form':
+        shared = call.name in _OBJREF_SHARED_FUNCTIONS or papyrus_low in _OBJREF_SHARED_FUNCTIONS
+        if is_actor_func and not shared:
+            return f'({ref} as Actor)'
+        if shared or call.name in _OBJREF_IMPLICIT_SELF_FUNCTIONS or papyrus_low in _OBJREF_IMPLICIT_SELF_FUNCTIONS:
+            return f'({ref} as ObjectReference)'
     # ActiveMagicEffect Self has no actor/objref methods.
     if ref == 'Self' and extends == 'ActiveMagicEffect':
         return 'GetTargetActor()'
@@ -180,8 +203,14 @@ def _bare(conv, call, papyrus_func: str, args: str, needs_self: bool,
     read 0 -> `0 < 1000` was always true, so the gate hammered
     `OblivionStormTamriel.ForceActive()` every 0.1s.
     """
-    if (needs_self and call.name in _ACTOR_ONLY_FUNCTIONS
-            and call.name not in _OBJREF_SHARED_FUNCTIONS):
+    actor_only = (call.name in _ACTOR_ONLY_FUNCTIONS or papyrus_func.lower() in _ACTOR_ONLY_FUNCTIONS)
+    shared = call.name in _OBJREF_SHARED_FUNCTIONS or papyrus_func.lower() in _OBJREF_SHARED_FUNCTIONS
+    if extends == 'TES4Function' and needs_self and not _GLOBAL_CALL_RE.match(papyrus_func):
+        receiver = '(TES4_Caller as Actor)' if actor_only and not shared else 'TES4_Caller'
+        return f'{receiver}.{papyrus_func}({args})'
+    if needs_self and actor_only and not shared:
+        if extends == 'TES4Function':
+            return f'(TES4_Caller as Actor).{papyrus_func}({args})'
         if extends == 'TopicInfo':
             return f'(akSpeakerRef as Actor).{papyrus_func}({args})'
         if extends == 'ActiveMagicEffect':
@@ -207,7 +236,7 @@ def _bare(conv, call, papyrus_func: str, args: str, needs_self: bool,
             and (call.name in _OBJREF_IMPLICIT_SELF_FUNCTIONS
                  or call.name in _OBJREF_SHARED_FUNCTIONS)
             and extends in ('ActiveMagicEffect', 'TopicInfo',
-                            PLAYER_ALIAS_EXTENDS)):
+                            PLAYER_ALIAS_EXTENDS, 'TES4Function')):
         # An ObjectReference method called bare inside a script whose Self is
         # not a reference -- route it onto the reference the effect/topic acts
         # on, with no `as Actor` cast.  These must not be left bare:

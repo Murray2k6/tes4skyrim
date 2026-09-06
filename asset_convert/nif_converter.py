@@ -74,18 +74,15 @@ from .tri_reconstruct import (clear_match_groups, fix_missing_triangles,
 
 # Apply all PyFFI patches (time.clock fix, nif.xml condition fixes) before import
 from . import pyffi_monkey_patch as _patch  # noqa: F401
+from .legacy_nif_layout import prepare_legacy_geometry, prepare_legacy_controllers
+from .nif_input import read_source_nif
+from .game_paths import matches_path_scope
 from .texture_prune import _texture_refs_in  # noqa: E402
 from .nif_flames import convert_flame_nodes
 
 try:
     from pyffi.formats.nif import NifFormat
     _PYFFI = True
-    try:
-        from pyffi.spells.nif.fix import SpellAddTangentSpace as _SpellAddTangentSpace
-        from pyffi.spells.nif import NifToaster as _NifToaster
-        _TANGENT_SPELL = True
-    except ImportError:
-        _TANGENT_SPELL = False
 except ImportError:
     _PYFFI = False
 
@@ -328,6 +325,9 @@ def sky_object_type_for(src_path):
 
 #: Convertible source versions; anything else is skipped, not copied.
 _SUPPORTED_VERSIONS = {
+    0x0303000d,  # NetImmerse 3.3.0.13 - legacy geometry in shipped assets
+    0x04000002,  # NetImmerse 4.0.0.2 - legacy geometry in shipped assets
+    0x04020100,  # NetImmerse 4.2.1.0
     0x14000004,  # Gamebryo 20.0.0.4 - the primary Oblivion format
     0x14000005,  # Gamebryo 20.0.0.5
     0x14020007,  # Gamebryo 20.2.0.7 - FO3/FNV
@@ -1984,10 +1984,9 @@ def _process_geometry(strips_or_shape, fix_textures, stats=None, sky_type=None):
     fix_missing_triangles(ts.data)
     clear_match_groups(ts.data)
 
-    # Reset ExtraVectorsFlags to 0 (Skyrim valid: 0=none, 16=has binormal+tangent).
-    # Oblivion NIFs may store value 1 (binormals-only) which is invalid in Skyrim
-    # and triggers a PyFFI enum warning, potentially causing corrupt tangent data.
-    # _set_tangents() will set this to 16 when proper tangent data is available.
+    # Rebuild the render geometry's tangent flags. This is the high byte of
+    # NiGeometryDataFlags (material bits + NBT method), not an enum. Material
+    # flags belong to collision geometry; _set_tangents sets the tangent bit.
     if hasattr(ts.data, 'extra_vectors_flags'):
         ts.data.extra_vectors_flags = 0
 
@@ -3955,6 +3954,16 @@ def _emulate_morphs(root, stats=None):
         ip.bool_value = bool(values[0])
         ip.data = bd
         ctrl = _vis_controller(geom)
+        if isinstance(seq, NifFormat.NiTimeController):
+            # Mesh-particle templates animate against each particle's age;
+            # their source controller owns the clock, without a sequence.
+            ctrl.interpolator = ip
+            ctrl.flags = int(seq.flags) | 0x40
+            ctrl.frequency = seq.frequency
+            ctrl.phase = seq.phase
+            ctrl.start_time = seq.start_time
+            ctrl.stop_time = seq.stop_time
+            return
         ctrl.stop_time = max(ctrl.stop_time, seq.stop_time)
         seq.num_controlled_blocks += 1
         seq.controlled_blocks.update_size()
@@ -4485,7 +4494,12 @@ def _convert_particle_system(node, fix_textures):
     if node.data is not None:
         old_data = node.data
         orig_count = max(old_data.num_vertices, 75)
-        fresh = NifFormat.NiPSysData()
+        if isinstance(old_data, NifFormat.NiMeshPSysData):
+            from .mesh_particles import copy_mesh_data
+            fresh = NifFormat.NiMeshPSysData()
+            copy_mesh_data(old_data, fresh)
+        else:
+            fresh = NifFormat.NiPSysData()
         # The Skyrim NiPSysData binary layout is hand-rolled by
         # pyffi_monkey_patch Patch 4 (PyFFI's own layout is structurally wrong
         # for #BS202#).  That serializer always emits an empty inline pool with
@@ -4694,7 +4708,7 @@ def _is_emitter_marker(node):
     return False
 
 
-def _skyrimize_billboard(bb):
+def _skyrimize_billboard(bb, stats):
     """Convert a (non-root) Oblivion NiBillboardNode for Skyrim.
 
     - Contains a particle system anywhere in its subtree → DEMOTE to a plain
@@ -4710,7 +4724,7 @@ def _skyrimize_billboard(bb):
     # that is what laid the flame quad on its side.
     if getattr(bb, '_axis_fixed', False):
         return bb
-    bb_mode = int(getattr(bb, 'billboard_mode', 1)) or 1
+    bb_mode = int(bb.billboard_mode)
     has_psys = any(isinstance(b, NifFormat.NiParticleSystem)
                    for b in bb.tree())
     if not has_psys:
@@ -4719,7 +4733,8 @@ def _skyrimize_billboard(bb):
         return bb
     plain = NifFormat.NiNode()
     plain.name = bb.name
-    plain.flags = NIF_FLAGS
+    plain.flags = NIF_FLAGS | (int(bb.flags) & 1)
+    stats.setdefault('_block_map', {})[id(bb)] = plain
     plain.translation.x = bb.translation.x
     plain.translation.y = bb.translation.y
     plain.translation.z = bb.translation.z
@@ -4800,13 +4815,11 @@ def _walk_node(parent, node, fix_textures, stats):
     if node_name.startswith(b'SecretBigger') or node_name.startswith(b'Secret Bigger'):
         return None
 
-    # EditorMarker geometry: Oblivion ships editor-only marker meshes (e.g.
-    # the pyramid inside fire NIFs) hidden at runtime via the node's hidden
-    # flag.  Our conversion clobbers node flags with NIF_FLAGS (visible), so
-    # the marker shows in game as an untextured black shape.  Vanilla Skyrim
-    # NIFs don't carry editor markers in these objects — strip them.
+    # Editor-only marker models are invisible at runtime. Keep their geometry
+    # and animation/palette links, but explicitly carry that visibility into
+    # Skyrim (some TES4 EditorMarker blocks have the visible flags value 14).
     if node_name.startswith(b'EditorMarker'):
-        return None
+        node.flags = int(node.flags) | 1
 
     # NiParticleSystem: convert to Skyrim-compatible format.
     # NiPSysData binary layout differs between UV2=11 and UV2=83, causing
@@ -4814,8 +4827,11 @@ def _walk_node(parent, node, fix_textures, stats):
     # Oblivion data.  _convert_particle_system() replaces the data block
     # with a fresh empty instance and converts shader properties.
     if isinstance(node, NifFormat.NiParticleSystem):
+        if isinstance(node, NifFormat.NiMeshParticleSystem):
+            from .mesh_particles import convert_templates
+            convert_templates(node, fix_textures, stats)
         _convert_particle_system(node, fix_textures)
-        node.flags = NIF_FLAGS
+        node.flags = NIF_FLAGS | (int(node.flags) & 1)
         return node
 
     # NiDynamicEffect subtypes: strip ALL of them.
@@ -4861,7 +4877,7 @@ def _walk_node(parent, node, fix_textures, stats):
 
     # NiNode and descendants
     if isinstance(node, NifFormat.NiNode):
-        node.flags = NIF_FLAGS
+        node.flags = NIF_FLAGS | (int(node.flags) & 1)
 
         # Strip FX effects
         if hasattr(node, 'num_effects') and node.num_effects > 0:
@@ -4886,7 +4902,7 @@ def _walk_node(parent, node, fix_textures, stats):
         for i in range(len(node.children)):
             result = _walk_node(node, node.children[i], fix_textures, stats)
             if isinstance(result, NifFormat.NiBillboardNode):
-                result = _skyrimize_billboard(result)
+                result = _skyrimize_billboard(result, stats)
             node.children[i] = result
 
         # Compact: remove None slots left by stripped nodes (NiParticleSystem,
@@ -6025,6 +6041,9 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
         '_sky_type': sky_object_type_for(src_path),
     }
 
+    prepare_legacy_geometry(data, NifFormat)
+    prepare_legacy_controllers(data, NifFormat)
+
     # Drop orphaned non-scene-graph roots before anything walks data.roots.
     _prune_orphan_roots(data)
 
@@ -6051,6 +6070,8 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
     # any tangent computation or skin retargeting can propagate the NaNs.
     # Skyrim SE crashes at cell load on non-finite mesh data with no crash log.
     _sanitize_geometry_data(data)
+    from .nif_affine import repair_static_affine
+    stats['affine_branches_baked'] = repair_static_affine(data, NifFormat)
 
     # --- Armor / clothing NIF fixups (before version upgrade) ---------------
     nif_basename = os.path.basename(src_path).lower()
@@ -6244,7 +6265,8 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
             if has_psys:
                 plain = NifFormat.NiNode()
                 plain.name = root.name
-                plain.flags = NIF_FLAGS
+                plain.flags = NIF_FLAGS | (int(root.flags) & 1)
+                stats.setdefault('_block_map', {})[id(root)] = plain
                 plain.translation = root.translation
                 # Identity, not the billboard's rotation -- see the note in
                 # _skyrimize_billboard: a NiBillboardNode discards its own
@@ -6273,7 +6295,7 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
                 # Wrap direct geometry children in axis-corrected billboards
                 # (see _wrap_in_billboard / _BB_AXIS_FIX for the Oblivion vs
                 # Skyrim billboard axis convention story).
-                bb_mode = int(getattr(root, 'billboard_mode', 1)) or 1
+                bb_mode = int(root.billboard_mode)
                 for j in range(len(plain.children)):
                     c = plain.children[j]
                     if isinstance(c, (NifFormat.NiTriShape,
@@ -6299,7 +6321,8 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
             old_root = root
             fade = NifFormat.BSFadeNode()
             fade.name = root.name
-            fade.flags = NIF_FLAGS
+            fade.flags = NIF_FLAGS | (int(root.flags) & 1)
+            stats.setdefault('_block_map', {})[id(root)] = fade
             fade.translation = root.translation
             fade.rotation = root.rotation
             fade.scale = root.scale
@@ -6489,49 +6512,8 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
                 fade.extra_data_list.update_size()
                 fade.extra_data_list[fade.num_extra_data_list - 1] = inv
 
-            # Fix NiTimeController.target chain: every controller whose .target
-            # pointed to old_root must now point to the new BSFadeNode.
-            # NiControllerManager AND NiMultiTargetTransformController both store
-            # a back-reference to their controlled node via .target.  Since old_root
-            # is removed from data.roots and no longer reachable, PyFFI writes any
-            # remaining references to it as null (-1).  Skyrim uses
-            # NiControllerManager.target as the root for animated-node lookup; a
-            # null target causes an immediate null-deref crash on NIF load.
-            # NiMultiTargetTransformController also maintains an extra_targets array
-            # which may additionally reference old_root.
-            ctrl = root.controller
-            while ctrl is not None:
-                if hasattr(ctrl, 'target') and ctrl.target is old_root:
-                    ctrl.target = root
-                if hasattr(ctrl, 'extra_targets'):
-                    for i in range(len(ctrl.extra_targets)):
-                        if ctrl.extra_targets[i] is old_root:
-                            ctrl.extra_targets[i] = root
-                ctrl = getattr(ctrl, 'next_controller', None)
-
-            # Fix NiDefaultAVObjectPalette: entries that referenced the old NiNode
-            # now need to point to the new BSFadeNode (otherwise Skyrim null-deref crash)
-            mgr = root.controller
-            if mgr is not None and hasattr(mgr, 'object_palette') and mgr.object_palette is not None:
-                pal = mgr.object_palette
-                if hasattr(pal, 'num_objs'):
-                    for obj_entry in pal.objs:
-                        if obj_entry.av_object is old_root:
-                            obj_entry.av_object = root
-
-            # Fix NiSkinInstance.skeleton_root -- the same dangling-back-
-            # reference class as the controllers above.  A skinned shape names
-            # the node its bone transforms are relative to; on a self-skinned
-            # clutter mesh (rope, chain, banner, hanging bucket) that node IS
-            # the root.  old_root is no longer in the tree, so PyFFI writes the
-            # link as null (-1), and Skyrim cannot resolve the skin's frame of
-            # reference -- the shape renders as the red missing-geometry
-            # marker.  Symptom seen on dungeons\chargen\ropebucket01.nif, whose
-            # two BucketRope shapes are skinned to the c_BucketBone chain.
-            for blk in root.tree():
-                si = getattr(blk, 'skin_instance', None)
-                if si is not None and si.skeleton_root is old_root:
-                    si.skeleton_root = root
+            from .nif_links import retarget_links
+            retarget_links(root, {id(old_root): root}, data)
 
         elif type(root).__name__ == 'NiNode' and _is_worn_armor:
             # Worn armor: keep NiNode root but update flags and clear properties.
@@ -6640,7 +6622,7 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
                 if isinstance(_res, NifFormat.NiBillboardNode):
                     # Same Skyrim billboard treatment as _walk_node applies to
                     # deeper levels (axis fix / demote-when-particles).
-                    _res = _skyrimize_billboard(_res)
+                    _res = _skyrimize_billboard(_res, stats)
                 root.children[j] = _res
             # Compact: remove None children left by stripped nodes
             keep = [c for c in root.children if c is not None]
@@ -6650,36 +6632,10 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
                 for _ri, _rv in enumerate(keep):
                     root.children[_ri] = _rv
 
-        # Fix NiDefaultAVObjectPalette entries that referenced old NiTriStrips
-        # blocks now replaced by NiTriShape during _walk_node.
-        block_map = stats.get('_block_map', {})
-        if block_map:
-            mgr = root.controller
-            if mgr is not None and hasattr(mgr, 'object_palette') and mgr.object_palette is not None:
-                pal = mgr.object_palette
-                if hasattr(pal, 'num_objs'):
-                    for obj_entry in pal.objs:
-                        replacement = block_map.get(id(obj_entry.av_object))
-                        if replacement is not None:
-                            obj_entry.av_object = replacement
-
-            # Fix NiPSysMeshEmitter.emitter_meshes the same way.  Mesh emitters
-            # reference their source geometry through a SECOND link, outside the
-            # children arrays that _walk_node rewrites — so when a NiTriStrips
-            # emitter mesh is replaced by its NiTriShape equivalent, the emitter
-            # still points at the ORPHANED strips block.  PyFFI then re-serializes
-            # that block (it is still reachable), leaving raw Oblivion NiTriStrips
-            # in a Skyrim file.  Skyrim has no NiTriStrips renderer — vanilla is
-            # 107/107 NiTriShape across all 256 NiPSysMeshEmitter meshes — so the
-            # engine fails the whole NIF and draws the red missing-mesh triangle
-            # (se11sheopooffx, se01waitingroomwalls, palacefont01).
-            for block in root.tree():
-                if not isinstance(block, NifFormat.NiPSysMeshEmitter):
-                    continue
-                for mi in range(len(block.emitter_meshes)):
-                    replacement = block_map.get(id(block.emitter_meshes[mi]))
-                    if replacement is not None:
-                        block.emitter_meshes[mi] = replacement
+        # Replacements must reach controller targets, palettes and emitters,
+        # including weak links that do not appear in the owning scene tree.
+        from .nif_links import retarget_links
+        retarget_links(root, stats.get('_block_map', {}), data)
 
         # Reconcile retargeted UV controllers with the shader each target node
         # actually received (Lighting vs Effect number their variables
@@ -6852,6 +6808,14 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
                 root.extra_data_list.update_size()
                 root.extra_data_list[root.num_extra_data_list - 1] = bsx
             bsx.integer_data = 198
+
+    # A palette in an earlier root can point into a later, independently
+    # owned root. Its replacements only exist after the entire root pass.
+    if len(data.roots) > 1:
+        from .nif_links import retarget_links
+        for root in data.roots:
+            if root is not None:
+                retarget_links(root, stats.get('_block_map', {}), data)
 
     # Retarget worn armor/clothing skins to Skyrim skeleton bind poses and
     # regenerate NiSkinPartition in Skyrim triangle format.  Must run AFTER
@@ -7690,8 +7654,9 @@ def convert_nif(src_path, dst_path, *, fix_textures=True, remap_skeleton=None,
     try:
         with open(src_path, 'rb') as f:
             data.inspect(f)
-    except Exception:
+    except Exception as error:
         result['error'] = 'RD'
+        result['error_detail'] = f'{type(error).__name__}: {error}'
         return result
 
     if (data.version, data.user_version_2) in _SKYRIM_VERSIONS:
@@ -7700,7 +7665,9 @@ def convert_nif(src_path, dst_path, *, fix_textures=True, remap_skeleton=None,
         dst_dir = os.path.dirname(dst_path)
         if dst_dir:
             os.makedirs(dst_dir, exist_ok=True)
-        shutil.copy2(src_path, dst_path)
+        # This is a new build output. Preserve the bytes, but give the write
+        # its actual time so mesh-stage bookkeeping sees replaced SSE assets.
+        shutil.copyfile(src_path, dst_path)
         with open(src_path, 'rb') as f:
             _harvest_texture_bytes(f.read(), result['textures'])
         result['copied'] = True
@@ -7709,16 +7676,17 @@ def convert_nif(src_path, dst_path, *, fix_textures=True, remap_skeleton=None,
     if data.version not in _SUPPORTED_VERSIONS:
         # Too old or unrecognised — skip, do not copy
         result['error'] = 'VER'
+        result['error_detail'] = f'unsupported NIF version {data.version:#010x}'
         return result
 
     # Full read (fresh Data object so inspect state is clean)
-    data = NifFormat.Data()
     try:
-        with open(src_path, 'rb') as f:
-            data.inspect(f)
-            data.read(f)
-    except Exception:
+        data, trailing_bytes = read_source_nif(src_path, NifFormat)
+        if trailing_bytes:
+            result['repaired_trailing_bytes'] = trailing_bytes
+    except Exception as error:
         result['error'] = 'RD'
+        result['error_detail'] = f'{type(error).__name__}: {error}'
         return result
 
     # Standalone animation files (e.g. creatures/*/idleanims/*.nif) hold only a
@@ -7824,25 +7792,26 @@ def convert_nif(src_path, dst_path, *, fix_textures=True, remap_skeleton=None,
                 from .hkx_animobject import generate_animobject_project
                 _bged = generate_animobject_project(
                     _meshes_root, _model_rel, _seq_names)
-                if _bged and _add_animobject_bged(data, _bged):
-                    result['animobject_graph'] = _bged
-                    stats['animobject_sequences'] = len(_seq_names)
+                if not _bged or not _add_animobject_bged(data, _bged):
+                    raise RuntimeError('Animated mesh has no attached behavior graph')
+                result['animobject_graph'] = _bged
+                stats['animobject_sequences'] = len(_seq_names)
             except Exception as _e:
-                # A missing/failing hkxcmd must not lose the whole mesh: the
-                # object still converts and renders, it just stays unanimated.
-                result['animobject_error'] = str(_e)
+                result['error'] = 'ANIMATION'
+                result['error_detail'] = f'{type(_e).__name__}: {_e}'
+                return result
 
     # Generate tangent space for all NiTriShapeData that don't already have it.
     # Missing tangents cause incorrect normal-map lighting in Skyrim which
     # appears as "rainbow colored shaders" on architecture and other meshes.
     # This is equivalent to what SpellOptimizeGeometry does in the legacy converter.
-    if _TANGENT_SPELL:
-        try:
-            toaster = _NifToaster()
-            spell = _SpellAddTangentSpace(data=data, toaster=toaster)
-            spell.recurse()
-        except Exception:
-            pass
+    from .nif_tangents import add_tangent_space
+    try:
+        add_tangent_space(data)
+    except Exception as error:
+        result['error'] = 'TANGENTS'
+        result['error_detail'] = f'{type(error).__name__}: {error}'
+        return result
 
     # Record which textures this mesh ends up referencing.  Collected here, off
     # the finished blocks, so the pipeline can drop every texture nothing ships
@@ -7867,8 +7836,9 @@ def convert_nif(src_path, dst_path, *, fix_textures=True, remap_skeleton=None,
     buf = _io.BytesIO()
     try:
         data.write(buf)
-    except Exception:
+    except Exception as error:
         result['error'] = 'WR'
+        result['error_detail'] = f'{type(error).__name__}: {error}'
         return result
 
     dst_dir = os.path.dirname(dst_path)
@@ -8023,19 +7993,6 @@ def _finish_result(result, stats):
     return result
 
 
-def _matches_subdir_filter(rel_parts, subdir_filter) -> bool:
-    """Whether a relative mesh path is under one selected path prefix."""
-    if subdir_filter is None:
-        return True
-    rel = tuple(str(part).lower() for part in rel_parts)
-    for selected in subdir_filter:
-        prefix = tuple(part.lower() for part in re.split(
-            r'[\\/]+', str(selected)) if part)
-        if prefix and rel[:len(prefix)] == prefix:
-            return True
-    return False
-
-
 def batch_convert(mesh_dir, output_dir, *, fix_textures=True,
                   remap_skeleton=None, subdir_filter=None, wearable_plan=None,
                   parallax=False, textures_only=False):
@@ -8081,7 +8038,7 @@ def batch_convert(mesh_dir, output_dir, *, fix_textures=True,
         rel_parts = [p.lower() for p in nf.relative_to(mesh_path).parts]
         if any(seg in rel_parts for seg in SKIP_PATHS):
             skipped_by_path += 1
-        elif not _matches_subdir_filter(rel_parts, subdir_filter):
+        elif not matches_path_scope('/'.join(rel_parts), subdir_filter):
             skipped_by_path += 1
         else:
             nif_files.append(nf)
@@ -8137,7 +8094,13 @@ def batch_convert(mesh_dir, output_dir, *, fix_textures=True,
     ]
 
     def _update(nif_str, r):
+        if r.get('repaired_trailing_bytes'):
+            print(f"  Repaired NIF trailer: {os.path.relpath(nif_str, mesh_path)}: "
+                  f"removed {r['repaired_trailing_bytes']} bytes after root footer", flush=True)
         stats['warn_counts'].update(r.get('warn_counts', {}))
+        for message in r.get('warning_messages', ()):
+            rel = Path(nif_str).relative_to(mesh_path)
+            print(f'  WARNING: {rel}: {message}', flush=True)
         stats['textures_used'].update(r.get('textures', ()))
         stats['parallax'].update(r.get('parallax') or {})
         stats['alpha_opacity_diffuse'].update(
@@ -8146,7 +8109,9 @@ def batch_convert(mesh_dir, output_dir, *, fix_textures=True,
         if r.get('error'):
             stats['errors'] += 1
             rel = str(Path(nif_str).relative_to(mesh_path))
-            skipped_list.append((rel, str(r['error'])))
+            detail = r.get('error_detail', '')
+            skipped_list.append((rel, f'{r["error"]}: {detail}' if detail else str(r['error'])))
+            print(f'  ERROR: {rel}: {r["error"]}: {detail}', flush=True)
         elif r.get('converted'):
             stats['converted'] += 1
             if r['strips_fixed']:         stats['strips'] += 1
@@ -8216,7 +8181,7 @@ def batch_convert(mesh_dir, output_dir, *, fix_textures=True,
         total_suppressed = sum(stats['warn_counts'].values())
         top_cats = sorted(stats['warn_counts'].items(), key=lambda x: -x[1])[:30]
         shown = sum(c for _, c in top_cats)
-        print(f'\nPyFFI warnings suppressed ({total_suppressed} total):')
+        print(f'\nPyFFI warnings ({total_suppressed} total; details above):')
         for cat, cnt in top_cats:
             print(f'  {cat}: {cnt}')
         if shown < total_suppressed:
@@ -8299,6 +8264,9 @@ def _batch_worker(args):
                         textures_only=textures_only,
                         tex_fallback=tex_fallback)
         r['warn_counts'] = _categorize_pyffi_warnings(_worker_warn_log)
+        r['warning_messages'] = [message for message in _worker_warn_log
+                                 if not message.strip().lower().startswith(
+                                     _PYFFI_PROGRESS_PREFIXES)]
         return ('ok', nif_str, r)
     except Exception as e:
         return ('error', nif_str, str(e))

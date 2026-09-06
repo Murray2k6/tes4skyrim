@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from .game_paths import scoped_files
 
 # Specular mask value written into the new alpha channel.  Oblivion DXT5
 # landscape normals average ~77/255; DXT1 sources were authored with no
@@ -174,14 +175,14 @@ def fix_normal_specular(path, alpha=SPECULAR_ALPHA):
     return True
 
 
-def run(landscape_dir):
+def run(landscape_dir, paths=None):
     """Fix every DXT1 ``*_n.dds`` under landscape_dir (recursive).
     Returns (checked, fixed) counts."""
     landscape_dir = Path(landscape_dir)
     checked = fixed = 0
     if not landscape_dir.exists():
         return checked, fixed
-    for path in sorted(landscape_dir.rglob('*_n.dds')):
+    for path in scoped_files(landscape_dir, '*_n.dds', paths):
         checked += 1
         if fix_normal_specular(path):
             fixed += 1
@@ -268,7 +269,7 @@ def _read_top_mip(path):
         return hdr + f.read(blocks * (8 if fourcc == b'DXT1' else 16))
 
 
-def normalize_specular_alpha(tex_dir, alpha=DEFAULT_MASK_ALPHA, skip=()):
+def normalize_specular_alpha(tex_dir, alpha=DEFAULT_MASK_ALPHA, skip=(), paths=None):
     """Give every maskless normal map under `tex_dir` a constant mask.
 
     `spec_mask` decides what counts: a real mask is left ALONE -- authored
@@ -289,7 +290,7 @@ def normalize_specular_alpha(tex_dir, alpha=DEFAULT_MASK_ALPHA, skip=()):
     checked = fixed = 0
     if not tex_dir.exists():
         return checked, fixed, counts
-    paths = [p for p in sorted(tex_dir.rglob('*_n.dds'))
+    paths = [p for p in scoped_files(tex_dir, '*_n.dds', paths)
              if not any(s in str(p).lower() for s in skip)]
 
     def _classify(path):

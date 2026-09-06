@@ -160,17 +160,21 @@ class TestMatrixHelpers:
     def test_skin_transform_roundtrip(self):
         """SkinTransform -> numpy -> SkinTransform preserves values."""
         st = NifFormat.SkinTransform()
-        st.rotation.m_11 = 0.5; st.rotation.m_12 = 0.3; st.rotation.m_13 = -0.8
-        st.rotation.m_21 = -0.3; st.rotation.m_22 = 0.9; st.rotation.m_23 = 0.1
-        st.rotation.m_31 = 0.8; st.rotation.m_32 = 0.1; st.rotation.m_33 = 0.5
+        st.rotation.m_11 = 0.8; st.rotation.m_12 = 0.0; st.rotation.m_13 = -0.6
+        st.rotation.m_21 = 0.0; st.rotation.m_22 = 1.0; st.rotation.m_23 = 0.0
+        st.rotation.m_31 = 0.6; st.rotation.m_32 = 0.0; st.rotation.m_33 = 0.8
         st.translation.x = 10.0; st.translation.y = -20.0; st.translation.z = 30.0
-        st.scale = 1.0
+        st.scale = 0.85
 
         M = _skin_transform_to_np(st)
         st2 = NifFormat.SkinTransform()
         _write_skin_transform(st2, M)
 
-        np.testing.assert_allclose(st2.rotation.m_11, 0.5, atol=1e-6)
+        np.testing.assert_allclose(M[:3, :3], np.array(st.rotation.as_list()) * 0.85, atol=1e-6)
+        np.testing.assert_allclose(st2.rotation.m_11, 0.8, atol=1e-6)
+        np.testing.assert_allclose(st2.scale, 0.85, atol=1e-6)
+        assert st2.rotation.is_rotation()
+        np.testing.assert_allclose(_skin_transform_to_np(st2), M, atol=1e-6)
         np.testing.assert_allclose(st2.translation.x, 10.0, atol=1e-6)
         np.testing.assert_allclose(st2.translation.z, 30.0, atol=1e-6)
 

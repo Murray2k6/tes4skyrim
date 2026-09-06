@@ -15,6 +15,9 @@ Two carriers, because a mod declares its base in two different ways:
     implicitly by seeding the base into an ordered merge.
 """
 import os
+from pathlib import Path
+
+from output_layout import assets_for, master_record_dir
 
 FILE_NAME = '.base_plugins'
 
@@ -63,3 +66,29 @@ def subdirs(own_dir, sub):
         if os.path.isdir(p):
             out.append(p)
     return tuple(out)
+
+
+def ordered_record_dirs(asset_dir):
+    """Records for an asset tree, preceded by transitive master/base records.
+
+    Grouped archives keep headers in child record directories. Asset-only
+    archives instead declare their bases in `_source/.base_plugins`.
+    """
+    ordered, seen = [], set()
+
+    def visit(directory):
+        directory = Path(directory)
+        key = str(directory.absolute()).lower()
+        if key in seen or not directory.is_dir():
+            return
+        seen.add(key)
+        for name in names_for(directory):
+            visit(master_record_dir(assets_for(directory).parent, name))
+        if (directory / '_HEADER.txt').is_file():
+            ordered.append(directory)
+        else:
+            for header in sorted(directory.glob('*/_HEADER.txt')):
+                visit(header.parent)
+
+    visit(asset_dir)
+    return ordered

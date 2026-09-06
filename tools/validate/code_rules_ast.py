@@ -5,7 +5,7 @@ Every detector returns `[(path, line, detail), ...]` so the gate and any
 score table read the SAME definition of a rule.  No CLI, no git, no
 subprocess: `code_rules.py` owns those.
 
-See: docs/reference/script_convert_architecture.md
+See: docs/reference/script_convert_architecture.md#what-the-gate-must-see
 """
 
 import ast
@@ -309,21 +309,18 @@ def bloated_docstrings(path, text: str, tree) -> list:
 
 
 def anchorless_citations(path, tree) -> list:
-    """Function/class docstrings citing a `docs/` file with no `#anchor`.
-
-    A bare path names a whole file, so it names no fact.  Module docstrings
-    are exempt: a module-wide citation really does mean the whole document.
+    """Docstrings citing a `docs/` file without naming its section.
     See: docs/reference/script_convert_architecture.md#a-citation-must-name-an-anchor
     """
     hits = []
     for node in ast.walk(tree):
-        if not isinstance(node, FUNC_NODES + (ast.ClassDef,)):
+        if not isinstance(node, FUNC_NODES + (ast.ClassDef, ast.Module)):
             continue
         doc = ast.get_docstring(node)
         for ref, anchor in DOC_CITATION.findall(doc or '') if doc else []:
             if not anchor:
-                hits.append((path, node.lineno,
-                             '%s: cites %s with no #anchor' % (node.name, ref)))
+                hits.append((path, getattr(node, 'lineno', 1),
+                             '%s: cites %s with no #anchor' % (getattr(node, 'name', 'module'), ref)))
     return hits
 
 
@@ -375,6 +372,16 @@ def private_imports(path, tree) -> list:
                              % (alias.asname or alias.name, alias.name,
                                 node.module or '.')))
     return hits
+
+
+def local_imports(path, tree) -> list:
+    """Imports nested in a function or class rather than at module scope."""
+    nodes = {child for owner in ast.walk(tree)
+             if isinstance(owner, FUNC_NODES + (ast.ClassDef,))
+             for child in ast.walk(owner)
+             if isinstance(child, (ast.Import, ast.ImportFrom))}
+    return [(path, node.lineno, 'move this import to module scope')
+            for node in sorted(nodes, key=lambda value: value.lineno)]
 
 
 # ---------------------------------------------------------------------------

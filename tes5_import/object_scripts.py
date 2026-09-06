@@ -36,7 +36,7 @@ from .skyrim_overrides import (DEFAULT_RACE, RACE_MAP,
                                TES4_RACE_FID_TO_EDID)
 
 # Papyrus property types that are literal-valued (not bound to a FormID).
-_VALUE_TYPES = {'Int', 'Float', 'Bool'}
+_VALUE_TYPES = {'Int', 'Float', 'Bool', 'String'}
 
 _PLAYER_FORMID = 0x14
 # NPC_ Player.  An ActorBase-typed `Player` property must bind to the BASE, not
@@ -693,12 +693,19 @@ def _resolve_props(sctx: str, edid: str, extends: str, xref,
     name = _safe_property_name(edid or 'Script')
     conv.convert_standalone(name, sctx, extends, edid)
 
+    return bind_properties(conv.get_property_refs(), xref, offset)
+
+
+def bind_properties(declared: dict, xref, offset: int, well_known=None) -> dict:
+    """Bind the same declared types for object, function, and quest scripts."""
+
     # Lazy (circular: import_main imports this module).
     from .import_main import get_well_known_properties
-    well_known = get_well_known_properties()
+    if well_known is None:
+        well_known = get_well_known_properties()
 
     obj_props: dict[str, int] = {}
-    for pname, ptype in conv.get_property_refs().items():
+    for pname, ptype in declared.items():
         if ptype in _VALUE_TYPES:
             continue
         safe = _safe_property_name(pname)
@@ -775,6 +782,10 @@ def _skyrim_race_formid(raw: int) -> int:
     left for the normal remap, so only ids we positively know to be races are
     redirected.
     """
+    from .race_records import race_target
+    target = race_target(remap_formid(raw))
+    if target:
+        return target[1]
     race_edid = TES4_RACE_FID_TO_EDID.get(raw & 0x00FFFFFF)
     if not race_edid:
         return 0

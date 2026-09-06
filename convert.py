@@ -684,6 +684,9 @@ def phase_assets(file_name: str, config: dict, output_dir: str = None,
           f"authored-normal repair: always on")
 
     print(f"[{file_name}] Converting meshes (NIFs + textures)...")
+    from asset_convert.mesh_metadata import mesh_output_state, refresh_mesh_metadata
+    mesh_output = plugin_out_root(out_dir, file_name, extract_dir) / 'meshes'
+    mesh_before = mesh_output_state(mesh_output) if not textures_only else {}
     stats = convert_meshes(
         source_file=file_name,
         extract_dir=extract_dir,
@@ -694,6 +697,8 @@ def phase_assets(file_name: str, config: dict, output_dir: str = None,
     )
     total = sum(v for v in stats.values() if isinstance(v, int))
     print(f"[{file_name}] Meshes complete ({total} items processed)")
+    failed = (stats.get('mesh_conversion', {}).get('errors', 0)
+              + stats.get('hair', {}).get('errors', 0))
 
     # Book inventory-art: bake each distinct BOOK model's textures onto the
     # vanilla Skyrim reading rigs (see asset_convert/book_inam.py); the import
@@ -701,7 +706,7 @@ def phase_assets(file_name: str, config: dict, output_dir: str = None,
     if textures_only:
         print(f"[{file_name}] Textures only: no meshes, no book art "
               f"(PGPatcher patches the meshes in the load order)")
-        return True
+        return not failed
 
     from asset_convert.book_inam import generate_book_inams
 
@@ -719,10 +724,13 @@ def phase_assets(file_name: str, config: dict, output_dir: str = None,
         output_dir=out_dir,
         skyrim_data=tes5_data or None,
         master_names=_bp.names_for(record_dir(extract_dir, file_name)),
+        mesh_subdirs=mesh_subdirs,
     )
     print(f"[{file_name}] Book INAM complete: ok={bstats['ok']} "
           f"skip={bstats['skip']} fail={bstats['fail']}")
-    return True
+    from output_layout import asset_root
+    refresh_mesh_metadata(mesh_output, asset_root(extract_dir, file_name), mesh_before)
+    return not (failed or bstats['fail'])
 
 # ===========================================================================
 # Phase 4: CONVERT SPEEDTREES
@@ -746,6 +754,10 @@ def phase_speedtrees(file_name: str, config: dict, output_dir: str = None):
         print(f"[{file_name}]   engine branches DISABLED -- using the Python "
               f"generator for every tree")
     print(f"[{file_name}] Converting SpeedTrees (SPTs)...")
+    from asset_convert.mesh_metadata import mesh_output_state, refresh_mesh_metadata
+    from output_layout import asset_root
+    mesh_output = plugin_out_root(out_dir, file_name, extract_dir) / 'meshes'
+    mesh_before = mesh_output_state(mesh_output)
     stats = convert_speedtrees(
         source_file=file_name,
         extract_dir=extract_dir,
@@ -753,6 +765,7 @@ def phase_speedtrees(file_name: str, config: dict, output_dir: str = None):
         use_engine=use_engine,
     )
     s = stats.get('spt_conversion', {})
+    refresh_mesh_metadata(mesh_output, asset_root(extract_dir, file_name), mesh_before)
     print(f"[{file_name}] SpeedTrees complete: ok={s.get('ok',0)} fail={s.get('fail',0)} skip={s.get('skip',0)}")
     return True
 
@@ -792,9 +805,13 @@ def phase_creatures(file_name: str, tes5_data: str, config: dict,
                    if plugin_out_root(out_root, m, export_root).is_dir()]
 
     print(f"[{file_name}] Converting creatures (behavior projects + meshes)...")
+    from asset_convert.mesh_metadata import mesh_output_state, refresh_mesh_metadata
+    from output_layout import assets_for
+    mesh_before = mesh_output_state(out_meshes)
     res = convert_creatures(export_subdir, out_meshes,
                             skyrim_data_path=tes5_data,
                             master_dirs=master_dirs)
+    refresh_mesh_metadata(out_meshes, assets_for(export_subdir), mesh_before)
     print(f"[{file_name}] Creatures complete "
           f"({len(res['projects'])} projects, {len(res['errors'])} errors)")
     return not res['errors']
@@ -910,7 +927,7 @@ def phase_sounds(file_name: str, config: dict, output_dir: str = None):
           f"{mstats.get('cached', 0)} cached, "
           f"{mstats.get('failed', 0)} failed, "
           f"{mstats.get('tracks', 0)} tracks)")
-    return True
+    return not (failed or mstats.get('failed', 0))
 
 
 # ===========================================================================
@@ -935,6 +952,11 @@ def phase_scripts(file_name: str, config: dict, output_dir: str = None):
     print(f"[{file_name}] Converting scripts to Papyrus...")
     try:
         stats = convert_all_scripts(export_subdir, str(script_dir))
+        from script_convert.runtime_support import deploy_runtime
+        deploy_runtime(export_subdir, script_dir.parent.parent)
+        from asset_convert.menuque import convert_menus
+        convert_menus(export_subdir, script_dir.parent.parent,
+                      find_game_path('oblivion', config))
     except StaleArtifactError as e:
         # Scripts read music_tracks.json to bind StreamMusic properties; a
         # stale one is actionable, so print the instruction rather than a
@@ -1158,16 +1180,17 @@ def phase_compile(file_name: str, config: dict, output_dir: str = None):
         if quarantine:
             print(f"  batch: {ok_count} compiled; re-checking "
                   f"{len(quarantine)} quarantined script(s) individually...")
-            for name in sorted(quarantine):
-                psc = script_src / name
-                success_f, msg = _compile_one(psc)
-                if success_f:
-                    ok_count += 1
-                else:
-                    err_count += 1
-                    all_errors.append(f"{name}: {msg}")
-                    if len(err_samples) < 10:
-                        err_samples.append(f"  {name}: {msg}")
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                names = sorted(quarantine)
+                results = pool.map(_compile_one, (script_src / name for name in names))
+                for name, (success_f, msg) in zip(names, results):
+                    if success_f:
+                        ok_count += 1
+                    else:
+                        err_count += 1
+                        all_errors.append(f"{name}: {msg}")
+                        if len(err_samples) < 10:
+                            err_samples.append(f"  {name}: {msg}")
         print(f"  Batch compile: {time.time() - t_c:.1f}s")
     else:
         # The batch could not be made to make progress — fall back to the
@@ -1216,7 +1239,7 @@ def phase_compile(file_name: str, config: dict, output_dir: str = None):
         except OSError:
             pass
     shutil.rmtree(skse_headers, ignore_errors=True)
-    return ok_count > 0
+    return err_count == 0 and ok_count == psc_count
 
 
 # The CK ships the vanilla sources in one of two loose layouts, or not at all
@@ -1407,12 +1430,12 @@ def phase_pack(file_name: str, config: dict, output_dir: str = None):
 # ===========================================================================
 
 def phase_pack_zip(file_name: str, config: dict, output_dir: str = None):
-    """Zip the converted plugin (.esm/.esl/.esp) and .bsa files for distribution.
+    """Zip plugins with current BSAs, or loose assets when packing is stale.
 
     The zip lands in output_dir/"Finished Mods"/ — with every other installable
     artefact — and is named "<file_name>.zip".
     """
-    import zipfile
+    from asset_convert.distribution_pack import write_zip
     from output_layout import finished_dir
 
     out_root = Path(output_dir) if output_dir else SCRIPT_DIR / "output"
@@ -1428,16 +1451,9 @@ def phase_pack_zip(file_name: str, config: dict, output_dir: str = None):
     # three different names for a three-plugin pack.
     zip_path = finished_dir(out_root) / f"{src_root.name}.zip"
 
-    packed = 0
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for ext in ("*.esm", "*.esl", "*.esp", "*.bsa"):
-            for src in sorted(src_root.glob(ext)):
-                zf.write(src, arcname=src.name)
-                packed += 1
-
+    packed = write_zip(src_root, zip_path)
     if packed == 0:
-        zip_path.unlink(missing_ok=True)
-        print(f"[{file_name}] No plugin/BSA files found, skipping zip pack")
+        print(f"[{file_name}] No deliverable files found, skipping zip pack")
         return False
 
     print(f"[{file_name}] Zip pack complete -> {zip_path} ({packed} files)")

@@ -100,6 +100,14 @@ def export_INFO(rec: Record) -> list:
     sctx = get_subrecord(rec, "SCTX")
     if sctx:
         lines.append(f"ResultScript={escape_value(get_string(sctx))}")
+    schr = get_subrecord(rec, "SCHR")
+    scda = get_subrecord(rec, "SCDA")
+    if sctx or schr or scda:
+        lines.append(f"ResultScript.Bytecode={scda.data.hex() if scda else ''}")
+    if schr:
+        lines.append(f"ResultScript.Header={schr.data.hex()}")
+    for i, scro in enumerate(get_all_subrecords(rec, "SCRO")):
+        emit_formid(lines, f"SCRO[{i}]", scro)
 
     return lines
 

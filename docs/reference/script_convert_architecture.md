@@ -429,7 +429,7 @@ and stays a violation.
 ### A citation must name an anchor
 
 A citation naming only a `.md` path, with no `#anchor`, is a violation in a
-function or class docstring. `dead-citations` already checks that an anchor
+module, function, or class docstring. `dead-citations` already checks that an anchor
 *resolves*; `anchorless-citations` requires that one is *present*.
 
 A bare path points at a whole file. `tes5_import_weather.md` is 2,346 lines, so
@@ -438,12 +438,8 @@ citation at all. This rule exists because a bulk docstring trim once replaced 25
 contracts with a one-line summary plus a bare path, and the loss was invisible
 at review time.
 
-Module docstrings are exempt. A module-wide `See:` genuinely means "this whole
-document", and forcing an anchor there would only invent a fake one.
-
-**Measured debt: 1 site.** Anchored citations already outnumber bare ones 166
-to 1 in function and class docstrings, so this lands as an error with no
-migration.
+Module docstrings follow the same requirement: cite the section that describes
+the module's responsibility.
 
 Not adopted: a **minimum docstring length** before a citation is allowed. It
 does not separate the cases. The broken docstring from that incident was ~62
@@ -459,6 +455,9 @@ cheapest remedy is padding — the same gameable-metric failure that
 
 `_helper()` may only be used in the file that defines it. Importing an
 underscore-prefixed name from another module is `private-imports`.
+Tests follow this rule too. Imports inside functions or classes separately
+violate `local-imports`; move them to module scope and separate responsibilities
+when dependencies would otherwise cycle.
 
 The leading underscore is the author's statement that a name is not an
 interface: it can be renamed, resplit or deleted without looking outside the
@@ -552,8 +551,11 @@ possibly truncated code on disk. It scores a temp copy instead.
 
 Bash cannot be gated before it runs, because a shell command's effect is not
 predictable. `tools/validate/safe_run.py` is the one allowed entry point: it
-hashes tracked `.py` files, runs the command with the streams inherited,
-re-hashes, and gates whatever changed.
+snapshots every first-party `.py` file's bytes, runs the command with inherited
+streams, and applies the whole-file gate to changed and newly created files.
+It restores rejected files from the snapshot, deletes rejected new files, and
+retains valid changes. Exit 2 names each restored path and states that the
+rule-breaking write did NOT stand. Existing uncommitted bytes are preserved.
 
 **The routing rule lives in the HOOK, not in `permissions`.** Rules evaluate
 deny, then ask, then allow, and the first match wins — specificity never

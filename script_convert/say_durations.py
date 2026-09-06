@@ -50,7 +50,7 @@ _VOICE_NAME_RE = re.compile(
 CACHE_NAME = 'voice_durations.json'
 
 
-def mp3_duration(path: str) -> float:
+def mp3_duration(path: str, *, single_frame: bool = False) -> float:
     """Duration in seconds by summing MPEG frame durations. 0.0 if unreadable.
 
     Frame-walking rather than trusting a header: Oblivion's files are CBR but
@@ -67,6 +67,8 @@ def mp3_duration(path: str) -> float:
         size = ((data[6] & 0x7F) << 21 | (data[7] & 0x7F) << 14 |
                 (data[8] & 0x7F) << 7 | (data[9] & 0x7F))
         p = 10 + size
+    first_frame = p
+    frames = 0
     total = 0.0
     n = len(data)
     while p + 4 <= n:
@@ -99,9 +101,12 @@ def mp3_duration(path: str) -> float:
         if frame_len <= 0:
             p += 1
             continue
+        if single_frame and (p != first_frame or p + frame_len != n or frames):
+            return 0.0
+        frames += 1
         total += spf / sr
         p += frame_len
-    return total
+    return total if not single_frame or frames == 1 else 0.0
 
 
 def scan_voice_durations(export_dir: str, use_cache: bool = True,

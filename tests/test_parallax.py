@@ -985,6 +985,17 @@ class TestDiffuseAlphaStrip:
         assert converted == 0 and skipped == 1
         assert (tmp_path / 'x.dds').read_bytes() == once
 
+    def test_selected_diffuse_checks_its_height_sibling(self, tmp_path):
+        dxt5 = _dxt5_with_color_blocks(4, 4, [self.FOUR_COLOUR])
+        for name in ('selected', 'unrelated'):
+            (tmp_path / (name + '.dds')).write_bytes(dxt5)
+            (tmp_path / (name + '_p.dds')).write_bytes(b'height')
+        selected = tmp_path / 'selected.dds'
+        converted, _, _, _ = parallax.strip_diffuse_alpha(tmp_path, paths=[selected])
+        assert converted == 1
+        assert selected.read_bytes()[84:88] == b'DXT1'
+        assert (tmp_path / 'unrelated.dds').read_bytes() == dxt5
+
 
 # ---------------------------------------------------------------------------
 # --textures-only: PGPatcher patches the meshes across the player's whole load

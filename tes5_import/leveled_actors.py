@@ -140,11 +140,8 @@ def _shell_race(lvlc_rec: dict, crea_by_fid: dict, npc_by_fid: dict,
 
         npc = npc_by_fid.get(fid)
         if npc is not None:
-            from .constants import DEFAULT_RACE, RACE_MAP
-            from .skyrim_overrides import TES4_RACE_FID_TO_EDID
-            edid = TES4_RACE_FID_TO_EDID.get(
-                get_formid(npc, 'RNAM.Race') & 0x00FFFFFF, 'Imperial')
-            return RACE_MAP.get(edid, DEFAULT_RACE)
+            from .record_types.actors import _resolve_npc_race
+            return _resolve_npc_race(npc)[1]
 
         child = lvlc_by_fid.get(fid)
         if child is not None:

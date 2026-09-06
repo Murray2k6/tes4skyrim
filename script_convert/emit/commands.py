@@ -125,9 +125,11 @@ class _Args(dict):
     arguments it ignores.
     """
 
-    def __init__(self, conv, row, args_str, extends):
+    def __init__(self, conv, row, args_str, extends, func_name):
         dict.__init__(self)
         self._c, self._r, self._a, self._e = conv, row, args_str, extends
+        from script_convert.commands import Call
+        self._call = Call(conv, None, func_name, extends, conv._arg_nodes)
 
     def __missing__(self, key):
         """Render one `{...}` placeholder; see the module docstring for each.
@@ -161,11 +163,11 @@ class _Args(dict):
         if kind == 's':
             return self._c.arg_src(n, default)
         if kind == 'p':
-            return _safe_property_name(self._c.arg_src(n, default))
+            return self._call.arg(n, default)
         if kind == 'b':
             return ('true' if self._c.arg_src(n, default).lower()
                     in ('1', 'true') else 'false')
-        arg = self._c.arg_expr(n, self._e, default)
+        arg = self._call.arg(n, default)
         if kind == 'i':
             # Cast only a Float: the branches this replaced left an Int alone.
             return (self._c._cast(arg, 'Int')
@@ -191,9 +193,9 @@ def emit_row(conv, row, ref_name, func_name, args_str, extends):
         conv.sc.property_refs[row.self_type[0]] = row.self_type[1]
     for n, ptype in row.types.items():
         name = conv.arg_src(n)
-        if name:
+        if name and re.fullmatch(r'[A-Za-z_]\w*', name) and not conv.type_of(name):
             conv.sc.property_refs[_safe_property_name(name)] = ptype
-    args = _Args(conv, row, args_str, extends)
+    args = _Args(conv, row, args_str, extends, func_name)
     if '{ref}' in row.emit:
         args['ref'] = _ref(conv, row, ref_name, extends)
     return row.emit.format_map(args)

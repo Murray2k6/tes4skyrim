@@ -123,6 +123,9 @@ _IGNORED_CHANGES = frozenset({
     'SLSD[]',
     'SCVR[]',
     'ResultScript',         # INFO result script; re-emitted as a VMAD fragment
+    'ResultScript.Bytecode',
+    'ResultScript.Header',
+    'ResultScript.SourceText',  # uncompiled editor draft, never run by TES4
     'ParentDIAL',           # grouping metadata, not a field on the record
     'ParentCELL',
     'ParentWRLD',
@@ -246,6 +249,16 @@ def _build_xcll(rec):
     return build_cell_xcll(rec)
 
 
+def _build_cell_data(rec):
+    from .record_types.world import build_cell_data
+    return build_cell_data(rec)
+
+
+def _build_cell_grid(rec):
+    from .record_types.world import build_cell_grid
+    return build_cell_grid(rec)
+
+
 def _build_xclw(rec):
     from .record_types.world import build_cell_xclw
     return build_cell_xclw(rec)
@@ -340,6 +353,8 @@ _RB_CREA_ACBS = _Rebuild(b'ACBS', _build_crea_acbs)
 _RB_CREA_NAM6 = _Rebuild(b'NAM6', _build_crea_nam6, (('after', b'NAM5'),))
 _RB_BOD2 = _Rebuild(b'BOD2', _build_bod2)
 _RB_XCLL = _Rebuild(b'XCLL', _build_xcll, (('before', b'LTMP'),))
+_RB_CELL_DATA = _Rebuild(b'DATA', _build_cell_data, (('before', b'XCLC'), ('before', b'LTMP')))
+_RB_CELL_GRID = _Rebuild(b'XCLC', _build_cell_grid, (('after', b'DATA'),))
 _RB_XCLW = _Rebuild(b'XCLW', _build_xclw,
                     (('after', b'XOWN'), ('after', b'LTMP')))
 _RB_XOWN = _Rebuild(b'XOWN', _build_xown, (('after', b'LTMP'),))
@@ -427,6 +442,8 @@ _reg('CREA', 'BNAM.BaseScale', _RB_CREA_NAM6)
 _reg('ARMO', ('BMDT.GeneralFlags', 'BMDT.BipedFlags'), _RB_BOD2)
 _reg('CLOT', ('BMDT.GeneralFlags', 'BMDT.BipedFlags'), _RB_BOD2)
 _reg('CELL', _XCLL_KEYS, _RB_XCLL)
+_reg('CELL', 'DATA.Flags', _RB_CELL_DATA)
+_reg('CELL', ('XCLC.X', 'XCLC.Y', 'XCLC.LandFlags'), _RB_CELL_GRID)
 _reg('CELL', 'XCLW.WaterHeight', _RB_XCLW)
 _reg('CELL', 'XOWN.Owner', _RB_XOWN)
 _reg('REFR', 'XOWN.Owner', _RB_REFR_XOWN)

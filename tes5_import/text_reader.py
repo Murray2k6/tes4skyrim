@@ -79,6 +79,14 @@ def parse_record_block(lines: list) -> dict:
         else:
             record[key] = value
 
+    # Oblivion's INFO result loader (0x531290) consumes SCHR/SCDA/SCRO,
+    # never SCTX. An uncompiled editor draft must not become executable in
+    # Skyrim. Keep the draft available for inspection, outside script scans.
+    if (record.get('Signature') == 'INFO'
+            and record.get('ResultScript.Bytecode') == ''):
+        source = record.pop('ResultScript', '')
+        if source:
+            record['ResultScript.SourceText'] = source
     return record
 
 

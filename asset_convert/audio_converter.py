@@ -34,6 +34,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -176,7 +177,7 @@ def find_lipgenerator(search_dir: 'str | None' = None) -> 'str | None':
     except ImportError:
         pass
     for cand in candidates:
-        if cand.is_file():
+        if cand.is_file() and (cand.parent / 'FonixData.cdf').is_file():
             return str(cand)
     return None
 
@@ -249,19 +250,46 @@ def generate_lip(lipgenerator: str, wav_path, text: str,
     if not clean:
         return None
     try:
-        r = subprocess.run(
-            windows_cmd([lipgenerator, wav_path.name, clean]),
-            cwd=str(wav_path.parent),
-            capture_output=True, timeout=timeout,
-            **POPEN_FLAGS,
-        )
+        # Fonix rejects very short recordings (including authored silent
+        # placeholders). Pad only its analysis input; xWMA still encodes the
+        # original WAV, preserving the voice line's duration and samples.
+        with wave.open(str(wav_path), 'rb') as wav:
+            minimum = (wav.getframerate() + 1) // 2
+            if wav.getnframes() < minimum:
+                params = wav.getparams()
+                frames = wav.readframes(wav.getnframes())
+                frames += b'\0' * ((minimum - wav.getnframes())
+                                  * wav.getnchannels() * wav.getsampwidth())
+                wav_path = wav_path.with_name('lip_analysis.wav')
+                with wave.open(str(wav_path), 'wb') as analysis:
+                    analysis.setparams(params)
+                    analysis.writeframes(frames)
+        for attempt in range(2):
+            try:
+                r = subprocess.run(
+                    windows_cmd([lipgenerator, wav_path.name, clean]),
+                    cwd=str(wav_path.parent),
+                    capture_output=True, timeout=timeout,
+                    **POPEN_FLAGS,
+                )
+                break
+            except subprocess.TimeoutExpired:
+                if attempt:
+                    raise
+                print('    LipGenerator timed out; retrying the same input once', flush=True)
         if r.returncode != 0:
+            print(f'    LipGenerator exited {r.returncode}: '
+                  f'{(r.stdout + r.stderr).decode("utf-8", errors="replace").strip()}',
+                  flush=True)
             return None
         lip_path = wav_path.with_suffix('.lip')
         if lip_path.is_file() and lip_path.stat().st_size > 0:
             return lip_path.read_bytes()
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+        print(f'    LipGenerator produced no lip track: '
+              f'{(r.stdout + r.stderr).decode("utf-8", errors="replace").strip()}',
+              flush=True)
+    except (subprocess.TimeoutExpired, OSError, wave.Error) as exc:
+        print(f'    LipGenerator failed: {exc}', flush=True)
     return None
 
 
@@ -277,7 +305,7 @@ def pack_fuz(lip_bytes: bytes, audio_bytes: bytes) -> bytes:
 def convert_file_to_xwm(src_path, dst_path, ffmpeg: str,
                          xwmaencode: 'str | None' = None,
                          lipgenerator: 'str | None' = None,
-                         lip_text: 'str | None' = None) -> bool:
+                         lip_text: 'str | None' = None, lip_pool=None) -> bool:
     """Convert a single audio file to XWM — or, with a transcript, to FUZ.
 
     Stages (xWMAEncode required; there is no ASF fallback):
@@ -285,8 +313,7 @@ def convert_file_to_xwm(src_path, dst_path, ffmpeg: str,
       2. LipGenerator: WAV + lip_text → .lip  (only when dst is .fuz)
       3. xWMAEncode: WAV → XWM
       4. dst .fuz: FUZE container (lip + xwm); dst .xwm: the xwm itself.
-         If lip generation fails, the audio is preserved as .xwm next to
-         the intended .fuz.
+         A failed lip generation fails the requested FUZ conversion.
 
     Args:
         src_path:      Source audio (.mp3/.wav or any ffmpeg-readable format).
@@ -324,13 +351,36 @@ def convert_file_to_xwm(src_path, dst_path, ffmpeg: str,
         ]
         r1 = subprocess.run(cmd_wav, capture_output=True, timeout=60,
                             **POPEN_FLAGS)
+        if r1.returncode != 0 and src_path.suffix.lower() == '.mp3':
+            from script_convert.say_durations import mp3_duration
+            duration = mp3_duration(str(src_path), single_frame=True)
+            if duration:
+                # ffmpeg's MP3 demuxer needs two consecutive frames. Supply
+                # a duplicate for probing, then decode only the original frame.
+                probe_path = tmp_dir / 'probe.mp3'
+                probe_path.write_bytes(src_path.read_bytes() * 2)
+                retry = [ffmpeg, '-y', '-i', str(probe_path), '-t', str(duration),
+                         '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le', str(wav_path)]
+                r1 = subprocess.run(retry, capture_output=True, timeout=60, **POPEN_FLAGS)
         if r1.returncode != 0 or not wav_path.is_file():
+            print(f'    ERROR: ffmpeg failed on {src_path}: '
+                  f'{r1.stderr.decode("utf-8", errors="replace").strip()}', flush=True)
             return False
 
         # Stage 2: lip sync track (only meaningful for .fuz destinations)
         lip_bytes = None
-        if dst_path.suffix.lower() == '.fuz' and lipgenerator and lip_text:
-            lip_bytes = generate_lip(lipgenerator, wav_path, lip_text)
+        if dst_path.suffix.lower() == '.fuz':
+            if not lipgenerator or not lip_text:
+                return False
+            lip_exe = lip_pool.get() if lip_pool is not None else lipgenerator
+            try:
+                lip_bytes = generate_lip(lip_exe, wav_path, lip_text)
+            finally:
+                if lip_pool is not None:
+                    lip_pool.put(lip_exe)
+            if not lip_bytes:
+                print(f'    ERROR: lip generation failed on {src_path}', flush=True)
+                return False
 
         # Stage 3: xWMAEncode → XWM
         # xWMAEncode parses its own argv and treats a leading '/' as a switch
@@ -346,25 +396,23 @@ def convert_file_to_xwm(src_path, dst_path, ffmpeg: str,
                             **POPEN_FLAGS)
         if (r2.returncode != 0 or not xwm_path.is_file()
                 or xwm_path.stat().st_size == 0):
+            print(f'    ERROR: xWMAEncode failed on {src_path}: '
+                  f'{(r2.stdout + r2.stderr).decode("utf-8", errors="replace").strip()}',
+                  flush=True)
             return False
 
         # Stage 4: write destination
         if dst_path.suffix.lower() == '.fuz':
-            if lip_bytes:
-                dst_path.write_bytes(pack_fuz(lip_bytes, xwm_path.read_bytes()))
-                # A pre-lip-sync run may have left the same line as .xwm;
-                # remove it so the engine unambiguously picks the .fuz.
-                stale = dst_path.with_suffix('.xwm')
-                if stale.exists():
-                    stale.unlink()
-            else:
-                # No lip track — keep the audio playable as a bare .xwm
-                dst_path = dst_path.with_suffix('.xwm')
-                shutil.copyfile(xwm_path, dst_path)
+            dst_path.write_bytes(pack_fuz(lip_bytes, xwm_path.read_bytes()))
+            # Remove an earlier audio-only fallback after the FUZ succeeds.
+            stale = dst_path.with_suffix('.xwm')
+            if stale.exists():
+                stale.unlink()
         else:
             shutil.copyfile(xwm_path, dst_path)
         return dst_path.is_file() and dst_path.stat().st_size > 0
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f'    ERROR: audio conversion failed on {src_path}: {exc}', flush=True)
         return False
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -799,18 +847,18 @@ def organize_voice_files(
         if xwmaencode:
             print('  ffmpeg + xWMAEncode found -- converting MP3 -> WAV -> XWM (proper xWMA)')
         else:
-            print('  WARNING: xWMAEncode.exe not found -- falling back to ffmpeg ASF container')
-            print('           Voice audio may not play in Skyrim! See README for xWMAEncode setup.')
+            raise RuntimeError('xWMAEncode.exe is required for Skyrim voice audio')
         if lip_text:
             lipgenerator = lipgenerator_path or find_lipgenerator()
             if lipgenerator:
                 print(f'  LipGenerator found -- generating .lip sync tracks, '
                       f'packing voice as .fuz ({len(lip_text)} transcripts)')
             else:
-                print('  WARNING: LipGenerator.exe not found (SSE Tools/LipGen) '
-                      '-- voice converts without lip sync (.xwm only)')
+                raise RuntimeError('LipGenerator.exe and its sibling FonixData.cdf are required '
+                                   'for dialogue lip sync. Place both in external/lipgen/.')
 
-    stats = {'organized': 0, 'skipped': 0, 'no_match': 0, 'errors': 0}
+    stats = {'organized': 0, 'skipped': 0, 'no_match': 0, 'errors': 0,
+             'empty_source': 0}
     unmapped_races: set = set()
 
     # The plugin's own races, keyed by the display name that also names the
@@ -883,6 +931,11 @@ def organize_voice_files(
                     info_fid_hex     = m.group(2)    # original 8-hex FormID
                     resp_idx         = m.group(3)   # 1-based index from source filename
                     src_ext          = m.group(4).lower()
+                    if audio_file.stat().st_size == 0:
+                        stats['empty_source'] += 1
+                        print(f'    Empty source recording (no audio to convert): {audio_file}',
+                              flush=True)
+                        continue
 
                     # Skyrim voice filename: <prefix>_<InfoFormID>_<RespNum>
                     # where prefix comes from the CONVERTED records (voicemap,
@@ -969,16 +1022,10 @@ def organize_voice_files(
         src_path, dst_path, text = job
         try:
             if ffmpeg and dst_path.suffix in ('.xwm', '.fuz'):
-                lip_exe = lipgenerator
-                if text and lip_pool is not None:
-                    lip_exe = lip_pool.get()
-                try:
-                    return 'ok' if convert_file_to_xwm(
-                        src_path, dst_path, ffmpeg, xwmaencode=xwmaencode,
-                        lipgenerator=lip_exe, lip_text=text) else 'error'
-                finally:
-                    if text and lip_pool is not None:
-                        lip_pool.put(lip_exe)
+                return 'ok' if convert_file_to_xwm(
+                    src_path, dst_path, ffmpeg, xwmaencode=xwmaencode,
+                    lipgenerator=lipgenerator, lip_text=text,
+                    lip_pool=lip_pool) else 'error'
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             if copy:
                 shutil.copy2(src_path, dst_path)
@@ -991,7 +1038,7 @@ def organize_voice_files(
     try:
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {pool.submit(_process_one, job): job for job in conversion_jobs}
-            for fut in as_completed(futures):
+            for completed, fut in enumerate(as_completed(futures), 1):
                 result = fut.result()
                 if result == 'ok':
                     stats['organized'] += 1
@@ -999,11 +1046,13 @@ def organize_voice_files(
                     stats['errors'] += 1
                     if stats['errors'] <= 5:
                         src = futures[fut][0]
-                        print(f'    ERROR: ffmpeg failed on {src.name}')
+                        print(f'    ERROR: audio/lip conversion failed on {src.name}', flush=True)
                 elif result.startswith('exception:'):
                     stats['errors'] += 1
-                    if stats['errors'] <= 5:
-                        print(f'    ERROR: {result[10:]}')
+                    print(f'    ERROR: {futures[fut][0]}: {result[10:]}', flush=True)
+                if completed % 250 == 0 or completed == len(futures):
+                    print(f'    Voice progress: {completed}/{len(futures)}, '
+                          f'{stats["errors"]} errors', flush=True)
     finally:
         if lip_pool_dir is not None:
             shutil.rmtree(lip_pool_dir, ignore_errors=True)

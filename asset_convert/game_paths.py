@@ -17,8 +17,29 @@ grass and _far.nif code can share one implementation without importing a heavy
 sibling module for a three-line path helper.
 """
 from pathlib import Path
+from fnmatch import fnmatchcase
 
-__all__ = ["win_join"]
+__all__ = ["win_join", "matches_path_scope", "scoped_files"]
+
+
+def matches_path_scope(relative_path, selections):
+    """Match complete path components against optional folder/file prefixes."""
+    if selections is None:
+        return True
+    parts = tuple(p for p in str(relative_path).replace('\\', '/').lower().split('/') if p)
+    for selected in selections:
+        prefix = tuple(p for p in str(selected).replace('\\', '/').lower().split('/') if p)
+        if prefix and parts[:len(prefix)] == prefix:
+            return True
+    return False
+
+
+def scoped_files(root, pattern, paths=None):
+    """Select files under a root, without walking the tree for explicit paths."""
+    root = Path(root)
+    candidates = root.rglob('*') if paths is None else map(Path, paths)
+    return sorted(p for p in candidates if p.is_relative_to(root)
+                  and fnmatchcase(p.name.lower(), pattern.lower()) and p.is_file())
 
 
 def win_join(root, rel: str) -> Path:

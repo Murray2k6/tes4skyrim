@@ -24,7 +24,7 @@ from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
 
 class Exe:
     def __init__(self, path):
-        self.pe = pefile.PE(path)
+        self.pe = pefile.PE(path, fast_load=True)
         self.base = self.pe.OPTIONAL_HEADER.ImageBase
         self.img = self.pe.get_memory_mapped_image()   # indexed by RVA
         self.is64 = self.pe.FILE_HEADER.Machine == 0x8664

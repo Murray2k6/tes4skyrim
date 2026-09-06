@@ -15,11 +15,12 @@ Per-file rules are an ABSOLUTE gate with no baseline: a single file either has
 the property or it does not.  Only package AGGREGATES get a baseline, because
 only a trend is meaningful for those.
 
-See: docs/reference/script_convert_architecture.md
+See: docs/reference/script_convert_architecture.md#what-the-gate-must-see
 """
 
 import argparse
 import ast
+import difflib
 import json
 import os
 import re
@@ -80,6 +81,7 @@ EXPLAIN = {
     'dead-citations': 'a `docs/` path or anchor that does not exist',
     'anchorless-citations': 'a docstring citing a `docs/` file with no #anchor',
     'private-imports': "another module's `_name`, which is not an interface",
+    'local-imports': 'an import inside a function or class',
     'broken-syntax': 'a file Python cannot parse',
 }
 
@@ -128,6 +130,8 @@ REMEDY = {
     'private-imports':
         'the leading underscore says this is not an interface -- promote the '
         'name (drop the underscore) or call a public function that uses it',
+    'local-imports':
+        'move imports to module scope; resolve dependency cycles by separating responsibilities',
     'broken-syntax':
         'fix the syntax error -- an unparsable file scores NO other rule, so '
         'this passing is indistinguishable from a clean file',
@@ -293,12 +297,12 @@ def rule_sites(path: Path, text: str = None, with_tools: bool = True,
         'dead-citations': _citation_sites(path, text),
         'anchorless-citations': D.anchorless_citations(path, tree),
         'private-imports': D.private_imports(path, tree),
+        'local-imports': D.local_imports(path, tree),
         'broken-syntax': _syntax_sites(path, text),
     }
     checks.update(D.structural_sites(path, text, tree))
     if _is_test(path):
         checks.pop('oversized-files', None)
-        checks.pop('private-imports', None)
     if with_tools:
         checks['dead-imports'] = _ruff_sites(path)
     return {k: v for k, v in checks.items() if v}
@@ -446,7 +450,6 @@ def _moved_lines(donor: Path, text: str) -> set:
     mover for changes the donor already carried.
     See: docs/reference/script_convert_architecture.md#a-rename-is-not-an-edit
     """
-    import difflib
     now = donor.read_text(encoding='utf-8', errors='replace')
     return _hunk_lines('\n'.join(difflib.unified_diff(
         now.splitlines(), text.splitlines(), n=0, lineterm='')))
@@ -460,7 +463,6 @@ def _touched_lines(path: Path, candidate: str = None):
     never opened.  `candidate` is text not yet on disk, diffed in memory so an
     edit is scored BEFORE it is applied.
     """
-    import difflib
     tracked, _ = _git(path, 'ls-files', '--error-unmatch', '{}')
     if not tracked:
         return None

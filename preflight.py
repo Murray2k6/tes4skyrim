@@ -63,8 +63,8 @@ def python_version_warning() -> 'str | None':
     Deliberately a WARNING, not a hard requirement: the pipeline does run on
     another 3.x, but two things stop being free.
 
-      * The committed navmesh extension carries a CPython ABI tag in its
-        filename, so it is not importable here and has to be rebuilt -- which
+      * The navmesh extension carries a CPython ABI tag in its filename. If
+        this interpreter has no matching build, it has to be rebuilt -- which
         needs a C++ toolchain most machines running a conversion do not have.
         That is the part people get stuck on, so it is stated up front rather
         than left to the ImportError at the start of the Import phase.
@@ -78,6 +78,13 @@ def python_version_warning() -> 'str | None':
     want = '.'.join(str(n) for n in SUPPORTED_PYTHON)
     got = '.'.join(str(n) for n in have)
     older = have < SUPPORTED_PYTHON
+    warning = (
+        f'Running on Python {got}; this project is built and validated against '
+        f'Python {want}{"+" if older else ""}.\n'
+        f'You may run into issues.\n'
+    )
+    if _have_native('_navgrow_native'):
+        return warning.rstrip()
     suffix = sysconfig.get_config_var('EXT_SUFFIX') or '.pyd'
     if sys.platform == 'win32':
         toolchain_note = (
@@ -85,10 +92,7 @@ def python_version_warning() -> 'str | None':
             '  (a full Visual Studio install is not required).\n')
     else:
         toolchain_note = '  That needs g++ or clang++ on PATH.\n'
-    return (
-        f'Running on Python {got}; this project is built and validated against '
-        f'Python {want}{"+" if older else ""}.\n'
-        f'You may run into issues.\n'
+    return (warning +
         f'\n'
         f'  The prebuilt navmesh extension in native/dist/ is tagged for the\n'
         f'  interpreter that built it, so it will not load here and must be\n'

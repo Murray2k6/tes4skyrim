@@ -11,6 +11,7 @@ Usage:
     python tools/script/script_command_census.py export/Nehrim.esm --verdict
 """
 import argparse
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -99,6 +100,41 @@ def command_census(export_dir: Path):
     return per_command, scripts_with, n_scripts
 
 
+def warning_census(root, report=None, top=60, plugins=None):
+    """Read generated source directories only; retain every warning location."""
+    sources = [(root.name, root)] if root.name.lower() == 'source' else [
+        (plugin.name, plugin / 'scripts' / 'source')
+        for plugin in sorted(root.iterdir()) if plugin.is_dir()]
+    findings = []
+    totals = Counter()
+    for plugin, source in sources:
+        if plugins and plugin.lower() not in {name.lower() for name in plugins}:
+            continue
+        if not source.is_dir():
+            continue
+        count = 0
+        files = list(source.glob('*.psc'))
+        for path in files:
+            for line_number, line in enumerate(path.read_text(
+                    encoding='utf-8-sig', errors='replace').splitlines(), 1):
+                markers = list(re.finditer(r';\s*(TODO|NE)\b:?\s*', line))
+                for index, match in enumerate(markers):
+                    end = markers[index + 1].start() if index + 1 < len(markers) else len(line)
+                    message = line[match.end():end].strip()
+                    family = message.split()[0].lstrip('(').rsplit('.', 1)[-1].lower() if message else '(empty)'
+                    totals[family] += 1
+                    count += 1
+                    findings.append(dict(plugin=plugin, file=str(path), line=line_number,
+                                         kind=match[1], family=family, message=message))
+        print(f'{plugin}: {count} warnings in {len(files)} source files', flush=True)
+    for family, count in totals.most_common(top):
+        print(f'{family:40} {count:6}', flush=True)
+    if report:
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(findings, indent=2), encoding='utf-8')
+    return len(findings)
+
+
 # --- SKSE unlock verdict table (command family -> verdict) -------------------
 # Keys are matched as: exact lowercase, or prefix if ending in '*'.
 VERDICT = {
@@ -151,7 +187,15 @@ def main():
     ap.add_argument('--grep', nargs='*', help='only show commands matching these prefixes')
     ap.add_argument('--verdict', action='store_true', help='bucket by SKSE unlock verdict')
     ap.add_argument('--top', type=int, default=60)
+    ap.add_argument('--warnings', action='store_true',
+                    help='scan generated output/plugin/scripts/source directories instead')
+    ap.add_argument('--json', type=Path, help='write every warning with its source location')
+    ap.add_argument('--plugins', nargs='+', help='only these plugin folders in warning mode')
     args = ap.parse_args()
+
+    if args.warnings:
+        warning_census(args.export_dir, args.json, args.top, args.plugins)
+        return
 
     per_cmd, scripts_with, n_scripts = command_census(args.export_dir)
     print(f'# {n_scripts} script bodies scanned in {args.export_dir}\n')

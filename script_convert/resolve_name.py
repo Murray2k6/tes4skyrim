@@ -17,6 +17,7 @@ Steps 2 and 3 are data (`BARE_READINGS`, `BARE_COMMANDS`); only step 4 needs
 the graph.
 """
 
+import json
 import re
 
 from script_convert.constants import (
@@ -29,12 +30,11 @@ from script_convert.resolve import _digit_stripped_formid
 
 #: A raw FormID operand: TES4 scripts name a form by id as readily as by
 #: EditorID (`additem 0000000f 500` is how Morrowind_ob hands out gold).  The
-#: leading load-order zeroes are trimmed as often as not, so 6-8 digits are
-#: accepted and zero-padded; 6 is the floor because that is a full 24-bit
-#: object index.  A pure-DECIMAL run is an ordinary literal, so at least one
+#: leading zeroes may all be trimmed (`RemoveItem f cost`). A pure-DECIMAL
+#: run is an ordinary literal, so at least one
 #: A-F digit or a leading zero is required -- which every real FormID here has
 #: and no decimal literal in these scripts does.
-_FORMID_RE = re.compile(r'[0-9A-Fa-f]{6,8}')
+_FORMID_RE = re.compile(r'[0-9A-Fa-f]{1,8}')
 
 #: Bare names whose reading NEVER depends on the script.  Each was an `if low
 #: ==` arm returning one constant expression.
@@ -42,7 +42,6 @@ BARE_READINGS = {
     'isxbox': 'False',
     'getrandompercent': 'Utility.RandomInt(0, 99)',
     'getrandpercent': 'Utility.RandomInt(0, 99)',
-    'getdisposition': '50',
     # Only the ARGUMENT-LESS spelling lands here, and with no target named
     # there is nothing to ask IsDetectedBy about.  The one-argument form --
     # which is what all 56 sites in the plugin use -- has its own row.
@@ -71,6 +70,8 @@ BARE_INERT = frozenset({
 #: argument-bearing path.  Without routing, each survives into the output as an
 #: undefined identifier -- a hard compile error that fails the whole script.
 BARE_COMMANDS = frozenset({
+    'getobseversion', 'getobserevision', 'getcurrentweatherid', 'getcurrentclimateid',
+    'getactivemenumode', 'getactivemenuselection', 'isbartermenuactive',
     'isanimplaying', 'getiscreature', 'iscreature', 'hasvampirefed',
     'isspelltarget', 'isguard', 'getnextref', 'isowner', 'getbaseobject',
     'isonground', 'isthirdperson', 'isplayerinjail', 'getpcinfamy',
@@ -107,6 +108,15 @@ def resolve(conv, expr: str, extends: str) -> str:
     # Game.GetPlayer() produced the un-assignable `Game.GetPlayer() = 1`.
     if low in sc.local_vars:
         return sc.var_renames.get(low, expr)
+
+    fid = conv.xref.edid_to_formid.get(low, '') if conv.xref else ''
+    if fid and conv.xref.record_type.get(fid) == 'GLOB':
+        return _record(conv, expr, low)
+
+    from script_convert.commands import BARE_REGISTRY
+    if low in BARE_REGISTRY:
+        from script_convert.emit import dispatch as _dispatch
+        return _dispatch.emit_command(conv, None, expr, extends)
 
     fixed = _fixed_reading(conv, low, extends)
     if fixed is not None:
@@ -203,25 +213,10 @@ def _fixed_reading(conv, low: str, extends: str):
     if low == 'reset':
         return f'{_self_ref(extends, topic="akSpeakerRef")}.Reset()'
     if low == 'getbuttonpressed':
-        # A script that shows a button MessageBox of its own reads the clicked
-        # index back through the consume-on-read helper (TES4 returns it once,
-        # then -1).  A script that never shows one is polling a box some OTHER
-        # script displayed -- cross-script GetButtonPressed was global in TES4
-        # -- and keeps the dead -1 rather than being miswired to its own
-        # (nonexistent) state.
-        if conv.message_menus.get((conv.sc.edid or '').lower()):
-            conv.sc.uses_msg_buttons = True
-            return 'TES4_TakeMsgButton()'
-        return '-1'
+        return 'TES4Runtime.TakeMessageButton()'
     if low == 'getcontainer':
-        # Bare GetContainer means "the container I am in".  Inside an
-        # OnAdd block the new container is the exact authored answer; OnDrop
-        # runs after removal and therefore has none. Inside equip/unequip the
-        # container is the actor the event hands us.
-        # A COMPARISON against it is answered on the BinOp before this operand
-        # is emitted, so reaching here is a bare read.  Papyrus cannot walk
-        # from an item to its container at all, so the honest value is None;
-        # a placeholder only moved the failure to the compiler.
+        # Object scripts retain the exact owner delivered by container events.
+        # User functions may instead be called on an OBSE inventory proxy.
         if conv.sc.current_block_type == 'onadd':
             return 'akNewContainer'
         if conv.sc.current_block_type == 'ondrop':
@@ -229,8 +224,10 @@ def _fixed_reading(conv, low: str, extends: str):
         actor = conv._current_event_actor_param()
         if actor:
             return actor
-        return conv.note('GetContainer has no Papyrus equivalent',
-                         value='None')
+        if extends == 'ObjectReference':
+            conv.sc.uses_dropme = True
+            return 'TES4_Container'
+        return f'TES4Runtime.GetInventoryContainer({_self_ref(extends)})'
     return None
 
 
@@ -240,6 +237,8 @@ def _self_ref(extends: str, topic: str = 'Self') -> str:
         return 'GetTargetActor()'
     if extends == 'TopicInfo':
         return topic
+    if extends == 'TES4Function':
+        return 'TES4_Caller'
     return 'Self'
 
 
@@ -273,6 +272,8 @@ def _quoted(conv, inner: str, extends: str) -> str:
     `:`, which is not even scannable and took every script referencing
     `HMSfromFloat24h` down with it.
     """
+    if conv.sc.expected_type == 'String':
+        return json.dumps(inner, ensure_ascii=False)
     low = inner.lower()
     # A LOCAL VARIABLE may be quoted too: NQ15Turret01SCRIPT declares
     # `ref TowerTargetRef` and then writes `GetDistance "TowerTargetRef"`.
@@ -283,7 +284,11 @@ def _quoted(conv, inner: str, extends: str) -> str:
     if low in ('player', 'playerref'):
         return 'Game.GetPlayer()'
     resolved = _record(conv, inner, low)
-    return resolved if resolved is not None else '"%s"' % inner
+    if resolved is None and conv._property_type_ci(_safe_property_name(inner)):
+        resolved = _safe_property_name(inner)
+    # TES4 treats backslashes literally; Papyrus interprets escape sequences.
+    # In particular a trailing directory separator must not escape the quote.
+    return resolved if resolved is not None else '"%s"' % inner.replace('\\', '\\\\')
 
 
 def _record(conv, expr: str, low: str):
@@ -292,23 +297,21 @@ def _record(conv, expr: str, low: str):
     if xref is None:
         return None
 
-    if _FORMID_RE.fullmatch(expr) and (not expr.isdigit()
-                                       or expr.startswith('0')):
+    if (low not in xref.edid_to_formid and _FORMID_RE.fullmatch(expr)
+            and (not expr.isdigit() or expr.startswith('0'))):
         edid = xref.formid_to_edid.get(expr.upper().zfill(8), '')
         if edid:
             expr, low = edid, edid.lower()
 
     fid = xref.edid_to_formid.get(low, '')
     if not fid:
-        # A Papyrus identifier cannot start with a digit, so a Morroblivion
-        # record named `0<name>` arrives here already stripped.
-        fid = _digit_stripped_formid(xref, low)
-    if not fid:
         # Stale source spelling -- recover it from this record's SCRO table.
         alias = conv._scro_alias_for(expr)
         if alias:
             expr, low = alias, alias.lower()
             fid = xref.edid_to_formid.get(low, '')
+    if not fid:
+        fid = _digit_stripped_formid(xref, low)
     if not fid:
         return None
 

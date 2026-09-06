@@ -265,16 +265,15 @@ def test_convert_to_fuz_with_lip(tmp_path):
 
 @needs_ffmpeg
 @needs_xwmaencode
-def test_convert_to_fuz_without_lipgen_falls_back_to_xwm(tmp_path):
-    """A .fuz destination without LipGenerator degrades to bare .xwm so the
-    audio still plays (mouth just won't move)."""
+def test_convert_to_fuz_without_lipgen_fails(tmp_path):
+    """A requested lip-sync conversion must fail when its generator is absent."""
     src = _make_wav(tmp_path / 'test.wav')
     dst = tmp_path / 'test.fuz'
     ok = convert_file_to_xwm(src, dst, FFMPEG, xwmaencode=XWMAENCODE,
                              lipgenerator=None, lip_text='Some text')
-    assert ok
+    assert not ok
     assert not dst.exists()
-    assert (tmp_path / 'test.xwm').is_file()
+    assert not (tmp_path / 'test.xwm').exists()
 
 
 @needs_ffmpeg

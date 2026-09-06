@@ -304,6 +304,11 @@ def _map_race_param(fid: int) -> 'int | None':
     """
     from .constants import DEFAULT_RACE
     from .skyrim_overrides import RACE_MAP, TES4_RACE_FID_TO_EDID
+    from .race_records import race_target
+    from .text_reader import remap_formid
+    target = race_target(remap_formid(fid))
+    if target:
+        return target[1]
     edid = TES4_RACE_FID_TO_EDID.get(fid & 0x00FFFFFF)
     if edid is None:
         return DEFAULT_RACE

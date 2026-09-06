@@ -24,6 +24,7 @@ there.  --compile runs tools/script/compile_papyrus.py on the result.
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -32,7 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from tes5_import.text_reader import parse_export_file  # noqa: E402
 from script_convert import pipeline  # noqa: E402
-from script_convert.cross_ref import _export_dirs_with_masters  # noqa: E402
+from script_convert.cross_ref import export_dirs_with_masters  # noqa: E402
 
 
 def _quest_records(export_dir: str, quest_edid: str, by_type: dict):
@@ -87,7 +88,7 @@ def main(argv=None) -> int:
     out = args.out or str(ROOT / 'temp' / 'subset_scripts' / args.plugin)
     os.makedirs(out, exist_ok=True)
 
-    ctx = pipeline.build_script_context(export_dir, out)
+    ctx = pipeline.build_script_context(export_dir, out, clean=False)
     scpt_work, info_work, qust_work = (ctx['scpt_work'], ctx['info_work'],
                                        ctx['qust_work'])
 
@@ -121,6 +122,23 @@ def main(argv=None) -> int:
     if qust:
         pipeline._merge_stats(stats, pipeline._script_worker_run(('qust', qust)))
     pipeline._WORKER_CTX.clear()
+    # Callees outside the subset are compiled from the existing output headers.
+    # Their signatures must participate in the same cast pass as local callees.
+    needed = {types.get(prop.lower(), '').lower()
+              for calls, types in stats['udf_callers'].values()
+              for prop, _ in calls} - stats['udf_sigs'].keys()
+    for source_export in reversed(export_dirs_with_masters(export_dir)):
+        directory = ROOT / 'output' / Path(source_export).name / 'scripts/source'
+        for script in sorted(needed):
+            path = directory / (script + '.psc')
+            if not path.is_file():
+                continue
+            source = path.read_text(encoding='utf-8')
+            signature = re.search(r'(?im)^\s*(?:\w+\s+)?Function\s+TES4Call\(([^)]*)\)', source)
+            if signature:
+                stats['udf_sigs'][script] = [arg.strip().split()[0]
+                    for arg in signature[1].split(',') if arg.strip()]
+        needed -= stats['udf_sigs'].keys()
     # The dangling-reference pass now runs at the WRITE (pipeline.write_psc),
     # so only the cross-script UDF cast pass is still a sweep.
     pipeline._fix_udf_call_arg_types(
@@ -135,7 +153,7 @@ def main(argv=None) -> int:
                str(ROOT / 'tools' / 'script' / 'compile_papyrus.py'),
                '--src', out, '--out', os.path.join(out, 'pex')]
         header_dirs = []
-        for source_export in _export_dirs_with_masters(export_dir):
+        for source_export in export_dirs_with_masters(export_dir):
             source = (ROOT / 'output' / Path(source_export).name /
                       'scripts' / 'source')
             if source.is_dir():
@@ -146,8 +164,9 @@ def main(argv=None) -> int:
         if header_dirs:
             cmd.extend(['--extra-headers', ';'.join(dict.fromkeys(header_dirs))])
         print('  ' + ' '.join(cmd))
-        return subprocess.call(cmd)
-    return 0
+        compiled = subprocess.call(cmd)
+        return compiled or int(bool(missing or stats['errors']))
+    return int(bool(missing or stats['errors']))
 
 
 if __name__ == '__main__':

@@ -10,49 +10,53 @@ See: docs/commentary/asset_convert_nif.md#flame-attachment-flamenode-sockets
 """
 
 import io as _io
-import os
 import re
+from pathlib import Path
 
 from pyffi.formats.nif import NifFormat
+from output_layout import assets_for
+from .base_plugins import ordered_record_dirs
+from .mesh_metadata import resolve_mesh_paths
 
 #: Reads FlameNode<N> STAT records: the plugin owns the socket->flame mapping, so never guess it.
 _FLAME_STAT_RE = re.compile(
     r'EditorID=(FlameNode(\d+))\s.*?Model\.MODL=([^\r\n]+)', re.S)
 #: Socket names match the engine's table EXACTLY: "FlameNode0"/"12" but never a zero-padded "07".
 _FLAME_SOCKET_RE = re.compile(r'^FlameNode(0|[1-9][0-9]*)(?![0-9])')
-#: export_root_lower -> {socket index: 'firecandleflame.nif'}, parsed from the plugin's STAT records.
+#: export_root_lower -> {socket index: authored model path}, including masters.
 _FLAME_SOCKET_MAP = {}
 
 
+def _asset_root(src_path):
+    norm = str(src_path).replace('\\', '/')
+    position = norm.lower().rfind('/meshes/')
+    return Path(norm[:position]) if position >= 0 else None
+
+
 def _flame_socket_map(src_path):
-    """{socket index: flame nif basename} from the plugin's FlameNode STATs."""
-    norm = str(src_path).replace('/', os.sep).replace(chr(92), os.sep)
-    key = os.sep + 'meshes' + os.sep
-    i = norm.lower().rfind(key)
-    if i < 0:
+    """{socket index: authored model path} from effective FlameNode STATs."""
+    export_root = _asset_root(src_path)
+    if export_root is None:
         return {}
-    export_root = norm[:i]
-    ck = export_root.lower()
+    ck = str(export_root).lower()
     cached = _FLAME_SOCKET_MAP.get(ck)
     if cached is not None:
         return cached
     table = {}
-    stat_txt = os.path.join(export_root, 'STAT.txt')
-    try:
-        with open(stat_txt, 'r', encoding='latin1') as fh:
-            blob = fh.read()
-    except OSError:
-        blob = ''
-    if blob:
+    for record_dir in ordered_record_dirs(export_root):
+        stat_txt = record_dir / 'STAT.txt'
+        if not stat_txt.is_file():
+            continue
+        blob = stat_txt.read_text(encoding='latin1')
         for rec in blob.split('---RECORD_BEGIN---'):
             if 'FlameNode' not in rec:
                 continue
             m = _FLAME_STAT_RE.search(rec)
             if not m:
                 continue
-            model = m.group(3).strip().replace(chr(92)*2, os.sep)
-            model = model.replace('/', os.sep).replace(chr(92), os.sep)
-            table[int(m.group(2))] = os.path.basename(model).lower()
+            model = m.group(3).strip().replace(chr(92), '/')
+            table[int(m.group(2))] = '/'.join(
+                part for part in model.lower().split('/') if part)
     _FLAME_SOCKET_MAP[ck] = table
     return table
 
@@ -76,44 +80,50 @@ def _flame_nif_for_socket(src_path, index):
     return _flame_socket_map(src_path).get(index)
 
 
-#: (meshes_root_lower, flame_name) -> converted NIF bytes, or None when the source is missing.
+#: Resolved source path -> converted NIF bytes.
 _FLAME_CACHE = {}
 #: Same key as _FLAME_CACHE -> the flip-book atlas jobs that conversion produced.
 _FLAME_ATLAS_JOBS = {}
+_FLAME_SOURCES = {}
+
+
+def _flame_source(src_path, flame_name):
+    root = _asset_root(src_path)
+    if root is None:
+        raise ValueError(f'Flame host has no source meshes directory: {src_path}')
+    key = (str(root).lower(), flame_name)
+    if key in _FLAME_SOURCES:
+        return _FLAME_SOURCES[key]
+    roots = list(dict.fromkeys(assets_for(d) / 'meshes'
+                              for d in ordered_record_dirs(root)))
+    roots.append(root / 'meshes')
+    found = resolve_mesh_paths(roots, [flame_name])
+    if flame_name not in found:
+        raise FileNotFoundError(
+            f'Flame model {flame_name!r} for {src_path} is absent from the mod and its bases')
+    _FLAME_SOURCES[key] = found[flame_name]
+    return found[flame_name]
 
 
 def _load_converted_flame(src_path, flame_name, convert_nif):
-    """Convert meshes/fire/<flame_name> once per worker -> Skyrim NIF bytes, or None.
+    """Convert the winning authored flame model once per worker.
 
     `convert_nif` is passed in rather than imported: the flame subtree is built
     by the very converter that calls this, so importing it here would be circular.
     Callers deep-copy by re-reading the returned bytes.
     """
-    norm = str(src_path).replace('/', os.sep).replace(chr(92), os.sep)
-    key = os.sep + 'meshes' + os.sep
-    i = norm.lower().rfind(key)
-    if i < 0:
-        return None
-    meshes_root = norm[:i + len(key)]
-    cache_key = (meshes_root.lower(), flame_name)
+    flame_src = _flame_source(src_path, flame_name)
+    cache_key = flame_src.lower()
     if cache_key in _FLAME_CACHE:
         return _FLAME_CACHE[cache_key]
-    result = None
-    flame_src = meshes_root + 'fire' + os.sep + flame_name
-    if os.path.isfile(flame_src):
-        try:
-            fdata = NifFormat.Data()
-            with open(flame_src, 'rb') as f:
-                fdata.inspect(f)
-                f.seek(0)
-                fdata.read(f)
-            fstats = convert_nif(fdata, fix_textures=True, src_path=flame_src)
-            buf = _io.BytesIO()
-            fdata.write(buf)
-            result = buf.getvalue()
-            _FLAME_ATLAS_JOBS[cache_key] = fstats.get('_flipbook_atlases', {})
-        except Exception:
-            result = None
+    fdata = NifFormat.Data()
+    with open(flame_src, 'rb') as f:
+        fdata.read(f)
+    fstats = convert_nif(fdata, fix_textures=True, src_path=flame_src)
+    buf = _io.BytesIO()
+    fdata.write(buf)
+    result = buf.getvalue()
+    _FLAME_ATLAS_JOBS[cache_key] = fstats.get('_flipbook_atlases', {})
     _FLAME_CACHE[cache_key] = result
     return result
 
@@ -168,13 +178,8 @@ def _propagate_atlas_jobs(src_path, used_flames, stats):
     Idempotent and exists-checked, so convert_nif builds them into this host's
     output tree as well.
     """
-    norm = str(src_path).replace('/', os.sep).replace(chr(92), os.sep)
-    key = os.sep + 'meshes' + os.sep
-    i = norm.lower().rfind(key)
-    if i < 0:
-        return
     for name in used_flames:
-        jobs = _FLAME_ATLAS_JOBS.get((norm[:i + len(key)].lower(), name), {})
+        jobs = _FLAME_ATLAS_JOBS.get(_flame_source(src_path, name).lower(), {})
         if jobs:
             stats.setdefault('_flipbook_atlases', {}).update(jobs)
 

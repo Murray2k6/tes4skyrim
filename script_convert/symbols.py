@@ -55,7 +55,8 @@ IMPLICIT_NAMES = frozenset({
     'weather',
     'akspeakerref', 'akactionref', 'aktarget', 'akcaster', 'akaggressor',
     'akkiller', 'akactor', 'akitem', 'aksource', 'akrefself',
-    'tes4polyfill', 'form', 'true', 'false', 'none',
+    'tes4polyfill', 'tes4menu', 'tes4collection', 'tes4collections',
+    'tes4runtime', 'tes4skse', 'ui', 'form', 'true', 'false', 'none',
 })
 
 
@@ -63,7 +64,7 @@ IMPLICIT_NAMES = frozenset({
 #: widest operand's type, exactly as Papyrus does.
 
 
-def type_of_expr(node, lookup) -> str:
+def type_of_expr(node, lookup, expected_type='') -> str:
     """Papyrus type of an expression NODE, or '' when nothing says.
 
     Reading the TREE beats the text scan it replaced twice over: a name inside
@@ -77,11 +78,15 @@ def type_of_expr(node, lookup) -> str:
 
     if node is None:
         return ''
+    if isinstance(node, N.Index):
+        return lookup('element:' + _bare(node.target).lower())
     if isinstance(node, N.Literal):
         if node.is_string:
             return 'String'
         return 'Float' if '.' in node.text else 'Int'
     if isinstance(node, N.Ident):
+        if node.name.lower() in ('player', 'playerref'):
+            return 'Actor'
         # A bare name is a variable if one is declared, and a zero-argument
         # command otherwise -- the same order the emitter resolves them in.
         declared = lookup(node.name)
@@ -91,12 +96,19 @@ def type_of_expr(node, lookup) -> str:
         # the value looks Int and the assignment to a `short` loses its cast.
         if declared == 'GlobalVariable' or node.name.lower() in KNOWN_GLOBALS:
             return 'Float'
-        return declared or RETURN_TYPES.get(node.name.lower(), '')
+        return declared or RETURN_TYPES.get(node.name.lower(), '') or RETURN_TYPES.get(_papyrus_name(node.name.lower()), '')
     if isinstance(node, N.Member):
         return lookup(f'{_bare(node.owner)}.{node.name}') \
-            or RETURN_TYPES.get(node.name.lower(), '')
+            or RETURN_TYPES.get(node.name.lower(), '') or RETURN_TYPES.get(_papyrus_name(node.name.lower()), '')
     if isinstance(node, N.Call):
         low = node.name.lower()
+        if low == 'eval' and node.args:
+            head, *args = node.args
+            if args and isinstance(head, (N.Ident, N.Member)):
+                head = N.Call(head.name, tuple(args), head.owner if isinstance(head, N.Member) else None)
+            return type_of_expr(head, lookup, expected_type)
+        if low == 'call' and node.args:
+            return lookup('call:' + _bare(node.args[0]).lower())
         hit = RETURN_TYPES.get(low) or RETURN_TYPES.get(_papyrus_name(low))
         if hit:
             return hit
@@ -113,12 +125,29 @@ def type_of_expr(node, lookup) -> str:
             return 'Float'
         return ''
     if isinstance(node, N.Unary):
-        return type_of_expr(node.operand, lookup)
+        # OBSE's dereference reads a foreach pair's value, not the pair
+        # object. The emitter selects a typed accessor from its consumer.
+        if node.op == '*':
+            return expected_type if expected_type not in ('', 'Bool') else 'Float'
+        if node.op == '$':
+            return 'String'
+        if node.op == '!':
+            return 'Bool'
+        return type_of_expr(node.operand, lookup, expected_type)
     if isinstance(node, N.BinOp):
+        if node.op in ('&', '|', '<<', '>>'):
+            return 'Int'
+        if node.op == '^':
+            return 'Float'
         if node.op in ('==', '!=', '>', '<', '>=', '<=', '&&', '||', '<>'):
             return 'Bool'
-        left = type_of_expr(node.left, lookup)
-        right = type_of_expr(node.right, lookup)
+        left = type_of_expr(node.left, lookup, expected_type)
+        right = type_of_expr(node.right, lookup, expected_type)
+        # OBSE numeric array elements are doubles; Papyrus GetNumber returns
+        # Float. Truncate after the arithmetic, at the assignment boundary.
+        if isinstance(node.left, N.Index) or isinstance(node.right, N.Index):
+            if node.op in ('+', '-', '*', '/', '%'):
+                return 'Float'
         for rank in NUMERIC_RANK:
             if rank in (left, right):
                 return rank
@@ -214,6 +243,8 @@ def scan_var_usage(stmts, names, lookup):
                     expected = row.types.get(index) if row is not None else ''
                     if not expected:
                         expected = param_types(call_name).get(index, '')
+                    if call_name == 'call' and index > 0:
+                        expected = lookup(f'param:{_bare(node.args[0]).lower()}:{index - 1}')
                     if call_name == 'cast' and index == 0:
                         expected = 'Spell'
                     if actor_arg and index == 0:
@@ -334,7 +365,9 @@ def _classify_assignment(usage, value, lookup):
     # matters -- `Armor` is both a narrow return type and the type of an ARMO
     # property, and declaring the variable `Armor` breaks every other
     # assignment to it.
-    if _names_a_typed_call(value) and vtype in _FORM_RETURNING.values():
+    if isinstance(value, N.Call) and value.name.lower() == 'call' and vtype:
+        usage.form_type = vtype
+    elif _names_a_typed_call(value) and vtype in _FORM_RETURNING.values():
         usage.form_type = vtype
     elif isinstance(value, N.Ident) and vtype:
         # Assignment from a BARE property, whose type is whatever the record
@@ -404,6 +437,33 @@ def resolve_ref_types(stmts, ref_vars, lookup, record_type_of):
 
     out = {}
     for low, use in scan_var_usage(stmts, ref_vars, lookup).items():
+        # A TES4 slot can hold a base record, then the reference spawned from
+        # it. Every assignment participates: the last narrow call or an
+        # argument constraint cannot discard values assigned earlier.
+        assigned_types = set()
+        for value in use.assigned:
+            kind = type_of_expr(value, lookup)
+            # A dynamically typed OBSE array can contain any base form or
+            # reference. Preserve the handle; cast only at the operation.
+            if isinstance(value, N.Index):
+                kind = 'Form'
+            if isinstance(value, N.Ident) and value.name.lower() in ('player', 'playerref'):
+                kind = 'Actor'
+            elif isinstance(value, N.Ident) and value.name.lower() not in ref_vars:
+                kind = record_type_of(value.name) or kind
+            if kind and kind not in ('Int', 'Float', 'Bool', 'String'):
+                assigned_types.add(kind)
+        if ('Form' in assigned_types or
+                (len(assigned_types) > 1 and
+                 not assigned_types <= {'Actor', 'ObjectReference'})):
+            out[low] = 'Form'
+            continue
+        if 'ObjectReference' in assigned_types:
+            # An actor-only query is legal on TES4's generic references and
+            # returns zero for other objects. Preserve the assigned objects;
+            # narrow only the receiver of that particular operation.
+            out[low] = 'ObjectReference'
+            continue
         # A TES4 `ref` may be used purely as a numeric slot (`ref z; set z to
         # GetPos Z`).  This is distinct from the integer-flag idiom and must
         # retain Float results instead of becoming ObjectReference.
@@ -559,6 +619,14 @@ def _needs_actor(name: str) -> bool:
     # that name too -- otherwise the receiver stays ObjectReference and the
     # call is undefined.
     return row.subj == MAP and row.emit.lower() in _ACTOR_ONLY_FUNCTIONS
+
+
+def used_property_refs(property_refs, lines):
+    """Drop SCRO preloads that the emitted code no longer reads."""
+    import re
+    code = re.sub(r'"(?:\\.|[^"\\])*"|;[^\r\n]*', '', '\n'.join(lines))
+    used = {name.lower() for name in re.findall(r'\b\w+\b', code)}
+    return {name: kind for name, kind in property_refs.items() if name.lower() in used}
 
 
 def property_declarations(property_refs, declared) -> list:

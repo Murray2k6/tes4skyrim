@@ -366,7 +366,9 @@ EFFECT_ARCHETYPES = {
     'DIWE': (A_PEAK_VALUE_MODIFIER, AV_MELEE_DAMAGE),
     # Stunted Magicka suppressed regeneration entirely.
     'STMA': (A_PEAK_VALUE_MODIFIER, AV_MAGICKA_RATE),
-    'VAMP': (A_PEAK_VALUE_MODIFIER, AV_HEALTH),
+    # Oblivion's 0x6A8B40/0x6A8BD0 apply/remove Vampirism (AV 69), not
+    # Health. Skyrim has no such AV; TES4Runtime reads the live marker effects.
+    'VAMP': (A_SCRIPT, AV_NONE),
 
     # -- Destruction: weaknesses (negative resistance) ----------------------
     'WKFI': (A_PEAK_VALUE_MODIFIER, AV_RESIST_FIRE),
@@ -882,6 +884,9 @@ _SKILL_NAMES = {
 
 # (code, tes4 av) -> output FormID of the emitted variant.
 _av_variants: dict = {}
+runtime_effects: dict = {}
+runtime_effect_flags: dict = {}
+runtime_effect_actor_values: dict = {}
 
 
 def build_av_variants(mgef_records: list, effect_records: list, writer) -> int:
@@ -924,6 +929,8 @@ def build_av_variants(mgef_records: list, effect_records: list, writer) -> int:
             continue
         archetype = get_archetype(code)
         fid = writer.derive_formid('MGEF_AV', (code, av))
+        runtime_effects[fid] = (code, 0)
+        runtime_effect_actor_values[fid] = av
 
         subs = pack_string_subrecord('EDID', f'TES4{code}{name}')
         full = get_str(src, 'FULL')
@@ -1037,6 +1044,7 @@ def build_seff_variants(mgef_records: list, effect_records: list, writer,
         subs += pack_subrecord('DATA', bytes(data))
 
         register_emitted_projectile(fid, projectile)
+        runtime_effects[fid] = ('SEFF', 0)
         writer.add_record('MGEF', pack_record('MGEF', fid, 0, subs))
         _seff_variants[(scpt, etype)] = fid
         written += 1
@@ -1052,16 +1060,15 @@ def get_seff_variant(scpt_fid: str, effect_type: str) -> int:
 # Scripted bound-item variants
 #
 # Skyrim's Bound Weapon archetype (17) only fires when the spell carrying it is
-# CAST.  Oblivion also hands out bound gear through Abilities (SPIT.Type 4) and
-# Lesser Powers (Type 3) — the Mythic Dawn assassins in the Imperial Dungeon
+# CAST.  Oblivion also hands out bound gear through Abilities (SPIT.Type 4) —
+# the Mythic Dawn assassins in the Imperial Dungeon
 # wear `AbBoundArmorMaceNoHelmetMD`, an ABILITY — and a Skyrim ability is a
 # passive, never-cast effect that never reaches BoundItemEffect, so the gear
 # silently never appears.
 #
-# Census of references/Skyrim.esm confirms the engine limit rather than a
-# convention: archetype 17 is used by 8 effect slots, ALL under SPIT.Type 0,
-# and by zero under Type 3 or Type 4.  Vanilla abilities carry only passive
-# archetypes (Value Modifier, Script, Peak Value Modifier, ...).
+# Lesser Powers (Type 3) are castable: all three in Skyrim.esm use
+# Fire-and-Forget, including VampireHuntersSight. Their lack of vanilla
+# bound-weapon examples does not make them passive abilities.
 #
 # So for exactly those spells the effect is re-pointed at a Script-archetype
 # (1) clone whose VMAD carries TES4_BoundItemEffect, which adds and force-
@@ -1078,8 +1085,8 @@ def get_seff_variant(scpt_fid: str, effect_type: str) -> int:
 BOUND_ITEM_SCRIPT = 'TES4_BoundItemEffect'
 
 # TES4 spell types whose effects never get cast, so archetype 17 cannot fire.
-# 3 = Lesser Power, 4 = Ability.  (Both are applied, not cast, in Skyrim.)
-UNCASTABLE_SPELL_TYPES = frozenset({3, 4})
+# 1 = Disease, 4 = Ability. Lesser Powers (3) are cast normally.
+UNCASTABLE_SPELL_TYPES = frozenset({1, 4})
 
 # (source MGEF FormID) -> FormID of its scripted clone.
 _bound_script_variants: dict = {}
@@ -1171,6 +1178,7 @@ def bound_script_variant(mgef_fid: int, assoc_item: int, writer) -> int:
         writer.add_record('MGEF', pack_record('MGEF', fid, 0, subs))
         register_emitted_projectile(fid, 0)
         _bound_script_variants[mgef_fid] = fid
+        runtime_effects[fid] = (runtime_effects[mgef_fid][0], assoc_item)
         return fid
 
 
@@ -1190,6 +1198,9 @@ def register_mgef_formids(mgef_records: list) -> None:
     the value from the same _build_data inputs, so they cannot disagree.
     """
     _code_to_fid.clear()
+    runtime_effects.clear()
+    runtime_effect_flags.clear()
+    runtime_effect_actor_values.clear()
     # Runs once before the MGEF pass, so this is where the per-plugin
     # projectile registry is reset.
     _emitted_projectiles.clear()
@@ -1201,8 +1212,10 @@ def register_mgef_formids(mgef_records: list) -> None:
             continue
         fid = get_formid(rec, 'FormID')
         _code_to_fid[code] = fid
+        runtime_effects[fid] = (code, 0)
 
         t4_flags = get_int(rec, 'DATA.Flags')
+        runtime_effect_flags[code] = t4_flags
         cast_type, delivery = _delivery_and_cast(t4_flags)
         school = SCHOOL_OVERRIDES.get(
             code, SCHOOL_TO_AV.get(get_int(rec, 'DATA.School', -1), AV_NONE))

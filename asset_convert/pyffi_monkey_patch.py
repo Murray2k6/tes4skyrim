@@ -67,6 +67,8 @@ import time as _time
 if not hasattr(_time, 'clock'):
     _time.clock = _time.perf_counter
 
+from .legacy_nif_layout import install_geometry_uv_count
+
 
 # ---------------------------------------------------------------------------
 # Patches requiring NifFormat (applied lazily on first import)
@@ -77,6 +79,26 @@ _PYFFI_PATCHED = False
 def _apply_nifformat_patches(NifFormat):
     """Apply patches to a loaded NifFormat.  Called once after import."""
     from pyffi.object_models.xml.expression import Expression
+
+    install_geometry_uv_count(NifFormat)
+    from .nif_input import install_footer_check
+    install_footer_check(NifFormat)
+    # Current nifxml documents the high-bit billboard values found in games.
+    # PyFFI's old enum drops these values when copying an authored billboard.
+    mode = NifFormat.BillboardMode
+    for value in (8, 10, 11, 12):
+        if value not in mode._enumvalues:
+            name = f'UNKNOWN_{value}'
+            mode._enumkeys = list(mode._enumkeys) + [name]
+            mode._enumvalues = list(mode._enumvalues) + [value]
+            setattr(mode, name, value)
+    # nifxml NiGeometryDataFlags: this is the high BYTE of a bitfield,
+    # including material bits and NBT method, not an enum restricted to 0/16.
+    # An enum setter rejects authored material bits during shape copies.
+    for attribute in NifFormat.NiGeometryData._attrs:
+        if attribute.name == 'extra_vectors_flags':
+            attribute.type_ = NifFormat.byte
+    _refresh_attribute_caches(NifFormat, (NifFormat.NiGeometryData,))
 
     # ------------------------------------------------------------------
     # Patch 2: NiPSysGrowFadeModifier.base_scale
@@ -837,6 +859,41 @@ def _install_skyrim_psysdata_serializer(NifFormat):
     PSysData.get_size = get_size
     PSysData.write = write
     PSysData.read = read
+
+    # StructBase serializes inherited fields itself. The subclass therefore
+    # needs the corrected base prefix followed by its own mesh-pool fields.
+    MeshData = NifFormat.NiMeshPSysData
+    original_mesh = (MeshData.get_size, MeshData.write, MeshData.read)
+
+    def mesh_fields(self):
+        for attr in MeshData._attrs:
+            yield getattr(self, '_%s_value_' % attr.name)
+
+    def mesh_size(self, data=None):
+        if not _is_skyrim(data):
+            return original_mesh[0](self, data=data)
+        return get_size(self, data=data) + sum(
+            field.get_size(data=data) for field in mesh_fields(self))
+
+    def mesh_write(self, stream, data=None):
+        if not _is_skyrim(data):
+            return original_mesh[1](self, stream, data=data)
+        write(self, stream, data=data)
+        for field in mesh_fields(self):
+            field.write(stream, data=data)
+
+    def mesh_read(self, stream, data=None):
+        if not _is_skyrim(data):
+            return original_mesh[2](self, stream, data=data)
+        read(self, stream, data=data)
+        for field in mesh_fields(self):
+            if hasattr(field, 'update_size'):
+                field.update_size()
+            field.read(stream, data=data)
+
+    MeshData.get_size = mesh_size
+    MeshData.write = mesh_write
+    MeshData.read = mesh_read
 
 
 # ---------------------------------------------------------------------------

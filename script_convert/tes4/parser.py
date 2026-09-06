@@ -50,6 +50,7 @@ from script_convert.tes4.nodes import (
     Unary,
     VarDecl,
     While,
+    ForEach,
 )
 
 
@@ -78,7 +79,8 @@ VAR_TYPES = frozenset({
 # comma form covers subtraction unambiguously.  `+` IS here -- it cannot start
 # an argument the way `-` can.
 _ARITHMETIC_JOIN = frozenset({'*', '/', '+', '%', '&&', '||',
-                              '==', '!=', '<', '>', '<=', '>=', '&', '|'})
+                              '==', '!=', '<', '>', '<=', '>=', '&', '|',
+                              '<<', '>>', '^'})
 
 
 def _unquote(text: str) -> str:
@@ -98,17 +100,18 @@ _FIXED_ARITY = {
     'getpos': 1, 'getangle': 1, 'getstartingpos': 1, 'getstartingangle': 1,
     'getdeadcount': 1, 'getitemcount': 1, 'getav': 1, 'getactorvalue': 1,
     'getbaseav': 1, 'getbaseactorvalue': 1, 'getdistance': 1,
-    'getstage': 1, 'getdisposition': 1,
+    'getstage': 1, 'getdisposition': 1, 'rand': 2,
+    'getvelocity': 1, 'getverticalvelocity': 0,
+    'setvelocity': 3, 'setverticalvelocity': 1,
 }
 
 #: Commands whose FIRST argument may be a tight negative number, so the sign
 #: starts the argument list rather than continuing it.  A leading tight sign
 #: is otherwise refused, because `x -1` on a plain variable is subtraction,
-#: not a call -- these are the only three names in the corpus where it is an
-#: argument (`PositionWorld -3328.02, 280.33, ...`), and all three take
-#: coordinates.
+#: not a call. Coordinate and random-range commands accept negative bounds.
 _NEGATIVE_FIRST_ARG = frozenset({
-    'positionworld', 'positioncell', 'emcsetmusictype',
+    'positionworld', 'posworld', 'positioncell', 'emcsetmusictype', 'rand',
+    'setvelocity', 'setverticalvelocity',
 })
 
 
@@ -197,14 +200,34 @@ class Parser:
                     and self.cur.text in PRECEDENCE[level]):
                 break
             op = self.advance()
+            # Some authored conditions end with duplicated boolean operators
+            # before ')'. Keep their real operands; never emit a Raw '||'
+            # operand that poisons every script importing this function.
+            if op.text in ('&&', '||'):
+                while self.cur.is_op(op.text):
+                    self.advance()
             # A DANGLING operator -- `if x <= 256 && ` with nothing after it.
             # Authored damage (Morroblivion's fbmwMalexaScript), which
             # Oblivion ignored.  Consuming the next line as the right operand
             # swallows a whole statement into the condition, so the operator
             # is dropped and the condition ends where it stands.
-            if self.cur.kind in (T.NEWLINE, T.EOF, T.COMMENT):
+            if self.cur.kind in (T.NEWLINE, T.EOF, T.COMMENT) or self.cur.is_op(')', ']'):
                 break
-            right = self._parse_binary(level + 1)
+            # Recover an omitted repeated subject in an authored range check:
+            # `value >= 0 && < 10`. Preserve the bound instead of consuming
+            # '<' as a Raw operand and discarding the rest of the condition.
+            anchor = left
+            while isinstance(anchor, BinOp) and anchor.op in ('&&', '||'):
+                anchor = anchor.right
+            comparisons = ('==', '!=', '<>', '<', '<=', '>', '>=')
+            if (op.text in ('&&', '||') and self.cur.text in comparisons
+                    and isinstance(anchor, BinOp) and anchor.op in comparisons):
+                comparison = self.advance()
+                precedence = next(i for i, ops in enumerate(PRECEDENCE) if comparison.text in ops)
+                right = BinOp(comparison.text, anchor.left,
+                              self._parse_binary(precedence + 1), line=comparison.line)
+            else:
+                right = self._parse_binary(level + 1)
             left = BinOp(op.text, left, right, line=op.line)
         return left
 
@@ -223,7 +246,7 @@ class Parser:
         # the emitter can turn it into `(x as String)`; left as a stray
         # operator it reached Papyrus verbatim and the scanner rejected the
         # `$` outright, failing the script and the three that import it.
-        tok = self.accept_op('-', '+', '$')
+        tok = self.accept_op('-', '+', '$', '!', '*')
         if tok:
             return Unary(tok.text, self._parse_unary(), line=tok.line)
         return self._parse_postfix()
@@ -246,6 +269,10 @@ class Parser:
                 self.advance()
                 name = self.advance()
                 expr = Member(expr, _unquote(name.text), line=name.line)
+            elif self.cur.is_op('->'):
+                arrow = self.advance()
+                key = self.advance()
+                expr = Index(expr, Literal('"' + _unquote(key.text) + '"', is_string=True), line=arrow.line)
             elif self.cur.is_op('['):
                 open_tok = self.advance()
                 idx = self.parse_expression()
@@ -332,7 +359,7 @@ class Parser:
                 continue
             # `(` opens a parenthesised operand and `$` an OBSE string
             # cast; both START an argument rather than ending the run.
-            if tok.kind is T.OP and tok.text not in ('(', '$'):
+            if tok.kind is T.OP and tok.text not in ('(', '$', '!'):
                 # A sign continues the ARGUMENT LIST once the list has started
                 # -- `Player.SetFactionRank SEHeretic -1` passes -1 (the
                 # current converter emits `SetFactionRank(SEHeretic, -1)`), and
@@ -357,7 +384,10 @@ class Parser:
                         and tok.text in sign_ok):
                     break
             before = self.i
-            args.append(self._parse_operand(arithmetic=arithmetic))
+            operand = self._parse_operand(arithmetic=arithmetic)
+            if self.accept_op('::'):
+                operand = BinOp('::', operand, self._parse_operand(), line=operand.line)
+            args.append(operand)
             after_comma = False
             if self.i == before:  # no progress: bail rather than spin
                 break
@@ -372,7 +402,7 @@ class Parser:
         `$` here left the command with none.
         """
         return (tok.kind in (T.IDENT, T.NUMBER, T.STRING)
-                or tok.is_op('(', '$'))
+                or tok.is_op('(', '$', '!'))
 
     def _parse_operand(self, *, arithmetic: bool = False) -> Expr:
         """One argument-position operand: a literal, name, `recv.name` or `(...)`.
@@ -385,7 +415,7 @@ class Parser:
         """
         # `$` is OBSE's string cast and binds to the operand that follows,
         # exactly like a sign: `MessageBoxEX $msg` passes ONE argument.
-        tok = self.accept_op('-', '+', '$')
+        tok = self.accept_op('-', '+', '$', '!')
         if tok:
             return Unary(tok.text, self._parse_operand(arithmetic=arithmetic),
                          line=tok.line)
@@ -494,6 +524,18 @@ class Parser:
                 return self._parse_if(line)
             if low == 'while':
                 return self._parse_while(line)
+            if low == 'foreach':
+                self.advance()
+                target = self._parse_postfix()
+                if not self.accept_op('<-'):
+                    return self._raw_stmt(start, line)
+                value = self.parse_expression()
+                comment = self.take_line_end()
+                body = self._parse_body(_WHILE_TERMINATORS)
+                if self.cur.is_ident('loop', 'endwhile'):
+                    self.advance()
+                    self.take_line_end()
+                return ForEach(target=target, value=value, body=body, line=line, comment=comment)
             if low == 'return':
                 self.advance()
                 return Return(line=line, comment=self.take_line_end())
@@ -558,6 +600,8 @@ class Parser:
     def _parse_let(self, line: int, start: int) -> Stmt:
         """OBSE `let <target> := <value>` / `let x += 1`."""
         self.advance()  # 'let'
+        while self.cur.is_ident('let'):
+            self.advance()
         target = self._parse_postfix()
         op = ''
         if self.accept_op(':='):
@@ -581,6 +625,8 @@ class Parser:
         operand token -- a number, string, name or `(`.  Stopping at operators
         and closers is what keeps `getstage ND10 >= 20` from swallowing `>=`.
         """
+        if isinstance(value, Unary) and not value.parenthesised:
+            return dataclasses.replace(value, operand=self._absorb_args(value.operand))
         if not isinstance(value, (Ident, Member)):
             return value
         args = self._parse_call_args(value.name)
@@ -657,7 +703,9 @@ class Parser:
         self.advance()  # 'begin'
         btype = ''
         if self.cur.kind is T.IDENT:
-            btype = self.advance().text.lower()
+            # OBSE's underscore prefix selects its expression-aware compiler;
+            # it does not change the event or Function block being declared.
+            btype = self.advance().text.lower().removeprefix('_')
         # The filter is the rest of the line verbatim: it RESTRICTS the block
         # to one object and dropping it makes the block fire for everyone.
         parts = []

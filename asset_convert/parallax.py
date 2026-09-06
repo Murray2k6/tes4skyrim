@@ -42,6 +42,7 @@ import os
 import struct
 
 import numpy as np
+from .game_paths import scoped_files
 
 # Oblivion's parallax switch on NiTexturingProperty.
 APPLY_HILIGHT2 = 4
@@ -660,7 +661,7 @@ def strip_alpha_to_bc1(data: bytes):
     return bytes(hdr) + b''.join(levels)
 
 
-def strip_diffuse_alpha(tex_root, keep=()) -> 'tuple[int, int, int, int]':
+def strip_diffuse_alpha(tex_root, keep=(), paths=None) -> 'tuple[int, int, int, int]':
     """Drop the height-carrying alpha from every converted diffuse.
 
     The presence of `<name>_p.dds` beside `<name>.dds` IS the record that this
@@ -682,13 +683,17 @@ def strip_diffuse_alpha(tex_root, keep=()) -> 'tuple[int, int, int, int]':
     keep = {k.replace('/', '\\').lower() for k in (keep or ())}
     root = os.path.abspath(str(tex_root))
     converted = skipped = kept = saved = 0
-    for dirpath, _, files in os.walk(root):
+    groups = (os.walk(root) if paths is None else
+              ((str(p.parent), (), [p.name]) for p in scoped_files(root, '*.dds', paths)))
+    for dirpath, _, files in groups:
         have = {f.lower() for f in files}
         for fn in files:
             low = fn.lower()
             if not low.endswith('.dds') or low.endswith('_p.dds'):
                 continue
-            if low[:-4] + '_p.dds' not in have:
+            if (low[:-4] + '_p.dds' not in have
+                    and not (paths is not None and os.path.isfile(
+                        os.path.join(dirpath, low[:-4] + '_p.dds')))):
                 continue
             path = os.path.join(dirpath, fn)
             if keep:

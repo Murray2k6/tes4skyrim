@@ -18,6 +18,7 @@ from script_convert.constants import (
 from script_convert import symbols as _symbols
 from script_convert.emit import script as _script
 from script_convert.tes4 import nodes as N
+from script_convert.source_variables import recover_numeric_locals
 
 
 def build(conv, name: str, source: str, extends: str, editor_id: str) -> str:
@@ -42,12 +43,25 @@ def build(conv, name: str, source: str, extends: str, editor_id: str) -> str:
     body += helpers(conv)
     body += chargen_latch(conv)
     body += stage_latches(conv)
+    if extends in ('ObjectReference', 'Actor', 'Quest'):
+        guarded = []
+        for line in body:
+            guarded.append(line)
+            if line.startswith('Event '):
+                guarded += ['  If TES4Runtime.ScriptRemoved(Self)',
+                            '    Return', '  EndIf']
+        body = guarded
 
     out = list(header(conv, name, extends, editor_id))
     # Preserve authored notes and banners that precede the first Begin block.
     # Generated converter diagnostics never enter tree.preamble, so source
     # TODO labels can be kept distinct from machine-readable failure TODOs.
     out += _script.emit_body(conv, tree.preamble, extends)
+    # Preloading SCRO entries supplies types, but emission may replace those
+    # names (for example, an NPC base comparison gets a separate ActorBase
+    # property). Do not bind the unused reference-typed preload to its base.
+    from .symbols import used_property_refs
+    conv.sc.property_refs = used_property_refs(conv.sc.property_refs, out + body)
     out += properties(conv, tree)
     out += body
     return '\n'.join(out)
@@ -64,10 +78,11 @@ def _prepare(conv, name: str, source: str, extends: str, editor_id: str):
 
     conv._parse_source(source)
     tree = conv._tree
+    recover_numeric_locals(conv, tree)
+    if any(b.btype.lower() == 'function' for b in tree.blocks):
+        extends = conv._script_extends = 'TES4Function'
     _load_symbols(conv, tree, editor_id)
     _load_facts(conv, tree)
-    _promote_actor_locals(conv, tree)
-    _promote_assigned_actors(conv, tree)
     _preresolve_owners(conv, tree)
     return tree
 
@@ -90,58 +105,21 @@ def _preresolve_owners(conv, tree) -> None:
                 conv._convert_ref(name, conv._script_extends)
 
 
-def _promote_actor_locals(conv, tree) -> None:
-    """Retype a `ref` local the body calls an ACTOR-only method on.
-
-    TES4 is untyped, so `ref target` holds whatever the script puts in it; the
-    Papyrus declaration has to commit, and calling `EvaluatePackage` on the
-    variable means it is an Actor.  This runs BEFORE emission because the
-    assignment that fills the variable is converted first, and the downcast it
-    needs (`GetLinkedRef() as Actor`) depends on the answer.
-    """
-    sc = conv.sc
-    for body in ([tree.preamble, tree.body]
-                 + [b.body for b in tree.blocks] if tree else []):
-        for expr in N.walk_exprs_in(body):
-            # BOTH shapes name a subject: `target.GetDead` parses as a Member
-            # (owner + name) and `target.SetActorValue x` as a Call with a
-            # receiver.  Checking only the receiver missed every zero-argument
-            # member form, which is how most actor tests are written.
-            owner = getattr(expr, 'receiver', None) or getattr(
-                expr, 'owner', None)
-            name = getattr(owner, 'name', '')
-            if not name:
-                continue
-            called = (expr.called or '') if expr.called else ''
-            # A call promotes when it RESOLVES ITS SUBJECT AS AN ACTOR --
-            # either the name is actor-only, or its row says so (`subj` ACTOR
-            # or AV, which is what makes `myActivator.GetIsReference` an
-            # actor).  Promoting on ANY known command over-fires:
-            # `gate01.playgroup` is a command on a DOOR, and declaring
-            # `Actor Property gate01` then cannot hold the door it is assigned.
-            row = COMMAND_ROWS.get(called)
-            actorish = (called in _ACTOR_ONLY_FUNCTIONS
-                        or (row is not None and row.subj in ('ACTOR', 'AV')))
-            # ...but a method ObjectReference ALSO declares proves nothing:
-            # 14 of `_ACTOR_ONLY_FUNCTIONS` are shared, and `mySelf.PlaceAtMe`
-            # on a spawner marker is the ObjectReference form.  Promoting on
-            # one declared `Actor Property mySelf`, which cannot hold the
-            # marker the script assigns to it.
-            if not actorish or called in _OBJREF_SHARED_FUNCTIONS:
-                continue
-            low = name.lower()
-            if sc.var_types.get(low) == 'ObjectReference':
-                sc.var_types[low] = 'Actor'
-                sc.var_types[_safe_property_name(name).lower()] = 'Actor'
-
-
 def _load_symbols(conv, tree, editor_id: str) -> None:
     """Declared variables: their names, their types and their renames."""
     sc = conv.sc
     edid_low = (editor_id or '').lower()
+    local_function = any(b.btype == 'function' for b in tree.blocks) if tree else False
+    authored_names = {v.name.lower() for v in tree.variables} if tree else set()
     for var in (tree.variables if tree else ()):
         vname, vtype = var.name, var.vtype
         safe = _safe_property_name(vname)
+        # A reserved name's normal escape can already be another authored
+        # local (short weapon / ref myweapon). Keep their storage distinct.
+        if local_function and safe.lower() != vname.lower() and safe.lower() in authored_names:
+            safe = 'TES4Local_' + vname
+            while safe.lower() in authored_names:
+                safe = 'TES4Local_' + safe
         # BOTH spellings: the body still writes the variable the TES4 way, and
         # a name that collides with a TES4 command (DiveRockScript's `short
         # message`) is only recognised as a variable -- rather than compiled as
@@ -251,18 +229,41 @@ def _narrow_ref_types(conv, tree) -> None:
     if not refs or tree is None:
         return
     stmts = [st for block in tree.blocks for st in N.walk_stmts(block.body)]
+    params = {p.lower() for b in tree.blocks if b.btype == 'function'
+              for p in _udf_params(b.filter)} & refs
+    # Input handles are widened in the emitted signature. Let local copies
+    # see that same contract before choosing their declaration types.
+    for low in params:
+        sc.var_types[low] = 'Form'
+        sc.var_types[sc.var_renames.get(low, _safe_property_name(low)).lower()] = 'Form'
     narrowed = _symbols.resolve_ref_types(
         stmts, refs, conv.type_of, conv._assignment_record_type)
+    # Clearing an input ref with zero says nothing about its incoming value.
+    # Locals may use the numeric-slot idiom; a function input cleared only at
+    # the end must still accept the form supplied by its caller.
+    for low, use in _symbols.scan_var_usage(stmts, params, conv.type_of).items():
+        if narrowed.get(low) in ('Int', 'Float') and use.assigned and all(
+                isinstance(v, N.Literal) and v.text.strip() in ('0', '0.0')
+                for v in use.assigned):
+            narrowed[low] = 'Form'
     for low, ptype in narrowed.items():
+        if ptype == 'Actor' and not any(b.btype == 'function' for b in tree.blocks):
+            # Shared TES4 ref fields accept every placed object. Actor-only
+            # calls cast their receiver without narrowing this public slot.
+            ptype = 'ObjectReference'
+        # A local usage cannot discard incoming base records discovered in
+        # another script. The shared field must retain those form handles.
+        if (sc.edid.lower(), low) in getattr(conv.xref, 'ref_as_base_form', ()):
+            ptype = 'Form'
         if (ptype.startswith('TES4_')
                 and not _uses_attached_member(tree, low, ptype, conv.xref)):
             ptype = 'ObjectReference'
         existing = sc.var_types.get(low, '')
         if existing.startswith('TES4_') and ptype in ('ObjectReference', 'Form'):
             continue
-        for spelling in (low, _safe_property_name(low).lower()):
+        safe = sc.var_renames.get(low, _safe_property_name(low))
+        for spelling in (low, safe.lower()):
             sc.var_types[spelling] = ptype
-        safe = _safe_property_name(low)
         if safe in sc.property_refs:
             sc.property_refs[safe] = ptype
 
@@ -286,9 +287,9 @@ def _load_facts(conv, tree) -> None:
     btypes = {b.btype.lower() for b in tree.blocks} if tree else set()
 
     sc.suppressed_fall_damage = 'resetfalldamagetimer' in called
-    sc.uses_getsecondspassed = 'getsecondspassed' in called
+    sc.uses_getsecondspassed = bool(called & {'getsecondspassed', 'rotate'})
     sc.gsp_realtime = bool(
-        (called & {'getsecondspassed', 'scripteffectelapsedseconds'})
+        (called & {'getsecondspassed', 'scripteffectelapsedseconds', 'rotate'})
         and (btypes & {'gamemode', 'scripteffectupdate'}))
     if sc.gsp_realtime:
         # The synthesised elapsed-time variable must be TYPED for the
@@ -367,6 +368,10 @@ def properties(conv, tree) -> list:
     params = set()
     for block in (tree.blocks if tree else ()):
         if block.btype.lower() == 'function':
+            params.update(name.lower() for name in conv.sc.synthetic_vars)
+            for var in tree.variables:
+                params.add(var.name.lower())
+                params.add(_safe_property_name(var.name).lower())
             for name in _udf_params(block.filter):
                 params.add(name.lower())
                 params.add(_safe_property_name(name).lower())
@@ -387,6 +392,10 @@ def properties(conv, tree) -> list:
         # is lost by making the declaration table authoritative here.
         ptype = conv.sc.var_types.get(low, 'Int')
         out.append(_declare(safe, ptype))
+
+    if seen:
+        names = '|'.join(sorted(seen))
+        out.append(f'String Property TES4DeclaredVariables = "{names}" Auto Hidden')
 
     for safe, ptype in sorted(conv.sc.synthetic_vars.items()):
         low = safe.lower()
@@ -451,43 +460,85 @@ def udf(conv, tree, extends: str) -> list:
         return []
     params = _udf_params(block.filter)
     conv.sc.udf_params = {p.lower() for p in params}
+    conv.sc.var_types['tes4_caller'] = 'ObjectReference'
     _script.emit_body(conv, block.body, extends, 1)
     # Record each parameter's final type BEFORE rendering the body's casts:
     # the widening to `Form` happens here, and a `type_of` that still answered
     # ObjectReference skipped the downcast the wider handle needs.
     types = [_param_type(conv, p) for p in params]
     for name, ptype in zip(params, types):
-        for spelling in (name.lower(), _safe_property_name(name).lower()):
+        for spelling in (name.lower(), conv.sc.var_renames.get(name.lower(), _safe_property_name(name)).lower()):
             conv.sc.var_types[spelling] = ptype
-    lines = _script.emit_body(conv, block.body, extends, 1)
-    sig = ', '.join('%s %s' % (ptype, _safe_property_name(name))
+    sig = ', '.join('%s %s = %s' % (ptype, conv.sc.var_renames.get(name.lower(), _safe_property_name(name)),
+                                   _default_value(ptype))
                     for name, ptype in zip(params, types))
-    conv.sc.udf_signature = types
-    rtype = 'Int ' if conv.sc.udf_returns else ''
-    return ['%sFunction TES4Call(%s)' % (rtype, sig)] + lines + ['EndFunction',
-                                                                 '']
+    sig = 'ObjectReference TES4_Caller = None' + (', ' + sig if sig else '')
+    conv.sc.udf_signature = ['ObjectReference'] + types
+    returns = [st.value for st in N.walk_stmts(block.body)
+               if isinstance(st, N.SetFunctionValue) and st.value is not None]
+    return_types = {_symbols.type_of_expr(value, conv.type_of)
+                    for value in returns}
+    return_types.discard('')
+    if 'String' in return_types:
+        result_type = 'String'
+    elif return_types - {'Bool', 'Int', 'Float'}:
+        object_types = return_types - {'Bool', 'Int', 'Float'}
+        result_type = next(iter(object_types)) if len(object_types) == 1 else 'Form'
+    else:
+        result_type = 'Float' if 'Float' in return_types else 'Int'
+    result_type = getattr(conv.xref, 'function_returns', {}).get(
+        conv.sc.edid.lower(), result_type)
+    conv.sc.udf_returns = True
+    conv.sc.udf_return_type = result_type
+    lines = _script.emit_body(conv, block.body, extends, 1)
+    rtype = result_type + ' '
+    result = ['%sFunction TES4Call(%s)' % (rtype, sig)]
+    result.append('  %s TES4_Result = %s' %
+                  (result_type, _default_value(result_type)))
+    declared = set(conv.sc.udf_params)
+    for var in tree.variables:
+        if var.name.lower() in declared:
+            continue
+        declared.add(var.name.lower())
+        safe = conv.sc.var_renames.get(var.name.lower(), _safe_property_name(var.name))
+        ptype = conv.sc.var_types.get(safe.lower(), 'Int')
+        result.append(f'  {ptype} {safe} = {_default_value(ptype)}')
+    authored = {conv.sc.var_renames.get(var.name.lower(), _safe_property_name(var.name)).lower()
+                for var in tree.variables}
+    for safe, ptype in sorted(conv.sc.synthetic_vars.items()):
+        if safe.lower() not in authored:
+            result.append(f'  {ptype} {safe} = {_default_value(ptype)}')
+    result += lines
+    # SetFunctionValue stores the result; it does not return from the function.
+    # Falling through End returns the stored value too.
+    if not isinstance(block.body[-1] if block.body else None, N.Return):
+        result.append('  Return TES4_Result')
+    result += ['EndFunction', '']
+    from .function_calls import invocation_wrapper
+    result += invocation_wrapper(types, result_type)
+    if types == ['Int', 'String', 'Int']:
+        result += ['Function TES4MenuCallback(Int menu, String tile, Int tileID)',
+                   '  TES4Call(None, menu, tile, tileID)', 'EndFunction', '']
+    return result
+
+
+def _default_value(ptype: str) -> str:
+    return {'String': '""', 'Float': '0.0', 'Int': '0',
+            'Bool': 'False'}.get(ptype, 'None')
 
 
 def _param_type(conv, name: str) -> str:
     """The Papyrus type for one UDF parameter.
 
-    Only a `ref` is ambiguous enough for usage to override the declaration --
-    Int and Float came from an explicit TES4 type and mean what they say.  A
-    `ref` with no usage evidence becomes `Form`, the permissive handle, so a
-    caller passing any record still compiles.  `Form` counts as ambiguous too:
-    it is what the cross-script `ref_as_base_form` pre-declaration leaves
-    behind, and returning it unchanged typed `mwGetFactionWitnessesFunc`'s
-    parameter Form while the body passed it to IsInFaction.
+    Reference parameters accept any form. A later assignment or a guarded
+    actor operation does not narrow what the caller may pass on entry.
+    Individual operations cast the handle to their required native type.
     """
     safe = _safe_property_name(name)
     declared = conv.sc.var_types.get(name.lower(), 'Int')
-    if declared not in ('ObjectReference', 'Form'):
+    if declared in ('Int', 'Float', 'Bool', 'String', 'TES4Collection'):
         return declared
-    return (conv.sc.var_types.get(safe.lower())
-            if conv.sc.var_types.get(safe.lower()) not in
-            (None, 'ObjectReference', 'Form')
-            else conv.sc.property_refs.get(safe)
-            or conv.sc.property_refs.get(safe.lower()) or 'Form')
+    return 'Form'
 
 
 def _udf_params(block_filter: str) -> list:
@@ -552,6 +603,12 @@ def events(conv, tree, extends: str, skip_poll: bool = False) -> list:
         elif conv.sc.uses_dropme and opener.startswith('Event OnEquipped('):
             out.append('  TES4_Container = akActor')
         out += merged[header]
+        if (opener.startswith('Event OnEffectStart(')
+                and conv.sc.uses_msg_buttons and conv.sc.has_scripteffectupdate):
+            # Message.Show is latent. Consume its result on the surviving
+            # start stack: a short-lived effect can expire before another
+            # registered OnUpdate is delivered after the menu closes.
+            out.append('  OnUpdate()')
         out.append(closer)
         out.append('')
         # TES4's `begin OnTrigger` runs EVERY FRAME an object is inside the
@@ -656,7 +713,9 @@ def poll(conv, tree, extends: str) -> list:
         btype = block.btype.lower()
         if btype in POLL_BLOCKS or (btype == 'menumode'
                                      and _menumode_kind(block) == 'poll'):
+            conv.sc.current_block_type = block.btype.lower()
             out += _script.emit_body(conv, block.body, extends, 1)
+            conv.sc.current_block_type = ''
 
     # Stage-arrival latches: record the stage each guarded quest is on NOW, so
     # the next pass can tell "we have already seen this stage" from "it just
@@ -1123,32 +1182,3 @@ def chargen_latch(conv) -> list:
     if not conv.sc.uses_chargen_menus:
         return []
     return ['', 'Bool TES4_ChargenMenuBusy = False']
-
-
-
-def _promote_assigned_actors(conv, tree) -> None:
-    """Retype a `ref` local FILLED by an Actor-returning native.
-
-    TES4 declares `ref combatTarget` and then writes `GetCombatTarget` into
-    it; the Papyrus native returns an Actor, so the variable is one even when
-    the script never calls an actor-only method through it (CGEmperorScript
-    only compares it and passes it on).  Without this the declaration stayed
-    ObjectReference and the pass-on needed a cast HEAD does not emit.
-    """
-    from script_convert.converter import _call_return_type
-    sc = conv.sc
-    for body in ([tree.preamble, tree.body]
-                 + [b.body for b in tree.blocks] if tree else []):
-        for st in N.walk_stmts(body):
-            if not isinstance(st, N.Assign):
-                continue
-            name = getattr(st.target, 'name', '')
-            called = getattr(st.value, 'called', '') or ''
-            if not name or not called:
-                continue
-            if _call_return_type(called) != 'Actor':
-                continue
-            low = name.lower()
-            if sc.var_types.get(low) == 'ObjectReference':
-                sc.var_types[low] = 'Actor'
-                sc.var_types[_safe_property_name(name).lower()] = 'Actor'

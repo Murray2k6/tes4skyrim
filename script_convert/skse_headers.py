@@ -12,9 +12,38 @@ import shutil
 
 
 _ADDITIONS = {
+    "Race.psc": """
+; SKSE64 scripts/modified/Race.psc
+int Function GetSpellCount() native
+Spell Function GetNthSpell(int n) native
+""",
+    "ActorBase.psc": """
+; SKSE64 scripts/modified/ActorBase.psc
+CombatStyle Function GetCombatStyle() native
+""",
+    "ObjectReference.psc": """
+int Function GetNumItems() native
+Form Function GetNthForm(int index) native
+Bool Function IsHarvested() native
+Function SetHarvested(Bool harvested) native
+""",
+    "Spell.psc": """
+; SKSE64 scripts/modified/Spell.psc
+int Function GetNumEffects() native
+MagicEffect Function GetNthEffectMagicEffect(int index) native
+""",
     "Form.psc": """
 ; SKSE64 compile declarations used by the TES4 converter
 bool Function IsPlayable() native
+Function RegisterForMenu(string menuName) native
+Function RegisterForModEvent(string eventName, string callbackName) native
+""",
+    "Game.psc": """
+Form Function GetFormEx(int formID) global native
+bool Function IsPluginInstalled(string name) global native
+ObjectReference Function GetCurrentCrosshairRef() global native
+String Function GetModName(Int index) global native
+int Function GetModByName(string name) global native
 """,
     "Actor.psc": """
 ; SKSE64 compile declarations used by the TES4 converter
@@ -34,6 +63,15 @@ float Function Log(float arg1) global native
 }
 
 _NEW_HEADERS = {
+    "Input.psc": """Scriptname Input Hidden
+; SKSE64 scripts/modified/Input.psc
+bool Function IsKeyPressed(int dxKeycode) global native
+Function TapKey(int dxKeycode) global native
+Function HoldKey(int dxKeycode) global native
+Function ReleaseKey(int dxKeycode) global native
+int Function GetMappedKey(string control, int deviceType = 255) global native
+""",
+    "CombatStyle.psc": "Scriptname CombatStyle extends Form Hidden\n",
     "StringUtil.psc": """Scriptname StringUtil Hidden
 
 ; SKSE64 compile declarations used by the TES4 converter
@@ -70,5 +108,7 @@ def prepare_skse_headers(vanilla_dir: str, work_dir: Path) -> Path:
 
     for name, text in _NEW_HEADERS.items():
         (work_dir / name).write_text(text.rstrip() + "\n", encoding="utf-8")
+
+    shutil.copy2(Path(__file__).parent / 'headers/UI.psc', work_dir / 'UI.psc')
 
     return work_dir

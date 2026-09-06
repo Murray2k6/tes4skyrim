@@ -23,11 +23,9 @@ Re-expression in Skyrim terms:
 Gating is limited to topics that appear in an explicit Add-Topics data list or
 AddTopic command: those are the designer-controlled reveals. Topics only ever
 revealed by name-mention stay ungated (visible when conditions pass) — gating
-them would risk dead content on any name-match miss. Topics revealed by BARK
-lines (GREETING/HELLO) are also ungated: the revealing bark fires the moment
-the player contacts the NPC, so in Oblivion they are effectively visible on
-first talk (e.g. Azzan's "Join the Fighters Guild" via his FG-ad greeting) —
-a gate would only add fragment-vs-menu timing risk. Choice (TCLT) targets
+them would risk dead content on any name-match miss. A greeting's explicit
+reveal runs through its fragment, preserving that greeting's conditions.
+Choice (TCLT) targets
 that are explicitly added are gated like any other, with their TCLT-parent
 INFOs as additional revealers (choosing the path unlocks and persists, like
 Oblivion); choice targets never explicitly added are handled by the branch
@@ -41,7 +39,7 @@ FormIDs so the plan is identical regardless of the load-order offset.
 import re
 from collections import defaultdict
 
-_RE_ADDTOPIC = re.compile(r'\baddtopic[\s,]+(\w+)', re.IGNORECASE)
+_RE_ADDTOPIC = re.compile(r'\baddtopic[\s,]+"?(\w+)', re.IGNORECASE)
 
 
 def _low24(fid_str: str) -> int:
@@ -132,20 +130,7 @@ def build_unlock_plan(by_type: dict) -> dict:
                         stage_addtopics[(quest_edid.lower(), stage_idx)].append(fid24)
             i += 1
 
-    # --- Topics AddTopic'd from an object/quest SCRIPT (SCPT), which neither
-    # the INFO nor the QUST scan sees. These matter for BRANCH VISIBILITY, not
-    # gating: `AddTopic` has no Skyrim equivalent, so script_convert emits it as
-    # an inert `;NE: AddTopic` comment and NOTHING would ever open a gate placed
-    # on them — gating here would produce a permanently invisible topic.
-    #
-    # The load-bearing case is Oblivion's `Startup` script ("this script will
-    # run once at the beginning of the game", on the Start-Game-Enabled
-    # StartupQuest): it adds the 24 globally-available topics — INFOGENERAL
-    # ("Rumors"), the city topics, TrainingQuestTopic, GuardHelp, Bed,
-    # Directions... INFOGENERAL is ALSO a TCLT choice target 472 times, and the
-    # branch rule below demotes "TCLT target that is never explicitly added" to
-    # a non-top-level (choice-only) branch. Blind to SCPT, the converter judged
-    # it never-added and stripped Rumors from every NPC's topic menu.
+    # SCPT commands open the same globals as INFO and quest-stage fragments.
     script_addtopics = set()
     for rec in scpts:
         script = rec.get('SCTX', '')
@@ -155,6 +140,7 @@ def build_unlock_plan(by_type: dict) -> dict:
             fid24 = dial_edid_to_fid24.get(name.lower())
             if fid24:
                 script_addtopics.add(fid24)
+    explicit_targets.update(script_addtopics)
 
     # --- Gate set: explicit targets minus skipped / bark topics. Choice
     # (TCLT) targets ARE gated when explicitly added — their TCLT-parent
@@ -189,25 +175,7 @@ def build_unlock_plan(by_type: dict) -> dict:
         mention_re = re.compile(r'\b(' + '|'.join(alts) + r')\b', re.IGNORECASE)
 
     # --- Revealer INFOs ---
-    bark_cache = {}
-
-    def _is_bark(topic_fid24):
-        if topic_fid24 not in bark_cache:
-            d = dial_by_fid24.get(topic_fid24)
-            if d is None:
-                bark_cache[topic_fid24] = False
-            else:
-                try:
-                    dt = int(d.get('DATA.Type', '0'))
-                except ValueError:
-                    dt = 0
-                bark_cache[topic_fid24] = classify_topic(
-                    d.get('EditorID', ''), dt)[3]
-        return bark_cache[topic_fid24]
-
     info_reveals = {}
-    bark_revealed = set()   # globals revealed by GREETING/HELLO/other barks
-    convo_revealed = set()  # globals revealed by a selectable conversation line
     for rec in infos:
         info_fid24 = _low24(rec.get('FormID', ''))
         if not info_fid24:
@@ -272,41 +240,7 @@ def build_unlock_plan(by_type: dict) -> dict:
         globals_set.discard(gated.get(own_topic))
         if globals_set:
             info_reveals[info_fid24] = globals_set
-            # Only an EXPLICIT bark reveal (AddTopic/Choice) makes the topic
-            # visible on first contact; a prose mention rides the bark line's
-            # own conditions and must keep the gate.
-            if _is_bark(own_topic):
-                bark_revealed |= explicit_set
-            else:
-                convo_revealed |= explicit_set
-
-    # --- Bark-revealed topics are NOT gated. A GREETING/HELLO revealer fires
-    # the moment the player contacts the NPC — in Oblivion the topic is
-    # effectively visible on first talk, so a gate only adds the risk of the
-    # reveal fragment racing the menu (or a different greeting playing) and
-    # locking the topic. Their own GetIsID/faction/stage conditions do the
-    # real filtering. Gates stay only on topics revealed exclusively by
-    # conversation lines / quest stages (e.g. "Rats" after Azzan's contract
-    # line).
-    #
-    # EXCEPT when the topic is ALSO revealed by a conversation line. A greeting
-    # revealer belongs to whichever NPC that greeting is gated to, and it says
-    # nothing about a DIFFERENT NPC whose reveal comes from a topic line. The
-    # `contract` topic is the case that proves it: three greetings AddTopic it
-    # (Burz's "Maybe you want a contract?" among them) AND the Fighters Guild
-    # join line does. Ungating it on the greetings' account detached it from
-    # the join entirely — after joining Azzan, `contract` stood or fell purely
-    # on its own INFO conditions while `advancementFG`/`ratsTOPIC` stayed
-    # gated, so the menu desynchronised: the player who did not click Contract
-    # lost every topic and was left with the generic INFOGENERAL pool
-    # ("Rumors"), which is exactly the reported symptom. Keeping the gate makes
-    # the reveal explicit and idempotent from BOTH revealer kinds.
-    if bark_revealed:
-        bark_only = bark_revealed - convo_revealed
-        gated = {f: g for f, g in gated.items() if g not in bark_only}
-    kept = set(gated.values())
-    info_reveals = {fid: sorted(gs & kept)
-                    for fid, gs in info_reveals.items() if gs & kept}
+    info_reveals = {fid: sorted(gs) for fid, gs in info_reveals.items()}
 
     # --- Quest-stage revealers ---
     stage_reveals = defaultdict(set)
@@ -377,7 +311,7 @@ def build_unlock_plan(by_type: dict) -> dict:
     # every record-level check (the ESM looks perfect). An ungated topic that
     # shows a little early is a cosmetic bug; a gated topic with no revealer is
     # a dead quest — so when the two disagree, drop the gate.
-    revealed = set()
+    revealed = {gated[f] for f in script_addtopics if f in gated}
     for gs in info_reveals.values():
         revealed.update(gs)
     for gs in stage_reveals.values():

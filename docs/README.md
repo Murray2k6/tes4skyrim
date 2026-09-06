@@ -109,6 +109,14 @@ A dated sweep over a corpus, with counts. Frozen once written; a re-audit is a N
 | [quest_script_conversion.md](audits/quest_script_conversion.md) | Quest Script Conversion Audit |
 | [skse_conversion.md](audits/skse_conversion.md) | SKSE / OBSE Convertibility Audit — Grounded in the Original Nehrim Scripts |
 
+## `notes/`
+
+Reported observations and dated findings that are not format references or corpus audits.
+
+| Doc | Covers |
+|---|---|
+| [mod_playtest.md](notes/mod_playtest.md) | Open user reports: Midas, MOO, weather, encounters, dialogue/disposition, Akatosh Mount, and books |
+
 ## `assets/`
 
 Non-prose files. `banner.png` and `favicon.ico` are loaded at RUNTIME by `gui.py`.

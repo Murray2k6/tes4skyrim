@@ -202,6 +202,13 @@ class While(Stmt):
 
 
 @dataclass
+class ForEach(Stmt):
+    target: Expr = None
+    value: Expr = None
+    body: list = field(default_factory=list)
+
+
+@dataclass
 class Label(Stmt):
     """OBSE `Label <n>` -- the head of a Goto loop."""
     number: str = ''

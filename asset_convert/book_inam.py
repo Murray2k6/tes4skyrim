@@ -45,6 +45,7 @@ from multiprocessing import cpu_count
 from pathlib import Path
 
 import numpy as np
+from .game_paths import matches_path_scope
 
 if not hasattr(time, 'clock'):
     time.clock = time.perf_counter  # pyffi uses the removed time.clock
@@ -860,7 +861,7 @@ def _split_master_owned(models, asset_subdir, extract_roots):
 
 def generate_book_inams(source_file, extract_dir='export', output_dir='output',
                         templates_dir=None, skyrim_data=None, workers=None,
-                        master_names=None):
+                        master_names=None, mesh_subdirs=None):
     """Generate INAM meshes/textures for every distinct book model of a plugin.
 
     `master_names` are this plugin's TES4 masters, in load order. A plugin
@@ -902,6 +903,12 @@ def generate_book_inams(source_file, extract_dir='export', output_dir='output',
     # ValueError that aborted the entire asset stage on a clash is gone.
     models = sorted(models, key=lambda m: m.lower())
     basenames = inv_basename_map(models)
+
+    # Derive names over the complete set first: filtering must never rename
+    # colliding leaf filenames or change the paths the imported records use.
+    models = [m for m in models if matches_path_scope(m, mesh_subdirs)]
+    if not models:
+        return {'ok': 0, 'skip': 0, 'fail': 0}
 
     tpls = load_templates(templates_dir, skyrim_data)
     stats = {'ok': 0, 'skip': 0, 'fail': 0}

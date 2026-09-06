@@ -106,7 +106,8 @@ def parse_esm(esm_path):
     # Without the masters every one of those recomputes to an EMPTY prefix and
     # the audit reports a mismatch against a voicemap that is actually right —
     # the audit would agree with the bug it exists to catch.
-    qust_edid.update(_master_qust_edids(esm_path, header))
+    qust_edid = {**_master_qust_edids(esm_path, header), **qust_edid}
+    vtyp_edid = {**master_edids(esm_path, header, 'VTYP'), **vtyp_edid}
     return infos, dial_by_fid, qust_edid, vtyp_edid
 
 

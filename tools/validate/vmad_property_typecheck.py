@@ -38,6 +38,7 @@ unconditional RegisterForSingleUpdate(0.5) re-armed forever.
 See project_raw_formid_meaningless_across_plugins / project_master_index_routing.
 """
 import argparse
+import mmap
 import os
 import re
 import struct
@@ -84,56 +85,58 @@ _ACCEPTS = {
 _PERMISSIVE = {'Form', 'ScriptObject', 'Alias', 'ReferenceAlias'}
 
 
-def _read_vmad_bindings(path):
-    """script name (lower) -> set of property names actually bound in any VMAD.
+def _vmad_properties(path, attached=None, bases=None):
+    """Walk actual subrecords, including compressed records and XXXX VMADs."""
+    from tools.script.vmad_probe import _records, _wstring
+    from tools.esm.tes5_esm_reader import _parse_subrecords
+    with open(path, 'rb') as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        for _, fid, _, body in _records(data):
+            for sub in _parse_subrecords(body):
+                if bases is not None and sub.type == 'NAME' and len(sub.data) == 4:
+                    bases[fid & 0xFFFFFF] = struct.unpack('<I', sub.data)[0]
+                if sub.type != 'VMAD':
+                    continue
+                v = sub.data
+                version, fmt, count = struct.unpack_from('<HHH', v)
+                if fmt not in (1, 2):
+                    raise ValueError(f'{fid:08X}: unsupported VMAD object format {fmt}')
+                pos = 6
+                for _ in range(count):
+                    script, pos = _wstring(v, pos)
+                    if attached is not None:
+                        attached[fid & 0xFFFFFF].add(script.lower())
+                    pos += 1
+                    nprops = struct.unpack_from('<H', v, pos)[0]
+                    pos += 2
+                    for _ in range(nprops):
+                        prop, pos = _wstring(v, pos)
+                        kind = v[pos]
+                        pos += 2
+                        scalar = kind - 10 if kind >= 11 else kind
+                        size = 1
+                        if kind >= 11:
+                            size = struct.unpack_from('<I', v, pos)[0]
+                            pos += 4
+                        values = []
+                        for _ in range(size):
+                            if scalar == 1:
+                                values.append(struct.unpack_from('<I', v, pos + (4 if fmt == 2 else 0))[0])
+                                pos += 8
+                            elif scalar == 2:
+                                _, pos = _wstring(v, pos)
+                            elif scalar in (3, 4):
+                                pos += 4
+                            elif scalar == 5:
+                                pos += 1
+                            else:
+                                raise ValueError(f'{fid:08X}: unsupported VMAD property type {kind}')
+                        yield script, prop, kind, values
 
-    Walks the raw file rather than the record parser: a VMAD can hang off any
-    record type, and only the property NAMES are needed here.
-    """
-    data = open(path, 'rb').read()
+
+def _read_vmad_bindings(path):
     bound = defaultdict(set)
-    pos = 0
-    while True:
-        i = data.find(b'VMAD', pos)
-        if i < 0:
-            break
-        pos = i + 4
-        size = struct.unpack_from('<H', data, i + 4)[0]
-        v = data[i + 6:i + 6 + size]
-        if len(v) < 8:
-            continue
-        try:
-            ver, fmt, nscripts = struct.unpack_from('<hhH', v, 0)
-            # Guard against a false 'VMAD' hit inside arbitrary record data.
-            if ver != 5 or fmt != 2 or not 0 <= nscripts <= 50:
-                continue
-            p = 6
-            for _ in range(nscripts):
-                ln = struct.unpack_from('<H', v, p)[0]
-                p += 2
-                sname = v[p:p + ln].decode('ascii', 'replace')
-                p += ln + 1                      # + flags byte
-                nprops = struct.unpack_from('<H', v, p)[0]
-                p += 2
-                for _ in range(nprops):
-                    pl = struct.unpack_from('<H', v, p)[0]
-                    p += 2
-                    pname = v[p:p + pl].decode('ascii', 'replace')
-                    p += pl
-                    ptype = v[p]
-                    p += 2                       # type + status
-                    bound[sname.lower()].add(pname)
-                    if ptype == 1:               # object: unused+alias+formID
-                        p += 8
-                    elif ptype in (2, 3, 4, 5):  # string handled below
-                        p += 4
-                    elif ptype == 11:            # array of objects
-                        n = struct.unpack_from('<I', v, p)[0]
-                        p += 4 + n * 8
-                    else:
-                        raise ValueError('unhandled property type')
-        except Exception:
-            continue
+    for script, prop, _, _ in _vmad_properties(path):
+        bound[script.lower()].add(prop)
     return bound
 
 
@@ -194,60 +197,13 @@ def _record_index(path):
 
 
 def _vmad_property_formids(path):
-    """(script, property, formid) for every OBJECT property bound in a VMAD.
-
-    Same walk as _read_vmad_bindings, but keeps the FormID instead of
-    discarding it -- that id is the whole subject of the cross-master check.
-    """
-    data = open(path, 'rb').read()
-    out, pos = [], 0
-    while True:
-        i = data.find(b'VMAD', pos)
-        if i < 0:
-            break
-        pos = i + 4
-        size = struct.unpack_from('<H', data, i + 4)[0]
-        v = data[i + 6:i + 6 + size]
-        if len(v) < 8:
-            continue
-        found = []
-        try:
-            ver, fmt, nscripts = struct.unpack_from('<hhH', v, 0)
-            if ver != 5 or fmt != 2 or not 0 <= nscripts <= 50:
-                continue
-            p = 6
-            for _ in range(nscripts):
-                ln = struct.unpack_from('<H', v, p)[0]
-                p += 2
-                sname = v[p:p + ln].decode('ascii', 'replace')
-                p += ln + 1
-                nprops = struct.unpack_from('<H', v, p)[0]
-                p += 2
-                for _ in range(nprops):
-                    pl = struct.unpack_from('<H', v, p)[0]
-                    p += 2
-                    pname = v[p:p + pl].decode('ascii', 'replace')
-                    p += pl
-                    ptype = v[p]
-                    p += 2
-                    if ptype == 1:
-                        fid = struct.unpack_from('<I', v, p + 4)[0]
-                        found.append((sname, pname, fid))
-                        p += 8
-                    elif ptype in (2, 3, 4, 5):
-                        p += 4
-                    elif ptype == 11:
-                        n = struct.unpack_from('<I', v, p)[0]
-                        p += 4 + n * 8
-                    else:
-                        raise ValueError('unhandled property type')
-        except Exception:
-            continue
-        out.extend(found)
-    return out
+    for script, prop, kind, values in _vmad_properties(path):
+        if kind in (1, 11):
+            for fid in values:
+                yield script, prop, fid
 
 
-def _report_cross_master(plugin, src, limit, verbose):
+def _report_cross_master(plugin, src, limit, verbose, skyrim_esm=None, script_prefix=""):
     """Resolve each bound property's real FormID through the MAST list.
 
     A mis-routed index byte points the property at an unrelated record, which
@@ -259,10 +215,10 @@ def _report_cross_master(plugin, src, limit, verbose):
     masters = _masters(esm)
 
     # Declared Papyrus type per (script, property), for the compatibility test.
-    decl = re.compile(r'^\s*([A-Za-z_]\w*)\s+Property\s+(\w+)', re.M)
+    decl = re.compile(r'^\s*([A-Za-z_]\w*(?:\[\])?)\s+Property\s+(\w+)', re.M)
     declared = {}
     for fn in sorted(os.listdir(src)):
-        if not fn.endswith('.psc'):
+        if not fn.endswith('.psc') or not fn.lower().startswith(script_prefix.lower()):
             continue
         text = open(os.path.join(src, fn), encoding='utf-8',
                     errors='replace').read()
@@ -270,11 +226,54 @@ def _report_cross_master(plugin, src, limit, verbose):
             declared[(fn[:-4].lower(), m.group(2))] = m.group(1)
 
     cache = {}
+    script_cache = {}
+    ancestors = {}
+    source_dirs = [src] + [str(paths(name, out_root=out_dir).esm.parent / 'scripts' / 'source')
+                           for name in masters]
+
+    def ancestry(ptype):
+        key = ptype.lower()
+        if key not in ancestors:
+            chain = {key}
+            for directory in source_dirs:
+                path = os.path.join(directory, ptype + '.psc')
+                if not os.path.isfile(path):
+                    continue
+                with open(path, encoding='utf-8', errors='replace') as source:
+                    match = re.search(r'(?im)^\s*ScriptName\s+\w+\s+extends\s+(\w+)', source.read())
+                if match and match[1].lower() not in chain:
+                    # Publish before recursing so malformed cycles cannot loop.
+                    ancestors[key] = chain
+                    chain.update(ancestry(match[1]))
+                break
+            ancestors[key] = chain
+        return ancestors[key]
+
+    def scripts_for(name, local):
+        if name not in script_cache:
+            path = str(paths(name, out_root=out_dir).esm)
+            attached, bases = defaultdict(set), {}
+            if os.path.isfile(path):
+                for _ in _vmad_properties(path, attached, bases):
+                    pass
+            script_cache[name] = attached, bases
+        attached, bases = script_cache[name]
+        result = set(attached.get(local, ()))
+        base = bases.get(local)
+        if base:
+            origin_masters = _masters(str(paths(name, out_root=out_dir).esm))
+            idx = base >> 24
+            origin = name if idx == len(origin_masters) else (
+                origin_masters[idx] if idx < len(origin_masters) else None)
+            if origin and (origin, base & 0xFFFFFF) != (name, local):
+                result.update(scripts_for(origin, base & 0xFFFFFF))
+        return result
 
     def index_for(name):
         """Record index of a master, read from ITS OWN converted output."""
         if name not in cache:
-            path = str(paths(name, out_root=out_dir).esm)
+            path = (skyrim_esm if skyrim_esm and name.lower() == 'skyrim.esm'
+                    else str(paths(name, out_root=out_dir).esm))
             cache[name] = _record_index(path) if os.path.exists(path) else None
         return cache[name]
 
@@ -287,9 +286,15 @@ def _report_cross_master(plugin, src, limit, verbose):
             continue
         idx, local = fid >> 24, fid & 0xFFFFFF
         ptype = declared.get((sname.lower(), pname))
-        if ptype is None or ptype in _PERMISSIVE or ptype.startswith('TES4_'):
+        if ptype and ptype.endswith('[]'):
+            ptype = ptype[:-2]
+        if ptype is None or ptype in _PERMISSIVE:
             continue
         accepts = _ACCEPTS.get(ptype)
+        custom = accepts is None and ptype.startswith('TES4_')
+        if custom:
+            accepts = set().union(*(sigs for name, sigs in _ACCEPTS.items()
+                                    if name.lower() in ancestry(ptype)))
         if accepts is None:
             continue
         # A plugin's own records sit immediately AFTER its masters, so index
@@ -309,6 +314,9 @@ def _report_cross_master(plugin, src, limit, verbose):
                         None))
             continue
         hits = table.get(local)
+        # PlayerRef is created by the engine; it is absent from Skyrim.esm.
+        if src_name.lower() == 'skyrim.esm' and local == 0x14:
+            hits = [('ACHR', 'PlayerRef')]
         checked += 1
         if not hits:
             bad.append((sname, pname, ptype, f'{fid:08X}', src_name,
@@ -320,6 +328,10 @@ def _report_cross_master(plugin, src, limit, verbose):
             if len(hits) > 1:
                 sig = '/'.join(sorted({s for s, _ in hits}))
             bad.append((sname, pname, ptype, f'{fid:08X}', src_name, sig, edid))
+        elif custom and not any(ptype.lower() in ancestry(script)
+                                for script in scripts_for(src_name, local)):
+            bad.append((sname, pname, ptype, f'{fid:08X}', src_name,
+                        '<script class not attached>', hits[0][1]))
 
     print()
     print(f'cross-master: object properties resolved: {checked}')
@@ -342,7 +354,7 @@ def _report_cross_master(plugin, src, limit, verbose):
             print(f'... {len(bad) - limit} more (use --max/-v)')
 
 
-def _report_unbound(plugin, src, limit, verbose):
+def _report_unbound(plugin, src, limit, verbose, script_prefix=""):
     """Declared-but-UNBOUND object properties -- the other way a property Nones.
 
     A property the .psc declares but no VMAD binds reads None for the whole
@@ -364,11 +376,11 @@ def _report_unbound(plugin, src, limit, verbose):
     """
     esm = os.path.join(ROOT, 'output', plugin, plugin)
     bound = _read_vmad_bindings(esm)
-    decl = re.compile(r'^\s*([A-Za-z_]\w*)\s+Property\s+(\w+)\s+Auto', re.M)
+    decl = re.compile(r'^\s*([A-Za-z_]\w*(?:\[\])?)\s+Property\s+(\w+)\s+Auto', re.M)
     per_name = Counter()
     per_script = defaultdict(list)
     for fn in sorted(os.listdir(src)):
-        if not fn.endswith('.psc'):
+        if not fn.endswith('.psc') or not fn.lower().startswith(script_prefix.lower()):
             continue
         sname = fn[:-4].lower()
         if sname not in bound:
@@ -412,8 +424,11 @@ def main():
                     help="resolve each bound property's real FormID through "
                          'this plugin MAST list, catching an index byte '
                          'copied verbatim from a master')
+    ap.add_argument('--skyrim-esm', help='Vanilla Skyrim.esm for cross-master bindings')
+    ap.add_argument('--script-prefix', default='', help='Limit declarations to scripts with this name prefix')
     ap.add_argument('--max', type=int, default=25)
     args = ap.parse_args()
+    script_prefix = args.script_prefix
 
     from tools.dialog.dialog_emulator import read_tes5_file
     path = os.path.join(ROOT, 'output', args.plugin, args.plugin)
@@ -449,7 +464,7 @@ def main():
     detail = defaultdict(list)
     checked = 0
     for fn in sorted(os.listdir(src)):
-        if not fn.endswith('.psc'):
+        if not fn.endswith('.psc') or not fn.lower().startswith(script_prefix.lower()):
             continue
         text = open(os.path.join(src, fn), encoding='utf-8',
                     errors='replace').read()
@@ -500,10 +515,10 @@ def main():
                 print(f'  {fn}: {pname}')
 
     if args.cross_master:
-        _report_cross_master(args.plugin, src, args.max, args.verbose)
+        _report_cross_master(args.plugin, src, args.max, args.verbose, args.skyrim_esm, script_prefix)
 
     if args.unbound:
-        _report_unbound(args.plugin, src, args.max, args.verbose)
+        _report_unbound(args.plugin, src, args.max, args.verbose, script_prefix)
 
 
 if __name__ == '__main__':

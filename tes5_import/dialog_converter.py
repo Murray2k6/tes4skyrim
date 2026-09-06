@@ -178,84 +178,35 @@ def _collect_all_scro_properties(rec: dict, fid_to_edid: dict) -> dict:
 
 
 def _quest_well_known_refs(rec: dict, xref=None) -> dict:
-    """{name: Papyrus type} of every property this quest's QF_ script declares.
-
-    Running the same converter the .psc was generated from is what tells us
-    WHICH properties the script actually declares — the synthesized records
-    (TES4ControlsDisabled, TES4Fame, TES4Msg_*) that resolve only through the
-    well-known registry, the engine-hardcoded names (Player) no SCRO covers,
-    and the declared TYPE of each, which decides whether an actor-base binding
-    must be redirected to the placed reference. Binding all ~1,880 registry
-    entries to every quest instead is what this replaced.
-
-    Best-effort: a converter failure yields an empty dict, and the property is
-    simply left unbound exactly as before this filtering existed.
-    """
-    scripts = []
-    record_script = get_str(rec, 'ResultScript')
-    if record_script:
-        scripts.append(record_script)
-    for i in range(get_int(rec, 'StageCount')):
-        log_count = get_int(rec, f'Stage[{i}].LogCount')
-        if log_count:
-            for j in range(log_count):
-                src = get_str(rec, f'Stage[{i}].Log[{j}].ResultScript')
-                if src.strip():
-                    scripts.append(src)
-        else:
-            src = get_str(rec, f'Stage[{i}].ResultScript')
-            if src.strip():
-                scripts.append(src)
-    if not scripts or xref is None:
+    """Properties read by the emitted quest fragments and their helpers."""
+    if xref is None:
         return {}
-
-    # One converter for all stages: convert_fragment deliberately preserves
-    # _property_refs across calls, which is how the QF_ generator accumulates
-    # the single declaration list the whole script shares.
     from script_convert.converter import ScriptConverter
+    from script_convert.pipeline import (_preload_scro_refs, _add_scro_ref,
+                                         _scro_list, resolve_scro_aliases)
+    from script_convert.symbols import used_property_refs
+    scripts = []
+    if get_str(rec, 'ResultScript'):
+        scripts.append(('', get_str(rec, 'ResultScript')))
+    for i in range(get_int(rec, 'StageCount')):
+        count = get_int(rec, f'Stage[{i}].LogCount')
+        prefixes = ([f'Stage[{i}].Log[{j}].' for j in range(count)] if count
+                    else [f'Stage[{i}].'])
+        for prefix in prefixes:
+            source = get_str(rec, prefix + 'ResultScript')
+            if source.strip():
+                scripts.append((prefix, source))
     conv = ScriptConverter(xref)
-    for src in scripts:
-        try:
-            conv.convert_fragment(src, 'Quest')
-        except Exception:
-            continue
-    return dict(conv._property_refs)
-
-
-def _resolve_declared_properties(declared, well_known_props: dict = None) -> dict:
-    """FormID bindings for the engine-hardcoded and synthesized names a QF_
-    quest fragment declares.
-
-    The record's SCROs cover ordinary records, but NOT these: the player is in
-    no registry and its SCRO is deliberately skipped (see
-    _collect_scro_properties), and the synthesized records exist only in the
-    output. An unbound property is None and the first use aborts the WHOLE
-    fragment — `UrielSeptimRef.SetLookAt(Player)` killed Charactergen stage 12
-    before it unlocked CGEmperor01-24, leaving the Emperor with only 'Rumors'.
-
-    The player check comes FIRST so the engine's PlayerRef can never be
-    displaced by a same-named registry entry or record. Names that resolve to
-    nothing are omitted, never bound to zero.
-    """
-    out = {}
-    for name in (declared or ()):
-        low = name.lower()
-        if low in ('player', 'playerref'):
-            # An ActorBase-typed `Player` is the NPC_ (0x7), not the reference
-            # (0x14): the VM refuses a reference into an ActorBase property and
-            # the whole script's init aborts.  TES4 scripts reach the base by
-            # raw FormID — `GetIsID 7` in Knights' ND10 time-stop effect.
-            # `declared` is normally {name: type}, but callers may pass a
-            # bare sequence of names; without a type, assume the reference.
-            _dtype = (declared.get(name)
-                      if isinstance(declared, dict) else None)
-            out[name] = (_PLAYER_BASE_FID if _dtype == 'ActorBase'
-                         else _PLAYER_FORMID)
-        elif low in ENGINE_GLOBAL_FORMIDS:
-            out[name] = ENGINE_GLOBAL_FORMIDS[low]
-        elif well_known_props and name in well_known_props:
-            out[name] = well_known_props[name]
-    return out
+    _preload_scro_refs(conv, rec, xref)
+    lines = []
+    for prefix, source in scripts:
+        scro = _scro_list(rec, prefix)
+        for fid in scro:
+            _add_scro_ref(conv, fid, xref)
+        conv.set_scro_aliases(resolve_scro_aliases(source, scro, xref))
+        lines.extend(conv.convert_fragment(source, 'Quest'))
+    lines.extend(conv.get_cell_family_helpers())
+    return used_property_refs(conv.get_property_refs(), lines)
 
 
 def _quest_stage_fragments(rec: dict) -> list:
@@ -796,59 +747,14 @@ def convert_QUST(rec: dict, fid_to_edid: dict = None,
     attached = get_quest_script(get_formid(rec, 'FormID'))
     if (stage_frags or attached) and edid:
         from script_convert.pipeline import build_vmad_quest_fragments
-        prop_vals = (_collect_all_scro_properties(rec, fid_to_edid)
-                     if fid_to_edid else {})
-        # Bind every property the QF_ script DECLARES, not just what the SCROs
-        # cover: the player is in no registry and its SCRO is skipped, and the
-        # synthesized records (TES4ControlsDisabled, TES4Msg_*, ...) resolve
-        # ONLY through the well-known registry — looked up per declared name,
-        # because merging the whole ~1,880-entry registry put every unlock
-        # global on every scripted quest.
-        declared = _quest_well_known_refs(rec, xref)
-        for name, fid in _resolve_declared_properties(
-                declared, well_known_props).items():
-            if name.lower() in ('player', 'playerref'):
-                # The engine's PlayerRef always wins — a SCRO-derived case
-                # variant naming the converted TES4 player NPC_ would bind a
-                # BASE record the VM refuses, and the property reads None.
-                # (`fid` is already the base 0x7 when the property is declared
-                # ActorBase — see _resolve_declared_properties.)
-                for k in [k for k in prop_vals
-                          if k.lower() == name.lower() and k != name]:
-                    del prop_vals[k]
-                prop_vals[name] = fid
-            elif name.lower() in ENGINE_GLOBAL_FORMIDS:
-                prop_vals.setdefault(name, fid)
-            else:
-                prop_vals[name] = fid
-        # A reference-typed property naming an actor BASE means the placed
-        # instance (`CarmaloTruiand.moveto ...` on QF_MS26); the VM refuses an
-        # NPC_/CREA into it and the property reads None. Rebind the SCRO's
-        # base to its one placed ref — and bind names the SCROs missed.
         if xref is not None:
-            from script_convert.constants import wants_placed_reference
-            offset = get_formid_index_offset()
-            for name, ptype in declared.items():
-                if not wants_placed_reference(ptype):
-                    continue
-                if name.lower() in ('player', 'playerref'):
-                    continue    # always PlayerRef 0x14, bound above
-                raw_hex = xref.edid_to_formid.get(name.lower(), '')
-                if not raw_hex or \
-                        xref.record_type.get(raw_hex, '') not in (
-                            'NPC_', 'CREA', 'ACTI', 'LIGH'):
-                    continue
-                ref_hex = xref.unique_placed_ref(raw_hex)
-                if not ref_hex:
-                    continue
-                try:
-                    fid = remap_formid(int(ref_hex, 16), offset)
-                except ValueError:
-                    continue
-                for k in [k for k in prop_vals
-                          if k.lower() == name.lower() and k != name]:
-                    del prop_vals[k]
-                prop_vals[name] = fid
+            from .object_scripts import bind_properties
+            declared = _quest_well_known_refs(rec, xref)
+            prop_vals = bind_properties(declared, xref, get_formid_index_offset(),
+                                        well_known_props)
+        else:
+            prop_vals = (_collect_all_scro_properties(rec, fid_to_edid)
+                         if fid_to_edid else {})
         if unlock_plan and unlock_globals:
             ql = edid.lower()
             for (qkey, _stage), gnames in unlock_plan['stage_reveals'].items():
@@ -1096,53 +1002,18 @@ _BARK_SUBTYPES = frozenset(
     sub for (sub, _snam, _cat) in _EDID_SUBTYPE.values() if sub != 0
 )
 
-# DIAL topics to skip entirely (mechanics with no Skyrim equivalent, or test data)
-_SKIP_TYPES = frozenset({DIAL_TYPE_PERSUASION, DIAL_TYPE_SERVICE})
-_SKIP_EDIDS = frozenset({
+# Engine response channels must stay addressable by dependent scripts. Their
+# names are not player prompts: preserve them as unlisted Custom topics.
+_UNLISTED_EDIDS = frozenset({
     'CreatureResponses', 'SECreatureResponses', 'TamrielGateResponses', 'ANY',
-    # InfoRefusal (DATA.Type 6 Misc, not a Type-3 persuasion topic so not caught
-    # by _SKIP_TYPES) is the persuasion/disposition refusal line ("That's
-    # privileged information. I'm sorry."). Skyrim has no persuasion mechanic to
-    # trigger it, and it is conditionless under the always-running Generic quest,
-    # so as an IDLE bark it fired as EVERY NPC's walk-past line. No equivalent.
-    'InfoRefusal',
-    # Oblivion's EMOTION-RESPONSE channels. These are not topics the player ever
-    # picks: Oblivion's engine selects one after a player line to voice the
-    # NPC's reaction to it (an angry reply gets AngerReceive, a question gets
-    # QuestionGeneral, and so on). Skyrim has no such channel -- its engine
-    # picks a response only through a topic the player selected, so there is
-    # nothing to route these to. Converted, they became reachable TOPICS: the
-    # emulator showed Varel Morvayn with 11 of them ("SadGeneral",
-    # "FearGeneral", "AngerReceive", ...) hanging off his greeting, which is
-    # both wrong and player-visible nonsense.
-    #
-    # Deliberately listed by name rather than by their contiguous FormID block
-    # 0002410E..0002411C: CharGenEmperor (00024119) sits inside that range and
-    # is a real main-quest conversation that must still convert.
-    #
-    # Rumors (INFOGENERAL) is NOT here on purpose -- it is the one Oblivion
-    # conversation channel Skyrim does have (subtype 2 RUMO, special-cased by
-    # the engine at 0x595454), so it converts as a normal topic.
-    'SadGeneral', 'QuestionGeneral', 'FearGeneral', 'AngerReceive',
+    'InfoRefusal', 'SadGeneral', 'QuestionGeneral', 'FearGeneral', 'AngerReceive',
     'HappyReceive', 'SurpriseReceive', 'FollowupNegative', 'FollowupPositive',
-    'AnswerNegative', 'AnswerPositive', 'AnswerStatus', 'NeutralReceive',
-    'Question',
+    'AnswerNegative', 'AnswerPositive', 'AnswerStatus', 'NeutralReceive', 'Question',
 })
 
-# Oblivion Service-type topics that become real Skyrim service dialogue.
-# 'Barter'/'Training' hold the voiced lines NPCs speak as those menus open in
-# Oblivion; they convert to player-selectable Custom topics whose INFOs open
-# the corresponding Skyrim menu via a Papyrus fragment (ShowBarterMenu /
-# ShowTrainingMenu). Every other Service topic (BarterExit, ServiceRefusal,
-# Repair, Recharge, Travel, ...) stays skipped.
-#
-# Skyrim's engine does define the whole Service subtype family -- SERU, REPA,
-# TRAV, TRAI, BAEX, REEX, RECH, RCEX, TREX, all present in its subtype table --
-# so these are not unrepresentable. They are skipped because vanilla Skyrim
-# uses NONE of them: zero DIAL records in Skyrim.esm carry a Service subtype,
-# because services are driven entirely from Papyrus menus rather than from
-# subtype-tagged dialogue. Converting them would produce topics the engine
-# never asks for.
+# Barter and Training become player-selectable service prompts. Other service
+# responses remain available to scripts as unlisted topics.
+
 # Maps EditorID -> (service kind, player prompt used as the DIAL FULL).
 SERVICE_MENU_TOPICS = {
     'Barter':   ('barter', 'What have you got for sale?'),
@@ -1158,9 +1029,7 @@ def service_menu_kind(rec: dict) -> str:
     return info[0] if info else ''
 
 
-# Oblivion Type-1 "Conversation" topics that are NOT NPC-to-NPC chatter and so
-# survive the drop below. Everything else of that type is dropped; see
-# _is_npc_to_npc_conversation.
+# Type-1 channels with a Skyrim engine or player-menu route.
 _CONV_KEEP_EDIDS = frozenset({
     # Oblivion's one conversation channel Skyrim also has: subtype RUMO, a real
     # player-selectable topic. Converts correctly already.
@@ -1173,58 +1042,21 @@ _CONV_KEEP_EDIDS = frozenset({
 })
 
 
-def _is_npc_to_npc_conversation(rec: dict) -> bool:
-    """True for an Oblivion Type-1 topic that is pure NPC-to-NPC chatter.
-
-    These are the `*NQDResponses` / `*RumorResponses` / interrogation families:
-    lines Oblivion's AI has one NPC speak TO ANOTHER when they pass in the
-    street. They are never player-selectable there.
-
-    Skyrim has no equivalent reachable-but-not-selectable channel short of a
-    full SCEN scene (which needs actor pairing Oblivion does not record — it
-    picks the pair at runtime from proximity + AI packages). Converted as
-    ordinary topics they became player-menu entries labelled with their
-    EditorID ("SEMiscQuestResponses", "FGD02Insults", "SE"), because they never
-    had a player-facing FULL prompt to use. Dropping them is deliberate: better
-    absent than wrong. Tracked in TODO.txt "Later Issues" #16, restored by
-    docs/commentary/tes5_import_dialogue.md Step 4.
-
-    CRITICAL — script-driven topics are NOT dropped. 293 of the 535 Type-1
-    topics are spoken by an explicit `Say`/`SayTo`/`StartConversation` call in a
-    quest script, which is a real Skyrim `Actor.Say()` and works fine. That set
-    includes every CharGen topic (the Emperor/Baurus/Glenroy intro), the
-    Announcers, the Daedric-prince speeches and the arena taunts. Dropping by
-    DATA.Type alone would delete all of them and break the tutorial outright.
-    `_SAY_TOPIC_DISPOSITIONS` is populated before the first skip test in
-    build_dialog_groups precisely so this check can see it.
-    """
-    if get_int(rec, 'DATA.Type') != DIAL_TYPE_CONVERSATION:
-        return False
-    if get_str(rec, 'EditorID', '') in _CONV_KEEP_EDIDS:
-        return False
-    if not _SAY_TOPIC_DISPOSITIONS:
-        # Fail SAFE, never silently. An empty map means the caller reached a
-        # skip test before the say-driven scan ran (dialog_unlocks does: its
-        # build_unlock_plan runs long before build_dialog_groups), and treating
-        # that as "nothing is script-driven" would drop all 293 scripted topics
-        # including CharGen. Keep the topic instead — build_dialog_groups makes
-        # the real decision later, with the map populated.
-        return False
-    return (get_formid(rec, 'FormID') & 0xFFFFFF) not in _SAY_TOPIC_DISPOSITIONS
-
-
 def should_skip_dial(rec: dict) -> bool:
-    dtype = get_int(rec, 'DATA.Type')
-    if dtype in _SKIP_TYPES and not service_menu_kind(rec):
-        return True
     edid = get_str(rec, 'EditorID', '')
-    if edid in _SKIP_EDIDS:
-        return True
-    if edid.startswith('Test') or edid.startswith('MarkNTest'):
-        return True
-    if _is_npc_to_npc_conversation(rec):
-        return True
-    return False
+    return edid.startswith('Test') or edid.startswith('MarkNTest')
+
+
+def is_unlisted_topic(edid: str, dtype: int) -> bool:
+    """Authored response channels that never form a player menu entry.
+
+    A master cannot discover every future dependent plugin's Say calls.
+    Preserve the channel even when the current file has no callers.
+    """
+    return (edid in _UNLISTED_EDIDS
+            or (dtype == DIAL_TYPE_CONVERSATION and edid not in _CONV_KEEP_EDIDS)
+            or dtype == DIAL_TYPE_PERSUASION
+            or (dtype == DIAL_TYPE_SERVICE and edid not in SERVICE_MENU_TOPICS))
 
 
 def classify_topic(edid: str, dtype: int):
@@ -1233,6 +1065,8 @@ def classify_topic(edid: str, dtype: int):
     Maps the coarse TES4 Type enum + reserved EditorID onto Skyrim's finer
     Category/Subtype/SNAM, per the skill's dial-info mapping.
     """
+    if is_unlisted_topic(edid, dtype):
+        return 0, 0, b'CUST', False
     info = _EDID_SUBTYPE.get(edid or '')
     if info:
         subtype, snam, category = info
@@ -1407,7 +1241,8 @@ def convert_INFO(rec: dict, *, injected_ctdas: bytes = b'',
                  fid_to_edid: dict = None, well_known_props: dict = None,
                  xref=None, reveal_props: dict = None,
                  service_menu: str = '', bark_dial_fids: set = None,
-                 script_vars: dict = None) -> bytes:
+                 script_vars: dict = None, shared_response_fid: int = 0,
+                 formid_override: int = 0) -> bytes:
     """INFO — Dialog response.
 
     Order: EDID [VMAD] ENAM CNAM [TCLT...] [TRDT NAM1 NAM2 NAM3]* CTDAs.
@@ -1537,7 +1372,9 @@ def convert_INFO(rec: dict, *, injected_ctdas: bytes = b'',
             subs += pack_formid_subrecord('TCLT', cfid)
 
     # Responses (TRDT 12B -> 24B; text + emotion preserved)
-    rc = get_int(rec, 'ResponseCount')
+    if shared_response_fid:
+        subs += pack_formid_subrecord('DNAM', shared_response_fid)
+    rc = 0 if shared_response_fid else get_int(rec, 'ResponseCount')
     for i in range(rc):
         emotion = get_int(rec, f'Response[{i}].EmotionType')
         emotion_val = max(0, min(100, get_int(rec, f'Response[{i}].EmotionValue')))
@@ -1574,7 +1411,7 @@ def convert_INFO(rec: dict, *, injected_ctdas: bytes = b'',
         if cis2:
             subs += pack_string_subrecord('CIS2', cis2)
 
-    return pack_record('INFO', get_formid(rec, 'FormID'),
+    return pack_record('INFO', formid_override or get_formid(rec, 'FormID'),
                        get_int(rec, 'RecordFlags'), subs)
 
 
@@ -2120,11 +1957,7 @@ def build_dialog_groups(by_type: dict, writer, npc_to_vtyp: dict,
     bark_generic_quests = {}   # source DIAL EditorID -> synthetic quest FID
 
     # --- Pre-scan ---
-    # Say-driven topics MUST be resolved before the first should_skip_dial call:
-    # _is_npc_to_npc_conversation consults _SAY_TOPIC_DISPOSITIONS to spare the
-    # 293 scripted Type-1 topics (CharGen, Announcers, Daedric speeches) from
-    # the NPC-to-NPC drop. With an empty map every one of them would be skipped
-    # and the tutorial would lose its dialogue.
+    # Known Say targets determine how authored RunOn=Target conditions bind.
     _SAY_TOPIC_DISPOSITIONS.clear()
     _SAY_TOPIC_DISPOSITIONS.update(build_say_topic_dispositions(by_type))
     n_ref = sum(1 for v in _SAY_TOPIC_DISPOSITIONS.values() if v[0] == 'ref')
@@ -2150,10 +1983,11 @@ def build_dialog_groups(by_type: dict, writer, npc_to_vtyp: dict,
 
     skipped_fids = {get_formid(d, 'FormID') for d in dials if should_skip_dial(d)}
     _strip_dead_tclt(infos, skipped_fids)
-    n_conv = sum(1 for d in dials if _is_npc_to_npc_conversation(d))
+    n_conv = sum(1 for d in dials if get_int(d, 'DATA.Type') == DIAL_TYPE_CONVERSATION
+                 and is_unlisted_topic(get_str(d, 'EditorID', ''), DIAL_TYPE_CONVERSATION))
     n_chains = len(conv_plan['chains']) if conv_plan else 0
-    print(f"    NPC-to-NPC conversation topics dropped: {n_conv} "
-          f"(TODO.txt #16); quest-advancing chains restored: {n_chains}")
+    print(f"    NPC-to-NPC topics retained for script calls: {n_conv}; "
+          f"quest-advancing chains restored: {n_chains}")
 
     # SGE quests are running from a new game (via the .seq file), so injected
     # GetQuestRunning gates on them are redundant. Raw (unremapped) FormIDs.
@@ -2465,6 +2299,28 @@ def build_dialog_groups(by_type: dict, writer, npc_to_vtyp: dict,
         bark_generic_quests, bark_ctx)
     all_dial_content += bark_content
 
+    # Merging engine channels can consume every INFO of a source topic without
+    # retaining its DIAL. A dependent plugin can still Say that exact topic.
+    # Keep its unused identity as an unlisted topic with shared response data;
+    # the bark records and their existing voice filenames remain the owners.
+    for source in bark_dials:
+        fid = get_formid(source, 'FormID')
+        if fid >> 24 != writer.own_index or fid in bark_ctx['claimed_dial_fids']:
+            continue
+        rec = dict(source, _script_channel=True)
+        content, branch, owner, topic, branch_fid = _build_one_topic(
+            rec, info_by_dial, writer, offset, generic_quest_fid,
+            tclt_targets, bark_choice_targets, bark_choice_gate,
+            unlock_plan, unlock_globals, npc_to_vtyp, quest_npc_fids,
+            sge_quest_fids, quest_edid_by_fid, quest_priority, None,
+            fid_to_edid, xref, well_known_props, quest_dialog_ctdas,
+            vtyp_edid_by_fid, stats, script_vars, quest_fid_by_edid)
+        all_dial_content += content
+        all_dlbr += branch
+        if branch:
+            view_branches[owner].append(branch_fid)
+        view_topics[owner].append(topic)
+
     # --- NPC-conversation driver quest (all topic FormIDs now known) ---
     if conv_plan and conv_plan['chains']:
         conv_qfid = _make_conversation_quest(
@@ -2555,6 +2411,9 @@ def _build_one_topic(dial_rec, info_by_dial, writer, offset,
     edid = get_str(dial_rec, 'EditorID', '')
     dtype = get_int(dial_rec, 'DATA.Type')
 
+    script_channel = bool(dial_rec.get('_script_channel'))
+    unlisted = script_channel or is_unlisted_topic(edid, dtype)
+
     # Service-menu topics (Barter/Training): the Oblivion NPC lines become the
     # responses of a player-selectable topic whose prompt is synthesized and
     # whose INFOs open the Skyrim menu (fragment) — gated so the topic only
@@ -2587,7 +2446,8 @@ def _build_one_topic(dial_rec, info_by_dial, writer, offset,
         child_infos,
         key=lambda r: -quest_priority.get(get_formid(r, 'QSTI.Quest'), 0))
 
-    category, subtype, snam, is_bark = classify_topic(edid, dtype)
+    category, subtype, snam, is_bark = ((0, 0, b'CUST', False) if script_channel
+                                       else classify_topic(edid, dtype))
 
     # --- Owning quest. A single-quest topic is owned by its original quest
     # (remapped): Skyrim then only evaluates its INFOs while that quest runs,
@@ -2639,22 +2499,9 @@ def _build_one_topic(dial_rec, info_by_dial, writer, offset,
                      and (dial_fid & 0xFFFFFF) not in unlock_plan['gated']
                      and (dial_fid & 0xFFFFFF)
                      not in unlock_plan.get('script_added', ()))
-        # A SCRIPT-DRIVEN Oblivion Conversation topic is never player-selectable
-        # in Oblivion either: a quest script picks the speaker AND the topic via
-        # Say/SayTo/StartConversation. Converted top-level it becomes a menu
-        # entry, and since these topics have no player-facing prompt the FULL
-        # falls back to the EditorID -- "CharGenVoice", "SE11SheogorathFarewell2",
-        # "Dark18TraitorTalk" -- the same defect that made the dropped NPC-to-NPC
-        # families player-visible. Force a Normal branch: Actor.Say() reaches an
-        # INFO through its topic regardless of branch visibility, and TCLT links
-        # still resolve, so the scripted lines play exactly as before while the
-        # topic stays out of the menu.
-        #
-        # INFOGENERAL is exempt -- it is Oblivion's Rumors channel, a genuinely
-        # player-selectable topic in both games (subtype RUMO, FULL "Rumors").
-        if (get_int(dial_rec, 'DATA.Type') == DIAL_TYPE_CONVERSATION
-                and get_str(dial_rec, 'EditorID', '') not in _CONV_KEEP_EDIDS
-                and (dial_fid & 0xFFFFFF) in _SAY_TOPIC_DISPOSITIONS):
+        # Normal branches remain reachable through Say/TCLT, but never offer
+        # engine response channel names as top-level player prompts.
+        if unlisted:
             is_linked = True
             stats['script_topic_unlisted'] = \
                 stats.get('script_topic_unlisted', 0) + 1
@@ -2670,7 +2517,7 @@ def _build_one_topic(dial_rec, info_by_dial, writer, offset,
     # lines serve EVERY vendor/trainer, not just the NPCs named by sibling
     # GetIsID lines — the service-faction gate below is the real filter.
     topic_npc_fids = set()
-    if not is_bark and not service_kind:
+    if not is_bark and not service_kind and not unlisted:
         topic_npc_fids = read_getisid_fids_for_topic(child_infos)
         for info_rec in child_infos:
             topic_npc_fids |= read_getisid_fids(info_rec, offset=offset)
@@ -2702,7 +2549,7 @@ def _build_one_topic(dial_rec, info_by_dial, writer, offset,
     # the TOPIC was AddTopic-gated; Skyrim has no such implicit scoping, so the
     # loose line would keep the topic alive forever (see shared_state_conditions).
     shared_state_bytes = b''
-    if not is_bark and not service_kind:
+    if not is_bark and not service_kind and not unlisted:
         parts = []
         for raw_hex in shared_state_conditions(child_infos):
             try:
@@ -2737,6 +2584,10 @@ def _build_one_topic(dial_rec, info_by_dial, writer, offset,
         quest_fid_by_edid=quest_fid_by_edid,
         quest_dialog_ctdas=quest_dialog_ctdas, vtyp_edid_by_fid=vtyp_edid_by_fid,
         stats=stats, script_vars=script_vars)
+    if script_channel:
+        info_ctx['response_aliases'] = {
+            r['FormID']: writer.derive_formid('SCRIPT_TOPIC_INFO', r['FormID'])
+            for r in child_infos}
 
     # Bark topics are handled by the global bark pass (grouped by quest+subtype
     # across ALL bark DIALs), never here — see _build_bark_pass.
@@ -2843,7 +2694,10 @@ def _convert_topic_infos(child_infos, owner_qfid, ctx):
                 reveal_props=reveal_props, service_menu=ctx['service_kind'],
                 bark_dial_fids=(ctx.get('bark_dial_fids')
                                 if ctx['is_bark'] else None),
-                script_vars=ctx.get('script_vars'))
+                script_vars=ctx.get('script_vars'),
+                shared_response_fid=(get_formid(info_rec, 'FormID')
+                                     if ctx.get('response_aliases') else 0),
+                formid_override=ctx.get('response_aliases', {}).get(info_rec['FormID'], 0))
             topic_children += info_bytes
             child_count += 1
             ctx['stats']['infos'] += 1
@@ -3078,6 +2932,7 @@ def _build_bark_pass(bark_dials, info_by_dial, writer,
                               topic_children)
         ctx['stats']['bark_topics'] = ctx['stats'].get('bark_topics', 0) + 1
 
+    ctx['claimed_dial_fids'] = claimed
     return content, sge_extra
 
 

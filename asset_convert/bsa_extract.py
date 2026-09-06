@@ -472,7 +472,6 @@ def extract_assets_for_file(source_file, data_path, extract_dir, force=False):
 
     if not bsa_files:
         print(f"No BSA files found for {source_file} in {data_path}")
-        return {'bsas_found': 0}
 
     print(f"Found {len(bsa_files)} BSA(s) for {source_file}:")
     for b in bsa_files:
@@ -506,6 +505,9 @@ def extract_assets_for_file(source_file, data_path, extract_dir, force=False):
 
     totals['music'] = extract_loose_music(source_file, data_path, extract_dir,
                                           asset_dir_name, force=force)
+    from .loose_assets import extract_loose_assets
+    totals['loose'] = extract_loose_assets(source_file, data_path, extract_dir,
+                                           Path(extract_dir) / asset_dir_name, force)
     return totals
 
 

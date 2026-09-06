@@ -44,7 +44,7 @@ from .cms import decode_cms
 from .mopp import walk_mopp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from subprocess_flags import POPEN_FLAGS, windows_cmd  # noqa: E402
+from subprocess_flags import POPEN_FLAGS, windows_cmd, report_native_crashes  # noqa: E402
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _MOPP_BRIDGE = str(_PROJECT_ROOT / 'external' / 'mopp_bridge'
@@ -62,23 +62,37 @@ def run_mopp_bridge(vertices, triangles, shape_keys, timeout=300):
 
     vertices: [(x, y, z), ...] havok units; triangles: [(a, b, c), ...];
     shape_keys: engine shape key per triangle (unique).
-    Returns the report dict (mopp_origin/mopp_scale/mopp_data_hex/
-    welding_info), or None on any failure.
+    Returns the report dict in the original coordinate frame. Native failures
+    raise with their saved input path instead of silently dropping collision.
     """
     if not os.path.exists(_MOPP_BRIDGE):
-        return None
+        raise FileNotFoundError(_MOPP_BRIDGE)
+    # Havok's welding routine crashes on tiny coordinates (paintbrush01:
+    # 0.034 hu, access violation). Condition BEFORE invoking it. Power-of-two
+    # scaling puts the longest extent in [64, 128); recentering also avoids
+    # losing short edges on meshes authored far from the origin.
+    lo = [min(v[i] for v in vertices) for i in range(3)]
+    hi = [max(v[i] for v in vertices) for i in range(3)]
+    extent = max(b - a for a, b in zip(lo, hi))
+    if not math.isfinite(extent) or extent <= 0:
+        raise ValueError('MOPP input has no finite spatial extent')
+    center = [(a + b) * 0.5 for a, b in zip(lo, hi)]
+    factor = math.ldexp(1.0, 7 - math.frexp(extent)[1])
+    conditioned = [[(v[i] - center[i]) * factor for i in range(3)] for v in vertices]
     temp_dir = os.path.join(_PROJECT_ROOT, 'temp')
     os.makedirs(temp_dir, exist_ok=True)
     uid = uuid.uuid4().hex
     tmp_in = os.path.join(temp_dir, f'moppbridge_{uid}.json')
     tmp_out = os.path.join(temp_dir, f'moppbridge_{uid}_report.json')
+    succeeded = False
     try:
         with open(tmp_in, 'w', encoding='utf-8') as f:
             json.dump({
-                'vertices': [c for v in vertices for c in v],
+                'vertices': [c for v in conditioned for c in v],
                 'triangles': [i for tri in triangles for i in tri],
                 'shape_keys': list(shape_keys),
             }, f)
+        report_native_crashes()
         result = subprocess.run(
             windows_cmd([_MOPP_BRIDGE, '--input', tmp_in, '--output', tmp_out,
                         '--no-stdout']),
@@ -86,17 +100,24 @@ def run_mopp_bridge(vertices, triangles, shape_keys, timeout=300):
             **POPEN_FLAGS,
         )
         if result.returncode != 0 or not os.path.exists(tmp_out):
-            return None
+            detail = result.stderr.decode('utf-8', 'replace').strip()
+            raise RuntimeError(f'MOPP bridge exited 0x{result.returncode & 0xffffffff:08X}; '
+                               f'input: {tmp_in}; {detail}')
         with open(tmp_out, 'r', encoding='utf-8') as f:
             report = json.load(f)
         if (report.get('status') != 'ok'
                 or not report.get('mopp_keys_match_shape_keys')):
-            return None
+            raise RuntimeError(f'MOPP bridge validation failed; input: {tmp_in}; '
+                               f'report: {tmp_out}')
+        # (conditioned_v - origin) * scale == (v - output_origin) * output_scale.
+        # CMS vertices and triangle keys remain at the original authored size.
+        report['mopp_origin'] = [center[i] + c / factor
+                                 for i, c in enumerate(report['mopp_origin'])]
+        report['mopp_scale'] *= factor
+        succeeded = True
         return report
-    except Exception:
-        return None
     finally:
-        for p in (tmp_in, tmp_out):
+        for p in (tmp_in, tmp_out) if succeeded else ():
             try:
                 os.unlink(p)
             except OSError:
@@ -149,7 +170,7 @@ def build_cms_collision(tris, sk_material, NifFormat):
     tris: [((x,y,z), (x,y,z), (x,y,z)), ...] in Skyrim havok units, final
     shape frame (identity rigid body).  sk_material: Skyrim material CRC.
     Returns the bhkMoppBvTreeShape (caller sets the CMS target node), or
-    None on failure (caller falls back to a packed shape without MOPP).
+    None when there is no surface. A failed native build raises.
     """
     tris = [t for t in tris
             if all(math.isfinite(c) for v in t for c in v)
@@ -292,37 +313,19 @@ def build_cms_collision(tris, sk_material, NifFormat):
         shape_keys.append(key)
 
     report = run_mopp_bridge(vertices, triangles, shape_keys)
-    if report is None:
-        # Degenerate-scale retry.  Havok's MOPP/welding builder access-violates
-        # on hulls only a few hundredths of a havok unit across (it divides by
-        # near-zero edge lengths): Oblivion clutter ships them (paintbrush01 =
-        # 0.034 hu) and Morroblivion worse (inucaveuplant00 = 0.0098 hu, ~1000x
-        # smaller than its own visual mesh).  The MOPP encodes geometry as
-        # (v - origin) * scale, so building it over vertices scaled by k and
-        # then storing origin/k with scale*k is an EXACT restatement of the
-        # same bytecode for the original geometry -- no approximation, and the
-        # CMS/chunk data below is untouched (still native scale).
-        for k in (10.0, 100.0, 1000.0):
-            scaled = [(x * k, y * k, z * k) for x, y, z in vertices]
-            report = run_mopp_bridge(scaled, triangles, shape_keys)
-            if report is not None:
-                report = dict(report)
-                report['mopp_origin'] = [c / k for c in report['mopp_origin']]
-                report['mopp_scale'] = report['mopp_scale'] * k
-                break
-        if report is None:
-            return None
     code = bytes.fromhex(report['mopp_data_hex'])
     if not code:
-        return None
+        raise RuntimeError('MOPP bridge produced empty collision bytecode')
 
     # Independent verification with our own symbolic VM: clean walk and the
     # terminal key set must equal the CMS key set.
     walked = walk_mopp(code, len(code))
     if walked['errors'] or walked['tris'] != set(shape_keys):
-        return None
+        raise RuntimeError('MOPP bytecode failed independent shape-key verification')
 
     welding = report.get('welding_info') or []
+    if len(welding) != len(shape_keys):
+        raise RuntimeError('MOPP bridge did not return welding for every triangle')
     if len(welding) == len(shape_keys):
         for key, w in zip(shape_keys, welding):
             if not w:

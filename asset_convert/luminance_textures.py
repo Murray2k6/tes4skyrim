@@ -38,6 +38,7 @@ CLI:
 
 import os
 import struct
+from .game_paths import scoped_files
 import sys
 from pathlib import Path
 
@@ -170,7 +171,7 @@ def convert_file(path):
     return True
 
 
-def run(textures_dir):
+def run(textures_dir, paths=None):
     """Convert every L8 DDS under a texture tree.  Returns (checked, fixed).
 
     Not restricted to ``_g``: the format is the defect, wherever it appears.
@@ -181,16 +182,12 @@ def run(textures_dir):
     root = Path(textures_dir)
     if not root.is_dir():
         return 0, 0
-    for dirpath, _dirs, files in os.walk(root):
-        for name in files:
-            if not name.lower().endswith('.dds'):
-                continue
-            path = os.path.join(dirpath, name)
-            if not is_luminance(path):
-                continue
-            checked += 1
-            if convert_file(path):
-                fixed += 1
+    for path in scoped_files(root, '*.dds', paths):
+        if not is_luminance(path):
+            continue
+        checked += 1
+        if convert_file(path):
+            fixed += 1
     return checked, fixed
 
 

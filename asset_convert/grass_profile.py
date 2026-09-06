@@ -51,7 +51,7 @@ import struct
 import sys
 from pathlib import Path
 
-from .game_paths import win_join
+from .game_paths import win_join, matches_path_scope
 
 
 def _nif_format():
@@ -284,7 +284,7 @@ def apply_grass_profile(nif_path):
     return changed
 
 
-def run(export_dir, output_meshes_root):
+def run(export_dir, output_meshes_root, mesh_subdirs=None, *, master_mesh_roots=()):
     """Profile + place every GRAS model NIF.
 
     output_meshes_root is the plugin meshes root (e.g.
@@ -294,13 +294,24 @@ def run(export_dir, output_meshes_root):
     them).  Returns (processed, modified, missing) counts.
     """
     output_meshes_root = Path(output_meshes_root)
+    from output_layout import assets_for
+    source_meshes = assets_for(export_dir) / 'meshes'
     paths = load_grass_model_paths(export_dir)
     processed = modified = missing = 0
     for rel in sorted(paths):
+        if not matches_path_scope(rel, mesh_subdirs):
+            continue
         # rel is backslash-form (see load_grass_model_paths), so it needs an
         # explicit split -- see asset_convert/game_paths.py.
         nif = win_join(output_meshes_root / 'tes4', rel)
         if not nif.exists():
+            # Inherited GRAS records use the master's already-profiled asset.
+            # A failed local override must still count as missing, even when
+            # its master has a usable earlier version of the same path.
+            if not win_join(source_meshes, rel).exists() and any(
+                    win_join(Path(root), grass_model_dest(rel)).is_file()
+                    for root in master_mesh_roots):
+                continue
             missing += 1
             continue
         processed += 1

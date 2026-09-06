@@ -135,6 +135,7 @@ def test_no_version_warning_on_the_supported_python(monkeypatch):
 def test_version_warning_states_the_consequence_and_the_toolchain(monkeypatch, ver):
     """Both things the user asked to be told: 'may run into issues' + build tools."""
     monkeypatch.setattr(preflight.sys, 'version_info', ver + (0, 'final', 0))
+    monkeypatch.setattr(preflight, '_have_native', lambda mod: False)
     w = preflight.python_version_warning()
     assert w is not None, f'no warning on Python {ver}'
     assert 'may run into issues' in w
@@ -159,9 +160,20 @@ def test_version_warning_reports_this_interpreters_abi_tag(monkeypatch):
     """
     import sysconfig
     monkeypatch.setattr(preflight.sys, 'version_info', (3, 12, 0, 'final', 0))
+    monkeypatch.setattr(preflight, '_have_native', lambda mod: False)
     w = preflight.python_version_warning()
     suffix = sysconfig.get_config_var('EXT_SUFFIX') or '.pyd'
     assert f'_navgrow_native{suffix}' in w
+
+
+def test_version_warning_accepts_a_matching_native_build(monkeypatch):
+    monkeypatch.setattr(preflight.sys, 'version_info', (3, 12, 0, 'final', 0))
+    monkeypatch.setattr(preflight, '_have_native', lambda mod: True)
+    w = preflight.python_version_warning()
+    assert 'Python 3.12' in w
+    assert 'may run into issues' in w
+    assert 'must be' not in w
+    assert 'python native/build.py' not in w
 
 
 def test_version_warning_is_not_a_hard_dependency(monkeypatch):

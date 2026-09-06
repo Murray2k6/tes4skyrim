@@ -128,7 +128,7 @@ TYPE_MAP = {
     # array_var has none, so it falls back to a String the script can at least
     # declare and assign.
     'string_var': 'String',
-    'array_var':  'String',
+    'array_var':  'TES4Collection',
 }
 
 # Actor value name mapping (TES4 -> TES5)
@@ -337,7 +337,9 @@ MISMATCH_TYPES = frozenset({'Package', 'Topic', 'MiscObject', 'Quest'})
 #: Base-object types: comparing a REFERENCE to one of these means "is this
 #: reference an instance of that object", which in Papyrus is GetBaseObject().
 BASE_FORM_TYPES = frozenset({'MiscObject', 'Ingredient', 'Potion', 'Weapon',
-                             'Armor', 'Book', 'Key'})
+                             'Armor', 'Book', 'Key', 'ActorBase', 'Activator',
+                             'Container', 'Door', 'Flora', 'Furniture', 'Light',
+                             'Static', 'Ammo', 'SoulGem', 'Scroll'})
 
 #: Event parameters that carry an ObjectReference.  Nothing DECLARES these, so
 #: a type lookup finds nothing and every reference rule would skip them.
@@ -351,18 +353,99 @@ EVENT_REF_PARAMS = frozenset({'akactionref', 'akactor', 'aktarget',
 #: `convert_standalone`.  Named rather than inlined into `RETURN_TYPES` because
 #: `symbols.py` asks the narrower question "is this call form-typed at all".
 _FORM_RETURNING = {
+    'getrace': 'Race',
+    'getactivemenuref': 'ObjectReference',
     'getbaseobject': 'Form',
+    'getscript': 'Form', 'removescript': 'Form', 'getactivemenuselection': 'Form',
+    'getplayerspell': 'Form', 'getactivespell': 'Form',
+    'getingredient': 'Form',
+    'getnthfaction': 'Faction',
+    'getenchantment': 'Enchantment',
+    'getequippedobject': 'Form', 'getequipmentslottype': 'Form',
+    'getequippedweaponpoison': 'Potion',
+    'setequippedweaponpoison': 'Potion', 'removeequippedweaponpoison': 'Potion',
+    'getboundingbox': 'TES4Collection',
+    'getallies': 'TES4Collection', 'gettargets': 'TES4Collection',
+    'getpclastdroppeditemref': 'ObjectReference', 'getpclastdroppeditem': 'Form',
+    'getnthracespell': 'Spell', 'getnthspell': 'Spell',
+    'getowner': 'Form', 'getparentcellowner': 'Form', 'getmerchantcontainer': 'ObjectReference',
+    'getlinkeddoor': 'ObjectReference', 'getopenkey': 'Key',
+    'getcombatstyle': 'CombatStyle', 'getparentworldspace': 'WorldSpace',
+    'getcurrentweatherid': 'Weather', 'getcurrentclimateid': 'Form',
+    'getcurrenteditorpackage': 'Package', 'getcurrentpackage': 'Package',
+    'getpackagetarget': 'ObjectReference',
+    'getracevoice': 'Race',
+    'getprojectilesource': 'ObjectReference', 'getprojectile': 'ObjectReference',
+    'getmagicprojectilespell': 'Form',
+    'gethorse': 'Actor', 'getrider': 'Actor', 'getplayerslastriddenhorse': 'Actor',
+    'getclass': 'Form',
     'getequippedweapon': 'Weapon',
     'getequippedshield': 'Armor',
     'getworncoveringitem': 'Armor',
     'getactorowner': 'ActorBase',
     'getfactionowner': 'Faction',
     'getparentcell': 'Cell',
+    'getworldspace': 'WorldSpace',
+    'getformfrommod': 'Form',
+    'getformfromfile': 'Form',
+    'getnthlevitem': 'Form',
+    'getlevitembylevel': 'Form',
+    'calcleveleditem': 'Form',
+    'calclevitem': 'Form',
+    'calclevitemnr': 'Form',
+    'calcleveleditemnr': 'Form',
 }
 
 #: Papyrus return type, keyed by PAPYRUS name so aliases resolve via FUNCTION_MAP.
 RETURN_TYPES = dict(
     [(n, 'Bool') for n in PAPYRUS_BOOL_FUNCTIONS]
+    + [('seteventhandler', 'Bool'), ('removeeventhandler', 'Bool')]
+    + [(n, 'Bool') for n in ('isclassskill', 'ismajor', 'isclassskillc', 'ismajorc', 'ismajorref')]
+    + [(n, 'Bool') for n in ('setsummonable', 'setactorrespawns', 'setnorumors')]
+    + [('setcontainerrespawns', 'Int')]
+    + [('setitemvalue', 'Int')]
+    + [('getterrainheight', 'Float')]
+    + [('getshouldattack', 'Bool')]
+    + [('getvampire', 'Bool')]
+    + [('setrefessential', 'Int')]
+    + [(n, 'Bool') for n in ('isflying', 'isonground', 'isinair')]
+    + [('getvelocity', 'Float'), ('getverticalvelocity', 'Float'), ('setverticalvelocity', 'Int')]
+    + [('getavforbaseactor', 'Float'), ('getavforbaseactorc', 'Float')]
+    + [(n, 'Int') for n in ('getmagiceffectcount', 'getmagicitemeffectcount', 'getmieffectcount')]
+    + [('getvariable', 'Float'), ('getrefvariable', 'Form')]
+    + [('gettrainerskill', 'Int'), ('gettrainerlevel', 'Int'), ('getcurrentsoullevel', 'Int'),
+       ('getdoorteleportx', 'Float'), ('getdoorteleporty', 'Float'),
+       ('getdoorteleportz', 'Float'), ('getdoorteleportrot', 'Float'),
+       ('getracespellcount', 'Int'), ('getspellcount', 'Int'),
+       ('getfatiguepercentage', 'Float'), ('getteleportcell', 'Cell')]
+    + [('getntheffectitem' + field, 'Int') for field in ('magnitude', 'area', 'duration', 'range', 'actorvalue', 'code')]
+    + [('gettalkedtopc', 'Bool')]
+    + [('getstartingpos', 'Float'), ('getstartingangle', 'Float')]
+    + [('getworldspaceparentworldspace', 'WorldSpace'), ('getworldparentworld', 'WorldSpace')]
+    + [(n, 'String') for n in ('asciitochar', 'getformidstring', 'getnthmodname')]
+    + [(n, 'Int') for n in ('getclimatesunrisebegin', 'getclimatesunriseend', 'getclimatesunsetbegin', 'getclimatesunsetend', 'getclimatemoonphaselength')]
+    + [('getclimatehasmasser', 'Bool'), ('getclimatehassecunda', 'Bool')]
+    + [('getweaponspeed', 'Float'), ('getweaponreach', 'Float'), ('setenchantment', 'Enchantment'), ('removeenchantment', 'Enchantment')]
+    + [('magiceffectfromcode', 'MagicEffect'), ('getmagiceffectusedobject', 'Form'), ('getmagiceffectusedobjectc', 'Form')]
+    + [('magiceffectfromchars', 'MagicEffect'), ('magiceffectcodefromchars', 'Int'), ('mecodefromchars', 'Int')]
+    + [('getmagiceffectchars', 'String'), ('getmagiceffectcharsc', 'String')]
+    + [('getgamerestarted', 'Bool'), ('getgameloaded', 'Bool')]
+    + [('iscurrentfurnitureref', 'Bool'), ('iscurrentfurnitureobj', 'Bool')]
+    + [('setforcerun', 'Int'), ('setforcesneak', 'Int')]
+    + [(n, 'Int') for n in ('setmagiceffectusedobject', 'setmagiceffectusedobjectc', 'setmagiceffectlight', 'setmagiceffectlightc')]
+    + [(n, 'Int') for n in ('getmagiceffectcode', 'getmecode', 'getspelltype', 'setspelltype',
+                            'magicitemhaseffectcount', 'magichaseffectcount',
+                            'magicitemhaseffectcountcode', 'magichaseffectcountc')]
+    + [(n, 'Bool') for n in ('magicitemhaseffect', 'magichaseffect', 'magicitemhaseffectcode', 'magichaseffectc')]
+    + [(n, 'Bool') for n in ('getgodmode', 'getignorefriendlyhits', 'isplayerslastriddenhorse', 'getplayerhaslastriddenhorse', 'isswimming')]
+    + [(n, 'Bool') for n in ('setnumericgamesetting', 'setgamesetting', 'setnumericgamesettingfloat', 'setstringgamesettingex')]
+    + [('getnumericgamesetting', 'Float'), ('getstringgamesetting', 'String'),
+       ('getgamedifficulty', 'Float')]
+    + [('isreference', 'Bool'), ('getcrosshairref', 'ObjectReference'), ('getcrosshairreference', 'ObjectReference')]
+    + [(n, 'Int') for n in ('setweight', 'modweight', 'setlightradius', 'setradius')]
+    + [(n, 'Int') for n in ('getgoldvalue', 'getfullgoldvalue', 'setgoldvalue', 'modgoldvalue', 'setgoldvalue_t')]
+    + [(n, 'Float') for n in ('getactorvaluec', 'getavc', 'getbaseactorvaluec', 'getbaseavc',
+                             'getbaseav2', 'getbaseav2c', 'getmaxav', 'getmaxavc')]
 
     #: Float reads, under both authored and emitted elapsed-time spellings.
     + [(n, 'Float') for n in (
@@ -371,28 +454,95 @@ RETURN_TYPES = dict(
         'getwalkspeed', 'getcurrenttime', 'randomfloat', 'getheight',
         'getwidth', 'getlength', 'getvalue', 'getvaluepercentage',
         'scripteffectelapsedseconds', 'tes4_secondspassed',
-        'getcurrentrealtime')]
+        'getcurrentrealtime', 'abs', 'sqrt', 'pow', 'getmenufloatvalue')]
+    + [(n, 'Float') for n in ('getav', 'getbaseav', 'getgs', 'getgamesetting', 'getequippedcurrenthealth', 'getequippedcurrentcharge', 'getdisposition')]
     + [('get%s%s' % (kind, axis), 'Float')
        for kind in ('position', 'angle') for axis in 'xyz']
 
     #: Whole-number reads, plus TES4 names converting to a fixed expression.
     + [(n, 'Int') for n in (
-        'getvalueint', 'getcrimegold', 'getitemcount', 'getgoldamount',
+        'getvalueint', 'getcrimegold', 'getitemcount', 'getgoldamount', 'getmusictype', 'getcellmusictype', 'getnumpackages', 'getpcsleephours', 'resetallvariables', 'getinvestmentgold', 'getcurrentaipackage',
         'getlocklevel', 'getdayofweek', 'getdayoftheweek', 'getrandompercent',
-        'getrandpercent', 'getpcfame', 'getpcinfamy', 'getinfame')]
+        'getrandpercent', 'getpcfame', 'getpcinfamy', 'getinfame', 'getfactionrank')]
 
     #: Reference-valued names; the `ak*` event parameters need a downcast.
     + [(n, 'ObjectReference') for n in (
         'getlinkedref', 'placeatme', 'getparentref', 'placeactoratme',
         'geteditorlocation', 'getiteminslot', 'akactionref', 'aknewcontainer',
         'akoldcontainer', 'akcastref', 'akaggressor', 'akcaster',
-        'getself', 'getactionref')]
+        'getself', 'getactionref', 'getfirstref', 'getfirstrefincell', 'getnextref', 'getworldmapdoor', 'getmapmenumarkerref')]
     + [(n, 'Actor') for n in (
         'gettargetactor', 'getcasteractor', 'getactorreference',
         'game.getplayer', 'getplayer', 'getcombattarget', 'getkiller',
         'getlastridden', 'findrandomactorfromref')]
 
-    + list(_FORM_RETURNING.items())
+    + list(_FORM_RETURNING.items()) + [('getnthpackage', 'Package'), ('getactivequest', 'Quest'), ('mqgetactivequest', 'Quest')]
+    + [(n, 'TES4Collection') for n in ('ar_construct', 'ar_list', 'ar_map', 'ar_null', 'getmapmarkers')]
+    + [(n, 'String') for n in ('getmapmenumarkername', 'getname', 'getdescription')]
+    + [(n, 'Int') for n in ('setname', 'setnameex', 'copyname', 'appendtoname')]
+    + [(n, 'Int') for n in ('sv_replace', 'sv_insert', 'sv_erase', 'sv_set')]
+    + [(n, 'String') for n in ('sv_destruct', 'sv_substring')]
+    + [('sv_construct', 'String')]
+    + [('sv_length', 'Int')]
+    + [(n, 'Int') for n in ('ar_size', 'ar_erase', 'ar_append', 'getweathercolor', 'getnumfactions', 'getnthfactionrank')]
+    + [('getfactions', 'TES4Collection')]
+    + [(n, 'Float') for n in ('ar_find', 'getavmod', 'getavmodf', 'getavmodc',
+        'modavmod', 'setavmod', 'setavmodf', 'getweathersundamage')]
+    + [(n, 'Int') for n in ('getnumlevitems', 'getnthlevitemlevel',
+        'getnthlevitemcount', 'getchancenone', 'getlevitemindexbyform',
+        'getlevitemindexbylevel', 'removefromleveledlist', 'removelevitembylevel')]
+    + [(n, 'Bool') for n in ('getcalcalllevels', 'getcalceachincount', 'isfood', 'isharvested')]
+    + [(n, 'Int') for n in ('getarmortype', 'getweapontype')]
+    + [(n, 'Int') for n in ('getservicesmask', 'getclassspecialization', 'getbartergold',
+        'getminlevel', 'getmaxlevel', 'getcreaturecombatskill', 'getcreaturemagicskill',
+        'getcreaturestealthskill', 'getapparatustype', 'getmapmarkertype', 'isscripted', 'getsourceModIndex'.lower())]
+    + [(n, 'Bool') for n in ('offersrepair', 'offersrecharging', 'offersspells', 'offerstraining',
+        'isfactionevil', 'isfactionhidden', 'factionhasspecialcombat',
+        'offersweapons', 'offersarmor', 'offersclothing', 'offersbooks', 'offersingredients',
+        'offerslights', 'offersapparatus', 'offersmiscitems', 'offersmagicitems', 'offerspotions',
+        'isactorrespawning', 'ispcleveloffset', 'issummonable', 'isquestitem',
+        'creatureusesweaponandshield', 'creaturehasnohead', 'haslowlevelprocessing',
+        'getcontainerrespawns', 'haswater', 'parentcellhaswater', 'isinoblivion',
+        'ispersistent', 'isloaddoor', 'isfemale', 'isrefessential')]
+    + [('getclassskills', 'TES4Collection'), ('getparentcellwaterheight', 'Float')]
+    + [(n, 'Float') for n in ('getweight', 'geteditorsize', 'getboundingradius')]
+    + [(n, 'Int') for n in ('getobjecthealth', 'getattackdamage')]
+    + [(n, 'String') for n in ('getmodelpath', 'geticonpath')]
+    + [(n, 'Bool') for n in ('comparemodelpath', 'compareiconpath')]
+    + [('comparename', 'Bool'), ('nameincludes', 'Bool')]
+    + [('getamountsoldstolen', 'Float')]
+    + [(n, 'Bool') for n in ('iskeypressed', 'iskeypressed2', 'iskeypressed3')]
+    + [('getequipmentslot', 'Int'), ('islightcarriable', 'Bool'), ('isequipped', 'Bool')]
+    + [(n, 'Float') for n in ('getcurrenthealth', 'getcurrentcharge')]
+    + [(n, 'Int') for n in ('getrefcount', 'getobjectcharge')]
+    + [(('getnthactiveeffect' + n).lower(), 'Form') for n in
+       ('MagicItem', 'Caster', 'Object', 'SummonRef', 'BoundItem', 'Data')]
+    + [(('getnthactiveeffect' + n).lower(), 'Float') for n in
+       ('Duration', 'TimeElapsed', 'Magnitude')]
+    + [('getactiveeffectcount', 'Int'), ('getnthactiveeffectcode', 'Int'),
+       ('isnthactiveeffectapplied', 'Bool'), ('dispelnthactiveeffect', 'Bool')]
+    + [('removemeir', 'Bool'), ('equipme', 'Bool'), ('unequipme', 'Bool'),
+       ('getcontainer', 'ObjectReference')]
+    + [('isattacking', 'Bool'), ('ispowerattacking', 'Bool'), ('istrespassing', 'Bool'),
+       ('getactorlightamount', 'Float')]
+    + [(n, 'TES4Collection') for n in ('gethighactors', 'getmiddlehighactors', 'getlowactors',
+                                      'getactiveeffectcodes', 'getactiveeffectcasters')]
+    + [('getquality', 'Float'), ('getcreaturebasescale', 'Float'),
+       ('getcreaturemodelpaths', 'TES4Collection'), ('getcreaturesoullevel', 'Int'),
+       ('getactorsoullevel', 'Int'), ('isobliviongate', 'Bool')]
+    + [('sv_find', 'Int'), ('sv_count', 'Int')]
+    + [('getfactionreaction', 'Int')]
+    + [(n, 'TES4Collection') for n in ('getbaseitems', 'getequippeditems', 'getitems', 'getspells', 'getleveledspells')]
+    + [(n, 'Bool') for n in ('isclonedform', 'hasname', 'isblocking', 'getforcerun', 'getforcesneak')]
+    + [('getsoullevel', 'Int'), ('getsoulgemcapacity', 'Int')]
+    + [('chartoascii', 'Int')]
+    + [(n, 'Bool') for n in ('istextinputinuse', 'xxnisgamepadconnected', 'xxnisgamepadkeypressed', 'isbartermenuactive')]
+    + [('opentextinput', 'Int'), ('gettextinputcursorpos', 'Int'),
+       ('getinputtext', 'String'), ('tonumber', 'Float'), ('tostring', 'String'), ('isthirdperson', 'Bool')]
+    + [('getprojectiletype', 'Int')]
+    + [('getactorbaselevel', 'Int')]
+    + [(n, 'Bool') for n in ('ismovingforward', 'istorchout', 'issnowing', 'hasnopersuasion',
+                            'isactivatable', 'isofflimits', 'deletereference', 'fileexists')]
 )
 
 #: Commands where TES4 passes the axis as the FIRST ARGUMENT but Papyrus spells
@@ -421,9 +571,7 @@ AXIS_COMMANDS = {
 # or topic acts upon.  Distinct from _ACTOR_ONLY_FUNCTIONS: these need the
 # receiver redirected but NOT an `as Actor` cast, since they are valid on any
 # reference.
-# OBSE tests that ask a form what TYPE it is.  Vanilla Papyrus cannot answer —
-# Form.GetType is SKSE — so all of them neutralise to 0 ("not that type"),
-# which is the branch-not-taken side for every TES4 caller.
+# OBSE tests use source identities in TES4Runtime, including converted classes.
 _FORM_TYPE_TESTS = {
     'isdoor', 'isactivator', 'iscontainer', 'isbook', 'isingredient',
     'islight', 'ismisc', 'iskey', 'isclothing', 'isarmor', 'isweapon',
@@ -715,15 +863,46 @@ _REF_TYPES = frozenset({
     'Armor', 'Book', 'Potion', 'Ingredient', 'Key', 'MiscObject', 'Light',
     'Container', 'Door', 'Activator', 'Static', 'Furniture', 'Flora',
     'EffectShader', 'WorldSpace', 'Location', 'Keyword', 'FormList',
+    'TES4Collection',
 })
 
 
 #: Papyrus natives whose parameter N needs a cast; keyed by PAPYRUS name.
 PARAM_TYPES = {
-    'additem': {1: 'Int'},
-    'removeitem': {1: 'Int'},
+    'moveto': {0: 'ObjectReference'},
+    'getdistance': {0: 'ObjectReference'},
+    'getheadingangle': {0: 'ObjectReference'},
+    'startcombat': {0: 'Actor'},
+    'activate': {0: 'ObjectReference'},
+    'cast': {0: 'Spell', 1: 'ObjectReference'},
+    'getlos': {0: 'ObjectReference'},
+    'haslos': {0: 'ObjectReference'},
+    'kill': {0: 'Actor'},
+    'pushactoraway': {0: 'Actor'},
+    'samefaction': {0: 'Actor'},
+    'getscript': {0: 'Form'},
+    'removescript': {0: 'Form'},
+    'removemeir': {0: 'ObjectReference'},
+    'getstage': {0: 'Quest'},
+    'getstagedone': {0: 'Quest', 1: 'Int'},
+    'setstage': {0: 'Quest', 1: 'Int'},
+    'startquest': {0: 'Quest'},
+    'stopquest': {0: 'Quest'},
+    'getquestrunning': {0: 'Quest'},
+    'completequest': {0: 'Quest'},
+    'isquestcompleted': {0: 'Quest'},
+    'ar_size': {0: 'TES4Collection'},
+    'ar_haskey': {0: 'TES4Collection'},
+    'ar_erase': {0: 'TES4Collection'},
+    'ar_resize': {0: 'TES4Collection', 1: 'Int'},
+    'ar_append': {0: 'TES4Collection'},
+    'ar_find': {1: 'TES4Collection'},
+    'additem': {0: 'Form', 1: 'Int'},
+    'removeitem': {0: 'Form', 1: 'Int'},
     'additemhealthpercent': {1: 'Int'},
     'addspell': {0: 'Spell'},
+    'placeatme': {0: 'Form', 1: 'Int'},
+    'playsound': {0: 'Sound'},
     'removespell': {0: 'Spell'},
     'isinfaction': {0: 'Faction'},
     'addtofaction': {0: 'Faction'},
@@ -732,6 +911,26 @@ PARAM_TYPES = {
     'setfactionrank': {0: 'Faction'},
     'modfactionrank': {0: 'Faction'},
     'tes4polyfill.update3d': {0: 'ObjectReference'},
+    'addtoleveledlist': {0: 'Form', 1: 'Form', 2: 'Int', 3: 'Int'},
+    'clearleveledlist': {0: 'Form'},
+    'removefromleveledlist': {0: 'Form', 1: 'Form'},
+    'removelevitembylevel': {0: 'Int', 1: 'Form'},
+    'removenthlevitem': {0: 'Int', 1: 'Form'},
+    'getnumlevitems': {0: 'Form'},
+    'getnthlevitem': {0: 'Int', 1: 'Form'},
+    'getnthlevitemlevel': {0: 'Int', 1: 'Form'},
+    'getnthlevitemcount': {0: 'Int', 1: 'Form'},
+    'getchancenone': {0: 'Form'},
+    'setchancenone': {0: 'Int', 1: 'Form'},
+    'getcalcalllevels': {0: 'Form'},
+    'getcalceachincount': {0: 'Form'},
+    'getlevitemindexbyform': {0: 'Form', 1: 'Form'},
+    'getlevitemindexbylevel': {0: 'Int', 1: 'Form'},
+    'getlevitembylevel': {0: 'Int', 1: 'Form'},
+    'calcleveleditem': {0: 'Form', 1: 'Int', 3: 'Int'},
+    'calclevitem': {0: 'Form', 1: 'Int', 3: 'Int'},
+    'calclevitemnr': {0: 'Form', 1: 'Int', 3: 'Int'},
+    'calcleveleditemnr': {0: 'Form', 1: 'Int', 3: 'Int'},
 }
 
 
@@ -741,6 +940,8 @@ def param_types(tes4_name: str) -> dict:
     if direct is not None:
         return direct
     row = COMMAND_ROWS.get(tes4_name)
+    if row is not None and row.types:
+        return row.types
     emit = (row.emit or '') if row is not None else ''
     return PARAM_TYPES.get(emit.split('(')[0].lower(), {})
 
@@ -781,6 +982,7 @@ class Cmd:
 # replaced a name-guarded branch in `_emit_function`; the rationale that used
 # to sit above the branch sits above its row.
 COMMAND_ROWS = {
+    'getbaseobject': Cmd('{ref}.GetBaseObject()', OBJREF, flags='zero_arg'),
     # IsAnimPlaying: the behavior graph exposes this as an animation variable.
     # Cast to Int because TES4 call sites compare/assign 0/1.
     'isanimplaying': Cmd(
@@ -829,12 +1031,6 @@ COMMAND_ROWS = {
     #: SetRestrained -> SetDontMove.
     'setrestrained': Cmd('{ref}.SetDontMove({b0})', ACTOR, defaults={0: '0'}),
 
-    #: IsOnGround: Skyrim has only the inverse.
-    'isonground': Cmd('!({ref}.IsFlying())', RAW),
-
-    #: IsInAir: cast to Int because TES4 call sites compare/assign 0/1.
-    'isinair': Cmd('({ref}.IsFlying() as Int)', ACTOR),
-
     # GetAttacked -> IsAlarmed, the nearest Skyrim state: an actor that has
     # noticed a hostile action against it.
     'getattacked': Cmd('({ref}.IsAlarmed() as Int)', ACTOR, flags='zero_arg'),
@@ -873,8 +1069,10 @@ COMMAND_ROWS = {
     'unlock': Cmd('{ref}.Lock(false)', OBJREF),
 
     #: GetIsReference / GetIsRef: identity comparison against the argument.
-    'getisreference': Cmd('{ref} == {a0}', AV, defaults={0: 'None'}),
-    'getisref': Cmd('{ref} == {a0}', AV, defaults={0: 'None'}, flags='cmp_bool'),
+    'getisreference': Cmd('({ref} as ObjectReference) == ({a0} as ObjectReference)', OBJREF,
+                          defaults={0: 'None'}, types={0: 'ObjectReference'}),
+    'getisref': Cmd('({ref} as ObjectReference) == ({a0} as ObjectReference)', OBJREF,
+                    defaults={0: 'None'}, types={0: 'ObjectReference'}, flags='cmp_bool'),
 
     # CreateFullActorCopy: Papyrus can only place a fresh instance of the
     # actor's BASE, which is the copy TES4's callers use it for.
@@ -979,13 +1177,6 @@ COMMAND_ROWS = {
     # takes down the whole file AND every script that imports it, whereas an
     # inert 0 keeps the rest of the script working.
 
-    # TES4 `PositionCell x, y, z, angle, Cell` teleports a reference to raw
-    # coordinates in a named cell.  Papyrus MoveTo takes a TARGET REFERENCE,
-    # and Skyrim exposes no cell-coordinate move.
-    'positioncell': Cmd(note='PositionCell needs a target marker; Papyrus '
-                             'MoveTo takes a reference, not cell '
-                             'coordinates ({a})'),
-
     # OBSE `runScriptLine "<console command>"` compiles and runs a console
     # command at runtime.  Papyrus cannot execute the console at all, and
     # Morrowind_ob uses it exclusively to poke the OPTIONAL ObXP mod's globals
@@ -998,27 +1189,8 @@ COMMAND_ROWS = {
     'runbatchscript': Cmd(note='{f} - OBSE console execution, no Papyrus '
                                'equivalent ({f} {a})'),
 
-    # OBSE `SetEventHandler "OnDeath" <script> "object"::Player` registers a
-    # script as a callback for an engine event.  Papyrus has no registration
-    # API of this shape -- an event is bound by DECLARING it (`Event
-    # OnDeath()`) on a script attached to the form.  The argument syntax
-    # carries OBSE's `::` type-tag operator, which is not Papyrus syntax at all
-    # and fails the parse of every script that imports this one.
-    'seteventhandler': Cmd(
-        note='{f} - OBSE event registration; Papyrus binds events by '
-             'declaring them on the attached script ({f} {a})'),
-    'removeeventhandler': Cmd(
-        note='{f} - OBSE event registration; Papyrus binds events by '
-             'declaring them on the attached script ({f} {a})'),
-
-    'getcrosshairref': Cmd(
-        'None', note='getCrosshairRef has no Papyrus equivalent (read as None)'),
-    'getcrosshairreference': Cmd(
-        'None', note='getCrosshairRef has no Papyrus equivalent (read as None)', flags='branch_only'),
-    'getstringgamesetting': Cmd(
-        '""', note='GetStringGameSetting has no Papyrus equivalent (read as "")'),
-    'getpackagetarget': Cmd(
-        'None', note='getPackageTarget has no Papyrus equivalent (read as None)'),
+    'getcrosshairref': Cmd('Game.GetCurrentCrosshairRef()', flags='zero_arg'),
+    'getcrosshairreference': Cmd('Game.GetCurrentCrosshairRef()', flags='zero_arg'),
 
     # StopCombatAlarmOnActor / SCAOnActor / SCA.
     # NOT StopCombat: that "removes this actor from combat" (ends the
@@ -1033,7 +1205,6 @@ COMMAND_ROWS = {
     'sca': Cmd('{ref}.StopCombatAlarm()', AV),
     'stopcombatalarmonactor': Cmd('{ref}.StopCombatAlarm()', AV, flags='zero_arg'),
     #: ClearOwnership
-    'clearownership': Cmd('{ref}.SetActorOwner(Game.GetPlayer().GetActorBase())', SELF, flags='zero_arg'),
     #: Reset → ref.Reset()
     'reset': Cmd('{ref}.Reset()', AV, flags='branch_only objref_self'),
     #: DeleteFullActorCopy
@@ -1043,12 +1214,10 @@ COMMAND_ROWS = {
     'getsize': Cmd('{ref}.GetScale()', SELF),
     #: ResetHealth: TES4 ResetHealth -> RestoreActorValue("Health", 9999)
     'resethealth': Cmd('{ref}.RestoreActorValue("Health", 9999)', AV, flags='actor_only branch_only'),
-    # EvaluatePackage/EVP/AddScriptPackage/RemoveScriptPackage/StopWaiting:
-    # Skyrim version takes no args (drop TES4 package arg)
+    # Package reevaluation takes no arguments; script overrides have their
+    # own runtime handlers and retain the requested Package.
     'evaluatepackage': Cmd('{ref}.EvaluatePackage()', AV, flags='actor_arg actor_only zero_arg'),
     'evp': Cmd('{ref}.EvaluatePackage()', AV, flags='actor_arg actor_only'),
-    'addscriptpackage': Cmd('{ref}.EvaluatePackage()', AV, flags='actor_only drop_args'),
-    'removescriptpackage': Cmd('{ref}.EvaluatePackage()', AV, flags='actor_only drop_args'),
     'stopwaiting': Cmd('{ref}.EvaluatePackage()', AV, flags='actor_only'),
     #: ClearLookAt / StopLook: Skyrim version takes no args (drop TES4 target arg)
     'clearlookat': Cmd('{ref}.ClearLookAt()', AV, flags='actor_only'),
@@ -1062,7 +1231,7 @@ COMMAND_ROWS = {
     #: GetRace: ref.GetRace() -> ref.GetRace()
     'getrace': Cmd('{ref}.GetRace()', AV, flags='actor_only'),
     #: IsInInterior: ref.IsInInterior -> ref.GetParentCell().IsInterior()
-    'isininterior': Cmd('{ref}.GetParentCell().IsInterior()', AV, flags='bare_bool cmp_bool objref_self'),
+    'isininterior': Cmd('{ref}.GetParentCell().IsInterior()', OBJREF, flags='bare_bool cmp_bool objref_self'),
     #: GetContainer: item.GetContainer -> item.GetContainer()
     'getcontainer': Cmd('{ref}.GetContainer()', SELF),
     # The crime/fame/infamy WRITES.  Each was a branch that registered the
@@ -1119,9 +1288,6 @@ COMMAND_ROWS = {
     # (`autosave` itself already maps to Game.RequestAutoSave via FUNCTION_MAP.)
     'con_save': Cmd('Game.RequestSave()'),
     'con_savegame': Cmd('Game.RequestSave()'),
-    'getdisposition': Cmd('50'),
-    #: GetIsPlayableRace
-    'getisplayablerace': Cmd('true', flags='zero_arg'),
     'getplayerinjail': Cmd('Game.GetPlayer().IsArrested()'),
     #: GetRandomPercent -> Utility.RandomInt(0, 99)
     'getrandompercent': Cmd('Utility.RandomInt(0, 99)'),
@@ -1141,7 +1307,7 @@ COMMAND_ROWS = {
     # TES4CyrodiilCrimeFaction for the player, so every one read false.
     'isplayerinjail': Cmd('Game.GetPlayer().IsArrested()'),
     'isplayerinprison': Cmd('Game.GetPlayer().IsArrested()'),
-    'isthirdperson': Cmd('False'),
+    'isthirdperson': Cmd('TES4Runtime.IsThirdPerson()', flags='bare_bool cmp_bool zero_arg'),
     'releaseweatheroverride': Cmd('Weather.ReleaseOverride()'),
     'savegame': Cmd('Game.RequestSave()'),
     'senttojail': Cmd('Game.GetPlayer().IsArrested()'),
@@ -1170,24 +1336,11 @@ COMMAND_ROWS = {
     # arithmetic, where a trailing comment would eat the rest of the line.
     'getcontrol': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
     'getcrimeknown': Cmd(note='{f}'),
-    'getcurrentaipackage': Cmd(note='{f}', flags='zero_arg'),
     'getcurrentaiprocedure': Cmd(note='{f}', flags='zero_arg'),
-    'getcurrentpackage': Cmd(note='{f}'),
-    'getfullgoldvalue': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
-    # GetGameRestarted / IsPlayerMovingIntoNewSpace (OBSE): both report a
-    # one-off engine transition Skyrim does not expose.  False is the safe
-    # reading — the guarded body is a re-initialisation that is allowed to be
-    # skipped, and the alternative (an undefined identifier) kills the script.
-    # Return a BARE literal: this is an operand and gets embedded inside a
-    # larger condition, where a trailing `;` comment would swallow the rest
-    # of the expression (`If True  ;(False ;NE: ...)`).
-    'getgamerestarted': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
-    # ObjectReference.IgnoreFriendlyHits is a SETTER in Skyrim; TES4's
-    # GetIgnoreFriendlyHits reads the flag back and Papyrus cannot.
-    'getignorefriendlyhits': Cmd(note='GetIgnoreFriendlyHits — Skyrim exposes only the setter', flags='bare_bool zero_arg'),
-    'getisalerted': Cmd(note='{f}', flags='zero_arg'),
+    'getcurrentpackage': Cmd('{ref}.GetCurrentPackage()', ACTOR, flags='actor_only zero_arg'),
+    'getgamerestarted': Cmd(flags='bare_bool zero_arg'),
+    'getgameloaded': Cmd(flags='bare_bool zero_arg'),
     'getisplayerbirthsign': Cmd(note='{f}'),
-    'getitems': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
     'getmousecontrol': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
     'getnumericinisetting': Cmd(note='GetNumericINISetting has no Papyrus equivalent (read as 0)'),
     # getObjectType (OBSE): the numeric TES4 form-type code of a reference's
@@ -1196,15 +1349,11 @@ COMMAND_ROWS = {
     # could not be honoured even if it did.  Reads as 0 (a bare literal — it
     # sits inside larger conditions).
     'getobjecttype': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
-    # Vanilla TES4 GetPlayerHasLastRiddenHorse — no Skyrim equivalent (the
-    # engine tracks no "last ridden" horse), and SKSE adds none.
-    'getplayerhaslastriddenhorse': Cmd(note='{f} has no Skyrim equivalent', flags='bare_bool zero_arg'),
+    'getplayerhaslastriddenhorse': Cmd(flags='bare_bool zero_arg'),
     'getrestrained': Cmd(note='GetRestrained', flags='zero_arg'),
-    'getstartingpos': Cmd(note='{f}'),
     # GetTalkedToPC
     # Both spellings answer with the canonical command name, as the branch
     # they replace did -- GetTalkedToPCP is a variant of the same command.
-    'gettalkedtopc': Cmd(note='GetTalkedToPC', flags='cmp_bool zero_arg'),
     'gettalkedtopcp': Cmd(note='GetTalkedToPC'),
     'gettype': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
     'getweaponskilltype': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
@@ -1224,23 +1373,17 @@ COMMAND_ROWS = {
     'iscurrentfurnitureref': Cmd(note='{f}'),
     'isidleplaying': Cmd(note='{f}', flags='zero_arg'),
     'isindangerouswater': Cmd(note='{f}', flags='zero_arg'),
-    # isKeyPressed / isKeyPressed2 / isControlPressed (OBSE): raw input
-    # polling.  Papyrus has no key-state read outside SKSE, so these read as
-    # "not pressed".  A BARE 0 — the call sits inside a larger condition
-    # (`if isKeyPressed2 attackKey || isKeyPressed2 attackButton`) where a
-    # trailing comment would swallow the rest of the expression.
-    'iskeypressed': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
-    'iskeypressed2': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
-    'iskeypressed3': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
+    # Typed input handlers preserve virtual, simulated, and physical states.
+    'iskeypressed': Cmd(flags='cmp_bool'),
+    'iskeypressed2': Cmd(flags='cmp_bool'),
+    'iskeypressed3': Cmd(flags='cmp_bool'),
     'isonguard': Cmd(note='{f}'),
     # Implemented by the SKSE64 handler in commands.py. The row keeps the
     # source-level Bool/zero-argument facts available to the tree emitter.
     'isplayable': Cmd(flags='bare_bool cmp_bool zero_arg'),
     'isplayable2': Cmd(flags='bare_bool cmp_bool zero_arg'),
     'isplayermovingintonewspace': Cmd(note='{f} has no Papyrus equivalent (read as 0)'),
-    'isplayerslastriddenhorse': Cmd(note='{f} has no Skyrim equivalent', flags='bare_bool zero_arg'),
     #: IsSwimming → no vanilla equivalent, approximate with submerged check
-    'isswimming': Cmd(note='IsSwimming', flags='actor_only bare_bool cmp_bool zero_arg'),
     'istimepassing': Cmd(note='{f}'),
     'menumode': Cmd(note='{f}'),
     'offerhorse': Cmd(note='{f}'),
@@ -1252,27 +1395,17 @@ COMMAND_ROWS = {
     'removeflames': Cmd(note='{f} has no Skyrim equivalent', flags='zero_arg'),
     'removetopic': Cmd(note='{f}'),
     'respawnhorse': Cmd(note='{f}'),
-    #: Rotate → no-op
-    'rotate': Cmd(note='Rotate'),
-    'sendtrespassalarm': Cmd(note='{f}'),
     #: SetActorFullName → no-op (SKSE required for SetDisplayName)
     'setactorfullname': Cmd(note='SetActorFullName'),
     'setallreachable': Cmd(note='{f}'),
     'setallvisible': Cmd(note='{f}'),
-    #: SetCellFullName no-op
-    'setcellfullname': Cmd(note='{f}'),
-    'setcellownership': Cmd(note='{f}'),
-    'setcellpublicflag': Cmd(note='{f}'),
     'setclass': Cmd(note='{f}'),
-    #: SetCombatStyle → no-op (managed by CK/race)
-    'setcombatstyle': Cmd(note='SetCombatStyle'),
     # SetName is the same capability as SetDisplayName (both rename a form)
     # and neither exists in vanilla Papyrus — Form.psc has no name setter.
     'setdisplayname': Cmd(note='{f}'),
     'setdoordisabletakeoff': Cmd(note='{f}'),
     #: SetForceSneaking
-    'setforcesneak': Cmd(note='SetForceSneak', flags='actor_only'),
-    'setignorefriendlyhits': Cmd(note='{f}'),
+    'setforcesneak': Cmd(flags='actor_only'),
     #: SetInCharGen: no-op
     'setinchargen': Cmd(note='SetInCharGen'),
     'setinvestmentgold': Cmd(note='{f}'),
@@ -1280,9 +1413,7 @@ COMMAND_ROWS = {
     'setitemvalue': Cmd(note='SetItemValue'),
     #: SetLevel → no-op
     'setlevel': Cmd(note='SetLevel'),
-    'setname': Cmd(note='{f}'),
     'setnoavoidance': Cmd(note='{f}'),
-    'setnorumors': Cmd(note='{f}'),
     'setpackduration': Cmd(note='{f}'),
     #: SetPlayerInSEWorld: no-op
     'setplayerinseworld': Cmd(note='SetPlayerInSEWorld'),
@@ -1335,29 +1466,18 @@ COMMAND_ROWS = {
     'setpcamurderer': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'setcellwaterheight': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'setstringinisetting': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'setstringgamesettingex': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getobseversion': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    # getfirstref/getnextref are NOT here: they have a real special handler
-    # (the ref-walk becomes Game.FindRandomActorFromRef sampling).  Listing
-    # them neutralised them to `0`, which left the loop body walking a ref that
-    # was never assigned.
     'getformfrommod': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getaltcontrol2': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'sifh': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'equipme': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'modavmod': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'getvelocity': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'setvelocity': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'isunderwater': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'getvampire': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getweapontype': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'iswaiting': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getnumfollowers': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getnthfollower': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'getspells': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'setattackdamage': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'togglespecialanim': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'setavmod': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'starttimer': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getmodlocaldata': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'setmodlocaldata': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
@@ -1373,23 +1493,8 @@ COMMAND_ROWS = {
     # they have FUNCTION_MAP entries and a shared handler (_FORM_TYPE_TESTS).
     # NOT fileexists: neutralising it to 0 answers "the file is MISSING", which
     # is the wrong polarity — see its dedicated handler in _emit_function.
-    'getgodmode': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getplayerbirthsign': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
     'getdisplayname': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'getname': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    # AddActorValues (OBSE plugin) — the float-typed AV-modifier accessors that
-    # sit alongside the already-listed setavmod/modavmod.  Skyrim has no such
-    # plugin, and every TES4 caller already guards the block with
-    # `IsPluginInstalled "AddActorValues" == 0 / return`, so the block is dead
-    # by construction.
-    #
-    # Left unrouted they survived as undefined identifiers and failed the
-    # CHECKER, so NO .pex was emitted for the owning script at all.  That is
-    # what kept mwMorroDefaultQuestScript from running, and with it the
-    # PlayerInMorrowind global its GameMode block maintains -- the global that
-    # gates Fargoth's unique greeting and his "ring" topic.
-    'getavmodf': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
-    'setavmodf': Cmd(note='{f} - no Papyrus equivalent ({f} {a})'),
 
     # --- Commands the generic mapped-call rendering covers.
     # --- Actor Values ---
@@ -1410,9 +1515,9 @@ COMMAND_ROWS = {
     'getitemcount': Cmd('GetItemCount', MAP, flags='actor_only objref_self objref_shared'),
     'equipitem': Cmd('EquipItem', MAP, flags='actor_only'),
     'unequipitem': Cmd('UnequipItem', MAP, flags='actor_only'),
-    'getnumitems': Cmd('GetNumItems', MAP),
+    'getnumitems': Cmd('GetNumItems', MAP, flags='objref_self'),
     'getinventoryobject': Cmd('GetNthForm', MAP),
-    'drop': Cmd('DropObject', MAP),
+    'drop': Cmd('DropObject', MAP, flags='objref_self'),
 
     #: --- Spells ---
     'addspell': Cmd('AddSpell', MAP, flags='actor_only'),
@@ -1443,12 +1548,10 @@ COMMAND_ROWS = {
     'kill': Cmd('Kill', MAP, flags='actor_only'),
     'killandresurrect': Cmd('Kill', MAP), # then Resurrect manually
     'resurrect': Cmd('Resurrect', MAP, flags='actor_only drop_args'),
-    'getdead': Cmd('IsDead', MAP, flags='actor_only bare_bool cmp_bool zero_arg'),
+    'getdead': Cmd('{ref}.IsDead()', ACTOR, flags='actor_only bare_bool cmp_bool zero_arg'),
     'isdead': Cmd('IsDead', MAP, flags='actor_only bare_bool cmp_bool zero_arg'),
     'isincombat': Cmd('IsInCombat', MAP, flags='actor_only bare_bool cmp_bool zero_arg'),
-    # SetForceSneak is neutralised (no Skyrim equivalent), so the live sneak
-    # state is the closest readable value for its getter.
-    'getforcesneak': Cmd('IsSneaking', MAP, flags='actor_only bare_bool zero_arg'),
+    'getforcesneak': Cmd(flags='actor_only bare_bool zero_arg'),
     #: TES4 knocked-down state ~ Skyrim's bleedout/recovery state.
     'getknockedstate': Cmd('IsBleedingOut', MAP, flags='actor_only bare_bool zero_arg'),
     'startcombat': Cmd('StartCombat', MAP, flags='actor_arg actor_only'),
@@ -1481,7 +1584,8 @@ COMMAND_ROWS = {
     # — which is fatal, not cosmetic: the whole script fails to compile and
     # every script declaring a property of its type then fails to LINK.
     'getisghost': Cmd('IsGhost', MAP),
-    'getunconscious': Cmd('IsUnconscious', MAP),
+    'getunconscious': Cmd('{ref}.IsUnconscious()', ACTOR, flags='actor_only zero_arg'),
+    'isunconscious': Cmd('{ref}.IsUnconscious()', ACTOR, flags='actor_only zero_arg'),
     'resetai': Cmd('ResetAI', MAP, flags='zero_arg'),
 
     #: --- Factions ---
@@ -1494,9 +1598,7 @@ COMMAND_ROWS = {
     'removefromfaction': Cmd('RemoveFromFaction', MAP),
 
     # --- AI ---
-    # setforcerun has a dedicated handler (SpeedMult); deliberately NOT mapped
-    # here.  It carried ('SetDontMove', ...) — the exact inverse of "force this
-    # actor to run" — which was unreachable only because the handler runs first.
+    # Forced movement uses the native actor flags in runtime_queries.
 
     #: --- Quest ---
     'setstage': Cmd('SetStage', MAP, bare=True),
@@ -1560,12 +1662,10 @@ COMMAND_ROWS = {
     'setav2': Cmd('SetActorValue', MAP, flags='av'),
     'rand': Cmd('Utility.RandomFloat', MAP, bare=True),
     'islocked': Cmd('IsLocked', MAP, flags='bare_bool objref_self'),
-    'getequippedobject': Cmd('GetEquippedWeapon', MAP),
+    'getequippedobject': Cmd('GetEquippedWeapon', MAP, flags='actor_only'),
     # TES4 `LoopGroup <group>` plays an idle animation on repeat;
     # PlayGamebryoAnimation is Skyrim's own looping Gamebryo-animation call.
     'loopgroup': Cmd('PlayGamebryoAnimation', MAP),
-    # OBSE `IsOnGround` is the complement of Skyrim's IsFlying: both engines
-    # only distinguish "supported by the ground" from "not".
     # OBSE `IsModLoaded "Foo.esp"` — Morrowind_ob guards every Oblivion XP
     # hand-off with it.  Game.GetFormFromFile returns None for an unloaded
     # file, which answers the same question in vanilla Papyrus.
@@ -1644,8 +1744,6 @@ COMMAND_ROWS = {
     'setscale': Cmd('SetScale', MAP, flags='actor_only objref_shared'),
     'getscale': Cmd('GetScale', MAP, flags='actor_only objref_shared zero_arg'),
     'say': Cmd('Say', MAP, flags='actor_only objref_shared'),
-    'setfactionreaction': Cmd('SetReaction', MAP, bare=True),
-    'modfactionreaction': Cmd('ModReaction', MAP, bare=True),
     'triggerscreenblood': Cmd('Game.TriggerScreenBlood', MAP, bare=True),
     'removeme': Cmd('Delete', MAP),
 
@@ -1669,7 +1767,7 @@ COMMAND_ROWS = {
     'player.placeatme': Cmd('Game.GetPlayer().PlaceAtMe', MAP, bare=True),
 
     #: --- Additional Actor/Combat ---
-    'getcombattarget': Cmd('GetCombatTarget', MAP, flags='zero_arg'),
+    'getcombattarget': Cmd('GetCombatTarget', MAP, flags='actor_only zero_arg'),
     'getparentcellowner': Cmd('GetParentCell', MAP),
     'hasmagiceffect': Cmd('HasMagicEffect', MAP, flags='actor_only'),
     'setopendoor': Cmd('SetOpen', MAP),
@@ -1689,7 +1787,7 @@ COMMAND_ROWS = {
     #: --- AI/Package ---
 
     #: --- Object Interaction ---
-    'removeallitems': Cmd('RemoveAllItems', MAP, flags='actor_only objref_shared'),
+    'removeallitems': Cmd('RemoveAllItems', MAP, types={0: 'ObjectReference'}, flags='actor_only objref_shared'),
     # Special handlers in _emit_function (see there for why each is inert):
     # path-based music has no Skyrim API, IsCasting maps to the animation graph.
     # The same engine function (0x1153) under its other authored spelling —
@@ -1756,7 +1854,6 @@ COMMAND_ROWS = {
     # raw member access on a type that has no such property, failing the whole
     # compile.  Routed to the same polyfill handler as `getiscreature`.
     'getclothingvalue': Cmd(note='{f} {a}  (clothing value not tracked in Skyrim; 0)', flags='zero_arg'),
-    'getshouldattack': Cmd(note='{f} {a}  (no Papyrus equivalent; 0 -- sibling IsInCombat term carries the check)'),
     'getopenstate': Cmd('GetOpenState', MAP, flags='zero_arg'),
     'isessential': Cmd('IsEssential', MAP, flags='actor_arg actor_only cmp_bool zero_arg'),
     'getlos': Cmd('HasLOS', MAP, flags='actor_only'),
@@ -1806,9 +1903,9 @@ COMMAND_ROWS = {
     # has NO reader for the destroyed flag, and GetCurrentDestructionStage()
     # reads the unrelated DEST stage system this conversion never writes -- so
     # it returned 0 for every record and the read was always false.
-    'getdisabled': Cmd('TES4Polyfill.GetDisabled({ref}, {destroyed})', flags='objref_self zero_arg'),
-    'isdisabled': Cmd('TES4Polyfill.GetDisabled({ref}, {destroyed})', flags='bare_bool objref_self'),
-    'getdestroyed': Cmd('TES4Polyfill.GetDestroyed({ref}, {destroyed})', flags='bare_no_equiv zero_arg'),
+    'getdisabled': Cmd('TES4Polyfill.GetDisabled({ref}, {destroyed})', OBJREF, flags='objref_self zero_arg'),
+    'isdisabled': Cmd('TES4Polyfill.GetDisabled({ref}, {destroyed})', OBJREF, flags='bare_bool objref_self'),
+    'getdestroyed': Cmd('TES4Polyfill.GetDestroyed({ref}, {destroyed})', OBJREF, flags='bare_no_equiv zero_arg'),
 
     #: SetDestroyed writes that same shadow list.
     'setdestroyed': Cmd(
@@ -1863,21 +1960,12 @@ COMMAND_ROWS = {
     # GetInSameCell: both references' parent cells compared.
     # GetParentCell is an ObjectReference method, so the subject must NOT
     # be promoted to Actor: `(Self as Actor)` on a non-actor yields None.
-    'getinsamecell': Cmd('({ref}.GetParentCell() == {a0}.GetParentCell())',
-                         defaults={0: 'Game.GetPlayer()'}, flags='cmp_bool'),
-    'getinsamecellas': Cmd('({ref}.GetParentCell() == {a0}.GetParentCell())',
-                           defaults={0: 'Game.GetPlayer()'}),
+    'getinsamecell': Cmd('({ref}.GetParentCell() == ({a0}).GetParentCell())',
+                         OBJREF, types={0: 'ObjectReference'}, defaults={0: 'Game.GetPlayer()'}, flags='cmp_bool'),
+    'getinsamecellas': Cmd('({ref}.GetParentCell() == ({a0}).GetParentCell())',
+                           OBJREF, types={0: 'ObjectReference'}, defaults={0: 'Game.GetPlayer()'}),
 
     # --- No Papyrus equivalent -------------------------------------------
-    # OBSE `forEach <it> <- <container> ... loop`.  The loop OPENER; its
-    # body is commented out by the walker (see emit/script.py), which is what
-    # makes the iterator's absence harmless.
-    'foreach': Cmd(note='{f} - OBSE array/string command, no Papyrus '
-                        'equivalent ({f} {a})'),
-    'loop': Cmd(note='{f} - OBSE array/string command, no Papyrus '
-                     'equivalent ({f} {a})'),
-    'getmodindex': Cmd('1',
-                       note='GetModIndex - Papyrus cannot read load order'),
     'unlockachievement': Cmd(
         note='UnlockAchievement {a}  ;no Papyrus equivalent', flags='bare_no_equiv'),
 
@@ -1903,15 +1991,13 @@ COMMAND_ROWS = {
     # emitted Reset(fbmwEBBone) ("function takes 0 parameters not 1").
     'uncompletequest': Cmd('{a0}.Reset()', RAW, defaults={0: 'Self'}),
 
-    # GetPos/GetAngle/GetStartingAngle: the axis argument picks the accessor.
+    # GetPos/GetAngle: the axis argument picks the accessor.
     # These are declared on ObjectReference, so the subject must NOT be
     # promoted to Actor -- TES4 reads the position of plain scenery
     # (SEXedPuzStatue1-5 are STATs the Xeddefen puzzle rotates), and an
     # Actor Property on a STAT never binds, so the read came back None.
     'getpos': Cmd('{ref}.GetPosition{g0}()', OBJREF, defaults={0: 'X'}, flags='objref_self'),
     'getangle': Cmd('{ref}.GetAngle{g0}()', OBJREF, defaults={0: 'X'}, flags='objref_self'),
-    'getstartingangle': Cmd('{ref}.GetAngle{g0}()', OBJREF,
-                            defaults={0: 'X'}),
 
     # Sound playback.  Vanilla writes the EditorID QUOTED (PlaySound
     # "AMBBaenlinDeath") as often as bare, and the property must be registered
@@ -1939,24 +2025,11 @@ COMMAND_ROWS = {
         '{a0}.GetCrimeGoldViolent() < 1000) as Int',
         defaults={0: 'None'}, types={0: 'Faction'}),
 
-    # GetNextRef -- OBSE's walk over every reference in the loaded cells.
-    # Papyrus has no such iterator, but Skyrim ships the engine's own "an actor
-    # near here" primitive, so an ACTOR walk becomes repeated
-    # FindRandomActorFromRef sampling; the authored loop re-assigns the
-    # variable each pass, so a fresh sample per pass is exactly the iteration
-    # it asked for.  GetFirstRef carries the form TYPE and has its own handler:
-    # only form type 69 (actors) has an Actor-typed primitive behind it.
-    'getnextref': Cmd(
-        'Game.FindRandomActorFromRef(Game.GetPlayer(), 4096.0)'),
-
     #: ShowMap: the marker is the subject; bare it maps Self.
     'showmap': Cmd('{p0}.AddToMap(true)', types={0: 'ObjectReference'},
                    defaults={0: 'Self'}),
 
-    # SetForceRun -> SpeedMult.  Skyrim has no force-run flag; the actor value
-    # is what the engine actually reads for movement speed.
-    'setforcerun': Cmd('{ref}.SetActorValue("SpeedMult", {?01})', ACTOR,
-                       defaults={0: '0'}, arms=('150.0', '100.0'), flags='actor_only branch_only'),
+    'setforcerun': Cmd(flags='actor_only'),
 
     #: ResetInterior -> Cell.Reset().
     'resetinterior': Cmd('{p0}.Reset()', RAW, types={0: 'Cell'},
@@ -2012,15 +2085,6 @@ COMMAND_ROWS = {
     'forceflee': Cmd('{ref}.SetActorValue("Confidence", 0)\n'
                      '  {ref}.EvaluatePackage()', ACTOR),
 
-    # FileExists "<path>" -- OBSE probes a loose file, which Papyrus cannot see.
-    # It answers PRESENT, not absent, and polarity is the whole point: every
-    # caller uses it as an installation check against Oblivion-side artifacts
-    # (BSAs, inis) that do not exist after conversion BY DESIGN.  Answering 0
-    # fired every "missing file" branch and greeted the player with a bogus
-    # installation-error box on load.
-    'fileexists': Cmd('1', note='FileExists - converted assets are deployed '
-                                'by the pipeline, not under the TES4 path'),
-
     # SetCanFastTravelFromWorld: Skyrim's toggle is GLOBAL, so the worldspace
     # operand has nowhere to go.  Keep the flag, note the widened scope.
     'setcanfasttravelfromworld': Cmd(
@@ -2064,6 +2128,23 @@ COMMAND_ROWS = {
 # converts.  They carry no data of their own -- the entry exists so the
 # string path recognises the name AS a command rather than an identifier.
 HANDLED_COMMANDS = frozenset((
+    'getvelocity', 'getverticalvelocity', 'setvelocity', 'setverticalvelocity',
+    'setactorvaluec', 'setavc', 'modactorvaluec', 'modavc',
+    'getavforbaseactor', 'getavforbaseactorc',
+    'getactiveeffectcodes', 'getactiveeffectcasters',
+    'getitems',
+    'getvariable', 'getrefvariable',
+    'gettrainerskill', 'gettrainerlevel', 'getcurrentsoullevel', 'getfatiguepercentage', 'getteleportcell',
+    'getequippedweaponpoison',
+    'setequippedweaponpoison', 'removeequippedweaponpoison',
+    'getboundingbox',
+    'getallies', 'gettargets',
+    'comparename', 'nameincludes',
+    'getpclastdroppeditemref', 'getpclastdroppeditem',
+    'getdoorteleportx', 'getdoorteleporty', 'getdoorteleportz', 'getdoorteleportrot',
+    'getracespellcount', 'getnthracespell', 'getspellcount', 'getnthspell',
+    'getmagiceffectcount', 'getntheffectitemmagnitude', 'getntheffectitemarea',
+    'getntheffectitemduration', 'getntheffectitemrange', 'getntheffectitemactorvalue', 'getntheffectitemcode',
     'addtopic', 'closecurrentobliviongate', 'closeobliviongate',
     'con_runmemorypass', 'disablecontrol', 'disablekey', 'emcgetplaylist',
     'emcisbattleoverridden', 'emcismusiconhold', 'emcmusicnexttrack',
@@ -2195,17 +2276,6 @@ DISPATCH_EVENTS = ('onpackagestart', 'onpackageend', 'onpackagechange',
 #: Tokens a Say command needs before its topic can be a speak-as target.
 SAY_SPEAKAS_MIN_TOKENS = {'say': 3, 'saycustom': 3, 'sayto': 4}
 
-#: GMSTs Skyrim exposes only as an actor value.
-GMST_TO_ACTOR_VALUE = {
-    'fjumpheightmin': 'JumpingBonus',
-    'fjumpheightmax': 'JumpingBonus',
-    'fmoverunmult': 'SpeedMult',
-    'fmovecharwalkmin': 'SpeedMult',
-    'fmovecharwalkmax': 'SpeedMult',
-    'fmoverunathleticsmult': 'SpeedMult',
-}
-
-
 #: Actor values TES5 stores as an enum tier, with the tier count.
 ENUM_ACTOR_VALUES = {
     'aggression': 3, 'confidence': 4, 'assistance': 2,
@@ -2296,6 +2366,7 @@ _ACTOR_ONLY_FUNCTIONS = _flagged('actor_only') | frozenset({
     'isspelltarget', 'pathtoref', 'setalpha', 'setcell', 'setessential',
     'setopacity', 'setplayerteammate', 'setrace',
     'setrelationshiprank', 'sheatheweapon', 'startconversation',
+    'gethorse', 'getrider', 'ismovingforward', 'istorchout',
 })
 
 # Every TES4 command whose FIRST argument is an actor-value name.  Used both to
@@ -2325,8 +2396,7 @@ _BARE_NO_EQUIV_COMMANDS = _flagged('bare_no_equiv') | frozenset({
 # other table lists.  Derived by reading that chain rather than kept by hand,
 # because a hand-kept list drifts from it: these twelve were missing, so the
 # node path judged them unknown and emitted `;TODO:` over lines the string
-# path converted correctly (`setforcerun 1` becomes the SpeedMult write --
-# 62 statements in Oblivion.esm alone).  `foreach` is deliberately absent: it
+# path converted correctly. `foreach` is deliberately absent: it
 # is a STATEMENT keyword intercepted before the command layer, and listing it
 # here would let a bare `foreach` be treated as a call.
 _BRANCH_ONLY_COMMANDS = _flagged('branch_only') | frozenset({
@@ -2396,7 +2466,8 @@ NUMERIC_RANK = ('Float', 'Int', 'Bool')
 
 #: Declared parameter type -> the source types it may be cast FROM, only these.
 CASTABLE = {
-    'Int': ('Float',),
+    'Int': ('Float', 'Bool'),
+    'Actor': ('Form', 'ObjectReference'),
     'Spell': ('Form', 'ObjectReference'),
     'Faction': ('Form', 'ObjectReference'),
     'ObjectReference': ('Form',),

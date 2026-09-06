@@ -14,6 +14,8 @@ def resolve_property_formid(xref, prop_name: str) -> str:
     de-collision.  An unreversed rename leaves the property None at runtime.
     """
     low = prop_name.lower()
+    if low.startswith('tes4base_'):
+        low = low[len('tes4base_'):]
     fid = ''
     if low.startswith('d') and len(low) > 1 and low[1].isdigit():
         fid = xref.edid_to_formid.get(low[1:], '')

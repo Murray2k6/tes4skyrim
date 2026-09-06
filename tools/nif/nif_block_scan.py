@@ -122,19 +122,17 @@ def main():
     if not args.has and not args.any:
         ap.error("give --has/--any or --histogram")
 
-    matches, failed = [], []
+    matches, failed = 0, 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        for path, types, status in ex.map(lambda p: scan_file(p, args.has, args.any), files):
+        for path, types, status in ex.map(lambda p: scan_file(p, args.has, args.any), sorted(files)):
             if status == "match":
-                matches.append(path)
+                matches += 1
+                print(path, flush=True)
             elif status == "parse-failed":
-                failed.append(path)
-    for m in sorted(matches):
-        print(m)
-    print(f"{len(matches)} matching files; {len(failed)} header-parse failures", file=sys.stderr)
-    if failed:
-        for p in failed[:20]:
-            print(f"  parse-failed: {p}", file=sys.stderr)
+                failed += 1
+                if failed <= 20:
+                    print(f"  parse-failed: {path}", file=sys.stderr, flush=True)
+    print(f"{matches} matching files; {failed} header-parse failures", file=sys.stderr)
 
 
 if __name__ == "__main__":

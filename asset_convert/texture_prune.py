@@ -247,6 +247,13 @@ def _companions(refs: set) -> set:
     return extra
 
 
+def texture_dependencies(refs):
+    """Normalize explicit texture names and include implicit shader siblings."""
+    normalized = {_norm(r) for r in refs}
+    normalized.discard('')
+    return normalized | _companions(normalized)
+
+
 def build_refs(plugin_dir, export_dir, mesh_texture_refs=None) -> set:
     """Every texture the shipped plugin can ask for, as textures-root keys."""
     plugin_dir = Path(plugin_dir)
@@ -259,11 +266,11 @@ def build_refs(plugin_dir, export_dir, mesh_texture_refs=None) -> set:
     asset_root = assets_for(export_dir)
 
     if mesh_texture_refs is None:
+        if not (asset_root / MANIFEST_NAME).is_file():
+            raise RuntimeError(
+                f'no mesh texture manifest in {asset_root} — run mesh conversion '
+                f'first; pruning without it would delete textures that are in use')
         mesh_texture_refs = read_manifest(asset_root)
-    if not mesh_texture_refs:
-        raise RuntimeError(
-            f'no mesh texture manifest in {asset_root} — run mesh conversion '
-            f'first; pruning without it would delete textures that are in use')
 
     refs = {_norm(r) for r in mesh_texture_refs}
     refs.discard('')

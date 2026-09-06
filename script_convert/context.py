@@ -31,6 +31,11 @@ class ScriptContext:
     #: Variables synthesized from authored indexed sibling access (item1,
     #: item2, ... beside a declared item), keyed by safe Papyrus name.
     synthetic_vars: dict = field(default_factory=dict)
+    expression_temps: dict = field(default_factory=dict)
+    batch_stack: list = field(default_factory=list)
+    expected_type: str = ''
+    loop_stack: list = field(default_factory=list)
+    inventory_scopes: list = field(default_factory=list)
     #: Original lowercased name -> Papyrus-safe name, where they differ.
     var_renames: dict = field(default_factory=dict)
     #: OBSE `array_var` declarations; a read of one is inert.
@@ -79,6 +84,7 @@ class ScriptContext:
 
     udf_returns: bool = False
     udf_return_value: str = ''
+    udf_return_type: str = ''
     #: Parameter types of this script's OBSE user function, in order; None
     #: when it declares no TES4Call at all.
     udf_signature: list = None

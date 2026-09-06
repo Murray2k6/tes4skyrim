@@ -387,7 +387,8 @@ def emit_function(conv, ref_name, func_name, args_src, extends):
     if args_src.strip():
         call = Parser(tokenize(f'{func_name} {args_src}')).parse_expression()
         args = tuple(getattr(call, 'args', ()) or ())
-    return conv._emit_function(ref_name, func_name, extends, args=args)
+    from script_convert.emit.dispatch import emit_command
+    return emit_command(conv, ref_name, func_name, extends, args=args)
 
 
 # ===========================================================================
@@ -471,11 +472,13 @@ class TestFunctionConversion:
         assert 'TODO' in result
 
     def test_isactionref(self, converter):
+        converter._current_event = 'Event OnActivate(ObjectReference akActionRef)'
         result = emit_function(converter, None, 'IsActionRef', 'player', 'ObjectReference')
         assert 'akActionRef' in result
         assert 'Game.GetPlayer()' in result
 
     def test_getactionref(self, converter):
+        converter._current_event = 'Event OnActivate(ObjectReference akActionRef)'
         result = emit_function(converter, None, 'GetActionRef', '', 'ObjectReference')
         assert result == 'akActionRef'
 
@@ -1144,7 +1147,7 @@ class TestScroAliasRecovery:
         out = '\n'.join(conv.convert_fragment(body, 'Quest'))
         assert 'NDArmorHeavyCuirass1' in out
         assert 'NDArmorCuirass,' not in out
-        assert conv.get_property_refs()['NDArmorHeavyCuirass1'] == 'Armor'
+        assert conv.get_property_refs()['TES4Base_NDArmorHeavyCuirass1'] == 'Armor'
 
     def test_a_live_editorid_is_never_redirected(self):
         """Every name resolves, so there is nothing to recover."""
@@ -1188,6 +1191,13 @@ class TestScroAliasRecovery:
                 'StopQuest TG03Elven')
         assert resolve_scro_aliases(
             body, ['00008032', '00034EA2'], x) == {}
+
+    def test_message_labels_do_not_block_a_renamed_record(self):
+        from script_convert.pipeline import resolve_scro_aliases
+        body = ('MessageBox "Choose", "Yes", "No", "NDArmorHeavyCuirass1"\n'
+                'player.additem "NDArmorCuirass" 1')
+        assert resolve_scro_aliases(body, ['01000ECE'], self._xref()) == {
+            'ndarmorcuirass': 'NDArmorHeavyCuirass1'}
 
 
 # ===========================================================================
@@ -1654,9 +1664,6 @@ def xref_magic():
     x.mgef_shaders['strp'] = ('0014A0A2', '0018B57B', 4)
     x.mgef_shaders['dspl'] = ('00000000', '0018B57B', 4)
     x.mgef_shaders['babo'] = ('00000000', '00000000', 1)
-    # Spells: first effect DRHE -> AlchDamageHealth; pure-SEFF spell -> filler
-    x.spell_effects['testdrainspell'] = [('SEFF', 69), ('DRHE', 8)]
-    x.spell_effects['testscriptspell'] = [('SEFF', 69)]
     # A PACK record for GetIsCurrentPackage/GetCurrentAIPackage
     x.formid_to_edid['00023456'] = 'TestWanderPkg'
     x.edid_to_formid['testwanderpkg'] = '00023456'
@@ -1699,20 +1706,28 @@ class TestMagicEffectVisuals:
 
 
 class TestIsSpellTarget:
-    def test_resolves_first_surviving_effect(self, xref_magic):
-        # SEFF drops, DRHE -> AlchDamageHealth 0x0003EB42
-        assert xref_magic.get_spell_first_skyrim_mgef('TestDrainSpell') == 0x0003EB42
-
-    def test_pure_script_spell_uses_filler(self, xref_magic):
-        # matches the importer's first filler (AlchRestoreHealth)
-        assert xref_magic.get_spell_first_skyrim_mgef('TestScriptSpell') == 0x0003EB15
-
     def test_emits_polyfill_call(self, xref_magic):
         conv = ScriptConverter(xref_magic)
         result = conv_line(conv, 'if player.IsSpellTarget TestDrainSpell',
                                     'ObjectReference')
-        assert 'TES4Polyfill.HasMagicEffectByID(Game.GetPlayer(), 0x0003EB42)' in result
+        assert 'TES4Polyfill.HasSpellEffect(Game.GetPlayer(), TestDrainSpell)' in result
         assert ';TODO' not in result
+
+    def test_spawn_creature_base_binds_actorbase(self):
+        xref = CrossRefGraph()
+        xref.edid_to_formid['1summonbase'] = '01001234'
+        xref.formid_to_edid['01001234'] = '1SummonBase'
+        xref.record_type['01001234'] = 'CREA'
+        conv = ScriptConverter(xref)
+        result = conv.convert_standalone('Spawn',
+            'scn Spawn\nbegin ScriptEffectStart\nplayer.PlaceAtMe 1SummonBase\nend',
+            'ActiveMagicEffect', 'Spawn')
+        assert 'ActorBase Property d1SummonBase Auto' in result
+
+    def test_parent_cell_zero_is_null(self):
+        conv = ScriptConverter(CrossRefGraph())
+        result = conv_expr(conv, 'player.GetParentCell == 0')
+        assert 'GetParentCell() == None' in result
 
 
 class TestAnimAndPackage:
@@ -1731,8 +1746,15 @@ class TestAnimAndPackage:
         conv = ScriptConverter(xref_magic)
         result = conv_line(conv, 'if GetIsCurrentPackage TestWanderPkg',
                                     'Actor')
-        assert 'GetCurrentPackage() == TestWanderPkg' in result
-        assert conv._property_refs['TestWanderPkg'] == 'Package'
+        assert 'GetCurrentPackage() == TES4Base_TestWanderPkg' in result
+        assert conv._property_refs['TES4Base_TestWanderPkg'] == 'Package'
+
+    def test_getiscurrentpackage_accepts_runtime_form(self, xref_magic):
+        conv = ScriptConverter(xref_magic)
+        conv._property_refs['RuntimePackage'] = 'Form'
+        result = conv_line(conv, 'if GetIsCurrentPackage RuntimePackage', 'Actor')
+        assert 'GetCurrentPackage() == RuntimePackage as Package' in result
+        assert ';NE:' not in result
 
     def test_getcurrentaipackage_vs_form(self, xref_magic):
         conv = ScriptConverter(xref_magic)
@@ -3351,11 +3373,7 @@ class TestPlayerControlsShadow:
 # ===========================================================================
 # Runtime game-setting writes (OBSE SetNumericGameSetting) and fall damage
 #
-# Skyrim has vanilla Papyrus GMST *readers* but no writer — SKSE's
-# Game.SetGameSettingFloat does NOT compile against the vanilla headers this
-# pipeline builds with (verified against papyrus.exe: "undefined function
-# SetGameSettingFloat", while the getter resolves).  So the settings that have
-# a per-actor equivalent go through Actor.ForceActorValue instead.
+# Read and write the same engine setting; setters retain OBSE's success result.
 # ===========================================================================
 
 class TestRuntimeGameSettingWrites:
@@ -3365,12 +3383,11 @@ class TestRuntimeGameSettingWrites:
             '  SetNumericGameSetting fJumpHeightMin 9000\n'
             'end\n')
 
-    def test_write_becomes_an_actor_value(self, converter):
+    def test_write_changes_the_global_setting(self, converter):
         out = converter.convert_standalone(
             'T', self._SRC, 'ActiveMagicEffect', 'T')
-        assert 'akTarget.ForceActorValue("JumpingBonus", 9000)' in out
-        # SKSE-only, does not compile against vanilla headers.
-        assert 'SetGameSettingFloat' not in out
+        assert 'TES4Runtime.SetNumericGameSetting("fJumpHeightMin", (9000) as Float)' in out
+        assert 'ForceActorValue' not in out
 
     def test_read_uses_the_same_channel_as_the_write(self, converter):
         """The save/restore pattern these scripts use ("remember the old
@@ -3378,16 +3395,20 @@ class TestRuntimeGameSettingWrites:
         never changed if the getter still goes to the global GMST."""
         out = converter.convert_standalone(
             'T', self._SRC, 'ActiveMagicEffect', 'T')
-        assert 'akTarget.GetActorValue("JumpingBonus")' in out
-        assert 'Game.GetGameSettingFloat("fJumpHeightMin")' not in out
+        assert 'TES4Runtime.GetNumericGameSetting("fJumpHeightMin")' in out
+        assert 'GetActorValue("JumpingBonus")' not in out
 
-    def test_a_setting_with_no_actor_value_keeps_a_visible_marker(self, converter):
-        """A call that silently does nothing is the dangerous conversion; a
-        marker is the healthy failure (docs/commentary/script_convert.md)."""
+    def test_runtime_lookup_owns_missing_setting_detection(self, converter):
         out = converter.convert_standalone(
             'T', 'scn T\nbegin gamemode\nSetNumericGameSetting fNoSuchSetting 5\nend',
             'Quest', 'T')
-        assert ';TODO' in out and 'fNoSuchSetting' in out
+        assert 'TES4Runtime.SetNumericGameSetting("fNoSuchSetting", (5) as Float)' in out
+
+    def test_string_setting_preserves_formatted_value(self, converter):
+        out = converter.convert_standalone(
+            'T', 'scn T\nstring_var text\nbegin gamemode\nSetStringGameSettingEX "sMessage|%z" text\nend', 'Quest', 'T')
+        assert 'TES4Runtime.SetStringGameSetting("sMessage|' in out
+        assert ';NE:' not in out
 
 
 class TestResetFallDamageTimerIsPaired:
@@ -3592,10 +3613,10 @@ class TestSvConstructIsAStringLiteral:
         assert 'sv_Construct' not in out
         assert '"Hello there."' in out
 
-    def test_destruct_stays_a_no_op(self, converter):
-        """Papyrus strings are garbage-collected — there is nothing to free."""
+    def test_destruct_clears_the_assigned_string(self, converter):
+        """OBSE destruction also clears the variable that held the string."""
         out = conv_line(converter, 'set q to sv_Destruct', 'Quest')
-        assert 'NE: sv_Destruct' in out
+        assert out == 'q = ""'
 
 
 class TestMoveToBindsItsDestination:
@@ -3917,15 +3938,16 @@ class TestBaseItemPropertiesKeepTheirRecordType:
         conv = ScriptConverter(self._xref_with_scripted_item('CLOT'))
         src = "scn T\nbegin onActivate\n  player.removeitem fbmwRing 1\nend\n"
         out = conv.convert_standalone('T', src, 'ObjectReference', 'T')
-        assert 'Armor Property fbmwRing' in out
+        assert 'Armor Property TES4Base_fbmwRing' in out
         assert 'TES4_mwCWUItemScript Property fbmwRing' not in out
 
-    def test_reference_types_still_take_the_script_class(self):
-        """The cross-script access this preference exists for must survive."""
+    def test_container_base_value_does_not_bind_as_a_reference_script(self):
+        """A scripted CONT is still a base form when passed to RemoveItem."""
         conv = ScriptConverter(self._xref_with_scripted_item('CONT'))
         src = "scn T\nbegin onActivate\n  player.removeitem fbmwRing 1\nend\n"
         out = conv.convert_standalone('T', src, 'ObjectReference', 'T')
-        assert 'TES4_mwCWUItemScript Property fbmwRing' in out
+        assert 'Form Property TES4Base_fbmwRing' in out
+        assert 'TES4_mwCWUItemScript Property fbmwRing' not in out
 
 
 class TestGetInCellSplitsInteriorFromExterior:
@@ -4210,10 +4232,12 @@ class TestObjectReferenceMethodsDoNotPromoteToActor:
         assert 'SEHaskillSummonMarker.MoveTo(' in result
         assert converter._property_refs.get('SEHaskillSummonMarker') != 'Actor'
 
-    def test_actor_only_call_still_promotes(self, converter):
-        """The guard must not disarm genuine Actor-only promotion."""
-        conv_line(converter, 'SomeGuardRef.EVP', 'Quest')
-        assert converter._property_refs.get('SomeGuardRef') == 'Actor'
+    def test_actor_only_call_casts_a_reference_receiver(self, converter):
+        """Actor-only methods remain callable without retyping a ref binding."""
+        converter._property_refs['SomeGuardRef'] = 'ObjectReference'
+        result = conv_line(converter, 'SomeGuardRef.EVP', 'Quest')
+        assert '(SomeGuardRef as Actor).EvaluatePackage()' in result
+        assert converter._property_refs['SomeGuardRef'] == 'ObjectReference'
 
 
 class TestQuestStartDoesNotClobberSeededWrites:

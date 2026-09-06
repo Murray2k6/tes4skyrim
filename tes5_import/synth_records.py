@@ -228,7 +228,7 @@ def create_vtyp_records(writer: PluginWriter, export_dir: str = None):
 
     See: docs/commentary/tes5_import_dialogue.md#voice-types-are-created-from-scratch
     """
-    edid_to_fid: dict = {}
+    edid_to_fid = {edid: fid for fid, edid in VTYP_EDID_BY_FID.items()}
 
     def _emit(vtyp_edid: str, gender: str) -> int:
         """Write one VTYP once, returning its FormID."""

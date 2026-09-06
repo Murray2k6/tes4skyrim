@@ -1807,6 +1807,38 @@ class TestServiceConversion:
         assert not (flags & 0x4000), 'marker must not carry the Vendor flag'
         assert 'VEND' not in subs and 'VENV' not in subs
 
+    def test_dependent_merchant_uses_master_dialogue_markers_and_own_chest(self):
+        from tes5_import.record_types.actors import (
+            create_vendor_factions, create_trainer_records, create_origin_faction,
+            get_merchant_faction_fid, get_trainer_faction_fid, reset_origin_faction)
+        from types import SimpleNamespace
+
+        inherited = {'TES4MerchantFaction': 0x01009000,
+                     'TES4JobTrainerFaction': 0x01009001,
+                     'TES4PluginOriginFaction': 0x01009002}
+        index = SimpleNamespace(find_by_edid=lambda sig, edid: inherited.get(edid, 0))
+        writer = PluginWriter(masters=['Skyrim.esm', 'Parent.esm'])
+        npc = self._merchant_npc()
+        chest = {'NAME': npc['FormID'], 'XMRC.MerchantContainer': '00000901'}
+        by_type = {'NPC_': [npc], 'ACHR': [chest], 'CLAS': [self._clas_rec()]}
+        try:
+            create_origin_faction(writer, index)
+            create_vendor_factions(by_type, writer, index)
+            create_trainer_records(by_type, writer, index)
+            subs = self._subrecords(convert_NPC_(npc, writer))
+            factions = {struct.unpack_from('<I', s)[0] for s in subs['SNAM']}
+            assert inherited['TES4MerchantFaction'] in factions
+            assert inherited['TES4PluginOriginFaction'] in factions
+            assert get_merchant_faction_fid() == inherited['TES4MerchantFaction']
+            assert get_trainer_faction_fid() == inherited['TES4JobTrainerFaction']
+            owned_factions = {struct.unpack_from('<I', r, 12)[0]: self._subrecords(r)
+                              for r in writer._top_groups['FACT']}
+            assert not factions.intersection(inherited.values()).intersection(owned_factions)
+            assert any(struct.unpack('<I', s['VENC'][0])[0] == 0x901
+                       for fid, s in owned_factions.items() if fid in factions and 'VENC' in s)
+        finally:
+            reset_origin_faction()
+
     def test_barter_gate_is_a_single_condition(self):
         """Regression: the Barter gate used to OR over every vendor faction,
         putting 25-30 CTDAs on each Barter INFO. Vanilla Skyrim never exceeds 22
@@ -4713,6 +4745,13 @@ class TestWorldspaceClimate:
         cnam = struct.unpack('<I', _find_subrecord(out, b'CNAM'))[0]
         assert cnam & 0x00FFFFFF == 0x97C60
 
+    def test_parent_world_inherits_terrain_lod_map_water_and_sky(self):
+        from tes5_import.record_types.world import convert_WRLD
+        rec = self._rec(**{'WNAM.Parent': '0000003C'})
+        assert _find_subrecord(convert_WRLD(rec), b'PNAM') == b'\x5f\0'
+        rec.update({'CNAM.Climate': '00097C60', 'NAM2.Water': '00000018'})
+        assert _find_subrecord(convert_WRLD(rec), b'PNAM') == b'\x07\0'
+
     def test_worldspace_without_climate_falls_back_to_default(self):
         """Oblivion.exe resolves a null worldspace climate to DefaultClimate
         (0x15F) at runtime -- the sky setup at 0x667688 falls through to
@@ -5429,9 +5468,8 @@ class TestMgefConversion:
           [WEAP, ARMO, NULL], but that is what it ACCEPTS, not proof the
           engine equips armor — user-confirmed in-game, casting the converted
           Bound Greaves spell did nothing.
-        * **Only fires on a cast.** Archetype 17 appears under SPIT.Type 0
-          only, never Type 3/4, so an Ability or Lesser Power (which Skyrim
-          applies passively) never reaches BoundItemEffect even for a weapon.
+        * **Only fires on a cast.** Abilities and diseases are applied
+          passively; lesser powers are castable spells.
 
         So: armor is always scripted; a weapon is scripted only when the
         spell cannot cast, and otherwise keeps the engine's own path.
@@ -5492,6 +5530,11 @@ class TestMgefConversion:
             equipment.convert_SPEL(_spell('BWSW', 0), writer=w)) == weapon_base
         assert w.recs == []
 
+        # Lesser powers cast through the native path too.
+        assert _first_efid(
+            equipment.convert_SPEL(_spell('BWSW', 3), writer=w)) == weapon_base
+        assert w.recs == []
+
         # A bound weapon on an ABILITY cannot cast, so it gets the script.
         w = _W()
         assert _first_efid(
@@ -5515,7 +5558,7 @@ class TestMgefConversion:
         assert magic.BOUND_ITEM_SCRIPT.encode() in clone
         assert b'BoundItem' in clone
 
-        # A lesser power is equally uncastable, and shares the cached clone.
+        # A lesser power carrying ARMOR still needs the armor-specific clone.
         w2 = _W()
         assert _first_efid(
             equipment.convert_SPEL(_spell('BAGR', 3), writer=w2)) == scripted

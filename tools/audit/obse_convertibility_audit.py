@@ -20,7 +20,10 @@ Usage:
     python tools/audit/obse_convertibility_audit.py export/Nehrim.esm --md > docs/x.md
 """
 import argparse
+import json
 import re
+import shutil
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -43,9 +46,9 @@ STRUCTURAL = {
 }
 
 
-def build_obse_names():
+def build_obse_names(source=XOBSE):
     names = set(OBSE_KEYWORDS)
-    for f in XOBSE.glob('*.cpp'):
+    for f in source.glob('*.cpp'):
         txt = f.read_text(encoding='utf-8', errors='replace')
         for m in re.finditer(r'DEFINE_(?:COMMAND|CMD)[A-Za-z_]*\(\s*([A-Za-z0-9_]+)', txt):
             names.add(m.group(1).lower())
@@ -54,9 +57,9 @@ def build_obse_names():
     return names
 
 
-def build_skse_names():
+def build_skse_names(source=SKSE):
     names = set()
-    for f in SKSE.glob('Papyrus*.cpp'):
+    for f in source.glob('Papyrus*.cpp'):
         txt = f.read_text(encoding='utf-8', errors='replace')
         # Name is the first quoted string after the NativeFunctionN<...>(
         # registration.  Template args can contain nested <> and span newlines
@@ -118,15 +121,60 @@ def extract_tokens(body):
                 yield m.group(1).lower()
 
 
+def generated_warnings(directory):
+    """Read converter diagnostics, retaining every source location and reason."""
+    pattern = re.compile(r';(TODO|NE):?\s*([^;\r\n]*)')
+    rg = shutil.which('rg')
+    if rg:
+        result = subprocess.run([rg, '--json', '-g', '*.psc', r';(?:TODO|NE):?', str(directory)],
+                                capture_output=True, text=True, encoding='utf-8', timeout=90)
+        if result.returncode not in (0, 1):
+            raise RuntimeError(result.stderr)
+        matches = (json.loads(line) for line in result.stdout.splitlines())
+        lines = ((item['data']['path']['text'], item['data']['line_number'],
+                  item['data']['lines']['text']) for item in matches if item['type'] == 'match')
+    else:
+        lines = ((str(path), number, line) for path in directory.glob('*.psc')
+                 for number, line in enumerate(path.read_text(encoding='utf-8-sig').splitlines(), 1))
+    for path, number, line in lines:
+        for match in pattern.finditer(line):
+            yield dict(path=path, line=number, kind=match[1], message=match[2].strip(), source=line.strip())
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('export_dir', type=Path)
+    ap.add_argument('export_dir', type=Path, nargs='?')
+    ap.add_argument('--xobse-source', type=Path, default=XOBSE)
+    ap.add_argument('--skse64-source', type=Path, default=SKSE)
+    ap.add_argument('--generated', type=Path, help='audit TODO/NE markers in generated Papyrus')
+    ap.add_argument('--json', type=Path, help='save generated diagnostics with file and line')
     ap.add_argument('--md', action='store_true', help='markdown output')
     ap.add_argument('--min', type=int, default=1, help='min occurrences to list')
     args = ap.parse_args()
 
-    obse = build_obse_names()
-    skse = build_skse_names()
+    if args.generated:
+        if not args.generated.is_dir():
+            ap.error(f'generated script directory missing: {args.generated}')
+        print(f'Reading {args.generated}', flush=True)
+        warnings = list(generated_warnings(args.generated))
+        if args.json:
+            args.json.write_text(json.dumps(warnings, indent=2), encoding='utf-8')
+        counts = Counter()
+        for warning in warnings:
+            head = warning['message'].split(maxsplit=1)
+            command = head[0].rsplit('.', 1)[-1] if head else ''
+            counts[f'{warning["kind"]}: {command}'] += 1
+        print(f'{len(warnings)} markers in {len({w["path"] for w in warnings})} scripts', flush=True)
+        for reason, count in counts.most_common():
+            print(f'{count:6} {reason}', flush=True)
+        return
+    if not args.export_dir:
+        ap.error('provide an export directory or --generated')
+    for directory in (args.xobse_source, args.skse64_source):
+        if not directory.is_dir():
+            ap.error(f'command source directory missing: {directory}')
+    obse = build_obse_names(args.xobse_source)
+    skse = build_skse_names(args.skse64_source)
     print(f'# OBSE command names in xOBSE source: {len(obse)}', file=sys.stderr)
     print(f'# SKSE Papyrus natives: {len(skse)}', file=sys.stderr)
 

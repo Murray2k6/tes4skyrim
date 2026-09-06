@@ -62,10 +62,19 @@ def parse_subrecords(data: bytes) -> list:
     subs = []
     pos = 0
     length = len(data)
+    extended_size = None
     while pos + SUBRECORD_HEADER_SIZE <= length:
         sig = data[pos:pos + 4].decode("ascii", errors="replace")
         size = struct.unpack_from("<H", data, pos + 4)[0]
         pos += SUBRECORD_HEADER_SIZE
+        if sig == 'XXXX':
+            if size != 4 or pos + size > length:
+                break
+            extended_size = struct.unpack_from('<I', data, pos)[0]
+            pos += size
+            continue
+        if extended_size is not None:
+            size, extended_size = extended_size, None
         if pos + size > length:
             break
         subs.append(Subrecord(type=sig, data=data[pos:pos + size]))

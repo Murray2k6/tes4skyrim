@@ -52,7 +52,7 @@ def find_skyrim_headers():
 
 def compile_one(args):
     f, compiler, out_dir, headers, polyfill_dir = args
-    cmd = [compiler, 'compile', '-i', str(f), '-o', str(out_dir), '-h', headers]
+    cmd = [compiler, 'compile', '-nocache', '-i', str(f), '-o', str(out_dir), '-h', headers]
     for extra in (polyfill_dir or '').split(';'):
         if extra:
             cmd.extend(['-h', extra])
@@ -67,6 +67,8 @@ def compile_one(args):
                 key = re.sub(r"'[^']*'", 'X', key)
                 return ('err', key, raw, f.name)
         return ('err', 'UNKNOWN', combined[:200], f.name)
+    if not (Path(out_dir) / (f.stem + '.pex')).is_file():
+        return ('err', 'MISSING_OUTPUT', 'compiler produced no PEX', f.name)
     return ('ok', None, None, f.name)
 
 def main():
@@ -115,7 +117,7 @@ def main():
                     error_samples[key] = (raw, fname)
 
     total = len(files)
-    print(f'\nOK: {ok}/{total} ({ok*100/total:.1f}%)')
+    print(f'\nOK: {ok}/{total} ({ok*100/total if total else 100:.1f}%)')
     print(f'Failed: {total - ok}')
     print()
 
@@ -124,6 +126,7 @@ def main():
         if args.errors_detail and key in error_samples:
             raw, fname = error_samples[key]
             print(f'       -> {fname}: {raw}')
+    return 0 if ok == total else 1
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

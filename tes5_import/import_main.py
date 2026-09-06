@@ -303,6 +303,7 @@ def _adopt_master_special_records(ctx) -> None:
         if not fid:
             return False
         set_voice_type(race_edid, gender, fid)
+        VTYP_EDID_BY_FID[fid] = vtyp_edid
         return True
 
     for vtyp_edid, (race_edid, gender) in CUSTOM_VTYP_EDIDS.items():
@@ -621,11 +622,8 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     set_tes4_effect_names(by_type.get('MGEF', []))
 
     # --- Phase 0: Create custom VTYP records for voice types not in Skyrim.esm ---
-    # Skipped entirely for a plugin with masters: these are SUPPORT records the
-    # master's conversion already created (voice types, TES4 globals/factions,
-    # vendor/trainer factions, locations). Re-creating them in a dependent
-    # plugin duplicates master content — 27 spurious VTYP, 35 GLOB, 27 FACT —
-    # and the duplicates then compete with the originals the overrides use.
+    # Dependents adopt shared support records from their converted masters.
+    # Actor-specific vendor/trainer data is built separately in Phase 0c.
     _step_t = time.time()
     from .record_types.actors import (create_origin_faction,
                                       reset_origin_faction)
@@ -633,14 +631,8 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     if not ctx:
         create_vtyp_records(writer, export_dir)
 
-        # Plugin-origin marker faction. ROOT MASTERS ONLY (no TES4 masters of
-        # their own): every actor this file defines joins it, and dialogue that
-        # names no plugin-scoped audience is gated on it, so two converted
-        # plugins loaded together (Oblivion.esm + Nehrim.esm) can't trade
-        # guard/crime/directions/rumour lines. A plugin WITH masters
-        # deliberately skips this — it must stay free to extend and override
-        # its master's dialogue the way an Oblivion DLC does, and its actors
-        # are already members through the master records it inherits.
+        # Root masters define the audience marker; dependents adopt it below
+        # so their new actors can use the master's generic dialogue.
         _origin_fact = create_origin_faction(writer)
         print(f"  Plugin-origin faction: {_origin_fact:08X} "
               f"(TES4PluginOriginFaction)")
@@ -656,6 +648,10 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
         # use. The master's conversion already emitted them, so adopt ITS
         # FormIDs into the registry instead of duplicating the records.
         _adopt_master_special_records(ctx)
+        create_origin_faction(writer, ctx.master_index)
+        create_vtyp_records(writer, export_dir)
+    from .race_records import build_custom_races
+    build_custom_races(by_type, writer, ctx.master_export if ctx else None)
     _step_done('vtyp/special records')
 
     # --- Phase 0b: Pre-scan for dialogue conversion ---
@@ -871,96 +867,24 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     _xref_sources = [ctx.master_export.items()] if (
         ctx and getattr(ctx, 'master_export', None)) else []
     _xref_sources.append((r.get('FormID', ''), r) for r in all_records)
-    # A master record's id fields (SCRI, NAME) are in the MASTER's space too,
-    # and this graph chains them: record_scri[fid] -> script_formid_to_edid[scri],
-    # record_base[fid] -> the base's own entry. Re-keying only the outer key
-    # would leave those chains pointing at ids no key in this graph uses, so
-    # every master-owned SCRI/base lookup would miss. Translate them the same
-    # way — via the record's OWN key, whose index byte shift is the correction
-    # `load_master_export` already computed for that master.
-    def _rekey_ref(ref_hex, own_raw, own_key):
-        """Apply the same index-byte correction the record's own key carries."""
-        if not ref_hex or own_raw is None:
-            return ref_hex
-        try:
-            ref = int(ref_hex, 16)
-        except (ValueError, TypeError):
-            return ref_hex
-        shift = ((own_key >> 24) & 0xFF) - ((own_raw >> 24) & 0xFF)
-        if not shift:
-            return ref_hex
-        return '%08X' % ((((ref >> 24) & 0xFF) + shift) << 24 | (ref & 0xFFFFFF))
-
-    for fid_str, rec in [p for src in _xref_sources for p in src]:
-        edid_str = rec.get('EditorID', '')
-        sig = rec.get('Signature', '')
-        if not fid_str:
-            continue
-        # Non-zero only for a master record whose key was re-keyed above.
-        try:
-            _own_key = int(fid_str, 16)
-            _own_raw = int(rec.get('FormID', '') or fid_str, 16)
-        except (ValueError, TypeError):
-            _own_key = _own_raw = None
-        if edid_str:
-            edid_low = edid_str.lower()
-            xref.edid_to_formid[edid_low] = fid_str
-            xref.formid_to_edid[fid_str] = edid_str
-            if sig == 'QUST':
-                xref.quest_edids.add(edid_low)
-        xref.record_type[fid_str] = sig
-        # SCPT type/EditorID (needed for get_extends_class + object-script binding)
-        if sig == 'SCPT':
-            if edid_str:
-                xref.script_formid_to_edid[fid_str] = edid_str
-            schr_type = rec.get('SCHR.Type')
-            if schr_type is not None:
-                try:
-                    xref.script_formid_to_type[fid_str] = int(schr_type)
-                except ValueError:
-                    pass
-        # Attached-script + placed-ref base chains (get_extends_class, ref typing)
-        scri = _rekey_ref(rec.get('SCRI', ''), _own_raw, _own_key)
-        if scri:
-            xref.record_scri[fid_str] = scri
-        if sig in ('NPC_', 'CREA'):
-            xref.npc_formids.add(fid_str)
-            # AIPackage list + PKDT.Type back the reconstruction of TES4's
-            # `GetCurrentAIPackage == <type>` (see cross_ref.pack_type).  This
-            # graph is hand-built rather than loaded via load_from_export, so
-            # anything the CLI scan collects must be mirrored here or the
-            # converter takes a DIFFERENT branch inside the import than it did
-            # when the .psc was written — and the VMAD ends up missing exactly
-            # the properties the compiled script reads.
-            packs = []
-            i = 0
-            while True:
-                p = rec.get(f'AIPackage[{i}]', '')
-                if not p:
-                    break
-                packs.append(_rekey_ref(p, _own_raw, _own_key))
-                i += 1
-            if packs:
-                xref.actor_packages[fid_str] = packs
-        if sig == 'PACK':
-            pkdt = rec.get('PKDT.Type')
-            if pkdt is not None:
-                try:
-                    xref.pack_type[fid_str] = int(pkdt)
-                except ValueError:
-                    pass
-        if sig in ('ACHR', 'ACRE', 'REFR'):
-            name_fid = _rekey_ref(rec.get('NAME', ''), _own_raw, _own_key)
-            if name_fid:
-                xref.record_base[fid_str] = name_fid
+    for source in _xref_sources:
+        for fid_str, rec in source:
+            xref.add_record(rec, fid_str)
     # Populate per-script variable tables + ref-as-int analysis so the object
     # script converter can type its properties (same pass the CLI runs).
     scpt_path = os.path.join(export_dir, 'SCPT.txt')
+    xref.export_plugin_name = os.path.basename(export_dir)
+    xref.export_dir = export_dir
     if os.path.exists(scpt_path):
         xref.build_ref_as_int_map(scpt_path)
     print(f"  Built CrossRefGraph: {len(xref.edid_to_formid)} entries, "
           f"{len(xref.quest_edids)} quests, {len(xref.script_formid_to_edid)} scripts")
     _step_done('cross-ref graph')
+
+    from .function_scripts import build_function_hosts
+    n_function_hosts = build_function_hosts(by_type, writer, xref, fid_to_edid)
+    if n_function_hosts:
+        print(f"  OBSE functions: bound {n_function_hosts} quest hosts")
 
     # --- Phase 0b3: Bind converted object scripts (SCPT via SCRI) to records ---
     # Each scriptable object record gets a VMAD naming its compiled TES4_<script>
@@ -1034,16 +958,30 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
 
     # --- Phase 0c: Create vendor factions for merchant NPCs, plus the
     # trainer faction + per-trainer CLAS clones for the training service ---
-    if not ctx:
-        from .record_types.actors import (create_trainer_records,
-                                          create_vendor_factions)
-        create_vendor_factions(by_type, writer)
-        create_trainer_records(by_type, writer)
+    from .record_types.actors import (create_trainer_records,
+                                      create_vendor_factions)
+    _service_types = dict(by_type)
+    if ctx:
+        for _sig in ('CLAS', 'ACHR'):
+            _merged = {}
+            for _key, _rec in ctx.master_export.items():
+                if _rec.get('Signature') != _sig:
+                    continue
+                _copy = dict(_rec, FormID=_key)
+                _shift = ((int(_key, 16) >> 24) - (int(_rec['FormID'], 16) >> 24)) << 24
+                for _field in ('NAME', 'XMRC.MerchantContainer'):
+                    if _copy.get(_field) and int(_copy[_field], 16):
+                        _copy[_field] = f'{int(_copy[_field], 16) + _shift:08X}'
+                _merged[_key] = _copy
+            _merged.update((r['FormID'], r) for r in by_type.get(_sig, []))
+            _service_types[_sig] = list(_merged.values())
+    create_vendor_factions(_service_types, writer, ctx.master_index if ctx else None)
+    create_trainer_records(_service_types, writer, ctx.master_index if ctx else None)
     _step_done('vendor/trainer records')
 
     # --- Phase 0d: Load mesh bounds for accurate OBND computation ---
-    # Bounds cache normally comes from convert.py's mesh-bounds phase (after
-    # mesh+speedtree conversion, so it includes speedtree NIFs too). If it's
+    # Asset stages refresh both caches after writing meshes, generated book
+    # art, speedtrees and creatures. If a cache is
     # missing — e.g. running the import step standalone — scan it here from
     # the already-converted output meshes so callers never have to run a
     # separate step for this.
@@ -1068,8 +1006,11 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
         print(f"  Mesh bounds/collision cache missing or stale, "
               f"scanning {mesh_dir}...")
         scan_mesh_data(mesh_dir, col_path, cache_path)
-    load_mesh_bounds(cache_path)
-    load_collision(col_path)
+    from asset_convert.mesh_metadata import mesh_cache_paths, mesh_asset_roots
+    bounds_paths = mesh_cache_paths(export_dir, 'mesh_bounds_cache.json')
+    collision_paths = mesh_cache_paths(export_dir, 'collision_cache.bin')
+    load_mesh_bounds(bounds_paths)
+    load_collision(collision_paths)
     _step_done('mesh bounds + collision caches')
 
     # --- Phase 0e: Compute furniture seat lists from source NIF markers ---
@@ -1077,7 +1018,21 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     # and REFRs of re-origined furniture models need z compensation
     # (shared algorithm in asset_convert/furniture_markers.py).
     from .record_types.items import load_furniture_models
-    load_furniture_models(str(assets_for(export_dir) / 'meshes'), by_type)
+    mesh_roots = [root / 'meshes' for root in mesh_asset_roots(export_dir)]
+    # Metadata is keyed in this plugin's source FormID space. Master records
+    # retain their original FormID field, while the context keys are remapped.
+    mesh_records = {}
+    for fid, rec in (getattr(ctx, 'master_export', None) or {}).items():
+        if rec.get('Model.MODL') or rec.get('Signature') == 'SOUN':
+            mesh_records[fid] = dict(rec, FormID=fid)
+    for recs in by_type.values():
+        for rec in recs:
+            if rec.get('Model.MODL') or rec.get('Signature') == 'SOUN':
+                mesh_records[rec['FormID']] = rec
+    mesh_types = {}
+    for rec in mesh_records.values():
+        mesh_types.setdefault(rec['Signature'], []).append(rec)
+    load_furniture_models(mesh_roots, mesh_types)
     _step_done('furniture seats')
 
     # --- Phase 0f: Load the short quest-objective (NNAM) table ---
@@ -1093,7 +1048,7 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     # in the model; Skyrim only has the record, so the mesh-authored names get
     # lifted onto SNAM/ANAM here (asset_convert/door_sounds.py).
     from .record_types.items import load_door_model_sounds
-    load_door_model_sounds(str(assets_for(export_dir) / 'meshes'), by_type)
+    load_door_model_sounds(mesh_roots, mesh_types)
     _step_done('door mesh sounds')
 
     from .record_types.sound import reset_sound_descriptors
@@ -1653,7 +1608,7 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     # look up the precomputed (navm_bytes, meta) instead of calling convert_PGRD.
     navm_cache = _precompute_navmeshes(
         by_type, writer, base_model_by_fid, door_fids,
-        collision_cache=str(assets_for(export_dir) / 'collision_cache.bin'))
+        collision_cache=col_path, collision_sources=collision_paths)
 
     # Stitch adjacent exterior cell navmeshes together with Edge Links. Without
     # them every cell mesh is an island and NO actor can path across a cell
@@ -2040,6 +1995,10 @@ def import_plugin(export_dir: str, output_path: str, masters: list = None,
     # Write output
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
     writer.write(output_path)
+    from .runtime_metadata import write_effect_metadata
+    write_effect_metadata(output_path, masters)
+    from .race_records import write_voice_routes
+    write_voice_routes(output_path, masters)
     _phase_done('write output file')
 
     # Companion manifest: records which generated records belong to which
@@ -2599,6 +2558,7 @@ def _precompute_land(by_type: dict, export_dir: str) -> dict:
     from .locations import WORLD_NAMES
     from .record_types import items as items_mod
     from .record_types import world as world_mod
+    from asset_convert.mesh_metadata import mesh_cache_paths
 
     initargs = (
         get_formid_index_offset(),
@@ -2607,7 +2567,7 @@ def _precompute_land(by_type: dict, export_dir: str) -> dict:
         dict(world_mod._WORLD_LOCATION),
         dict(WORLD_NAMES),
         dict(items_mod._BASE_ORIGIN_SHIFT),
-        str(assets_for(export_dir) / 'mesh_bounds_cache.json'),
+        mesh_cache_paths(export_dir, 'mesh_bounds_cache.json'),
         get_injected_formids(),
         dict(world_mod._DOOR_NAVMESH_LINK),
         set(world_mod._WORLD_GRID_CELLS),
@@ -2648,7 +2608,8 @@ def _land_bytes(land_cache: dict, land_rec: dict) -> bytes:
 
 
 def _run_navm_jobs_inline(jobs, base_model_by_fid, door_fids, collision_cache,
-                          formid_offset, geom_cache, door_centers_cache):
+                          formid_offset, geom_cache, door_centers_cache,
+                          collision_sources=None):
     """Convert every navmesh job here; one tiny job is not worth a pool.
 
     disable_gc=False keeps this process's collector: it still has the rest of
@@ -2658,7 +2619,8 @@ def _run_navm_jobs_inline(jobs, base_model_by_fid, door_fids, collision_cache,
     navm_worker.init_worker(base_model_by_fid, door_fids, collision_cache,
                             formid_offset, geom_cache,
                             get_injected_formids(), disable_gc=False,
-                            door_centers_cache=door_centers_cache)
+                            door_centers_cache=door_centers_cache,
+                            collision_sources=collision_sources)
     cache = {}
     for job in jobs:
         key, result = navm_worker.run_job(job)
@@ -2668,7 +2630,7 @@ def _run_navm_jobs_inline(jobs, base_model_by_fid, door_fids, collision_cache,
 
 def _precompute_navmeshes(by_type: dict, writer: PluginWriter,
                           base_model_by_fid: dict, door_fids: set,
-                          collision_cache: str = '') -> dict:
+                          collision_cache: str = '', collision_sources=None) -> dict:
     """Run every PGRD→NAVM conversion in parallel; return {key: (bytes, meta)}.
 
     FormIDs are pre-allocated serially in builder-visit order so results are
@@ -2721,7 +2683,8 @@ def _precompute_navmeshes(by_type: dict, writer: PluginWriter,
     navm_worker.init_worker(base_model_by_fid, door_fids, collision_cache,
                             formid_offset, geom_cache,
                             get_injected_formids(), disable_gc=False,
-                            door_centers_cache=door_centers_cache)
+                            door_centers_cache=door_centers_cache,
+                            collision_sources=collision_sources)
     navm_verify.prepare(jobs, geom_cache)
     print(f"  Generating {len(jobs)} navmeshes (PGRD->NAVM) "
           f"across {n_workers} processes...")
@@ -2731,7 +2694,7 @@ def _precompute_navmeshes(by_type: dict, writer: PluginWriter,
     if len(jobs) == 1 or n_workers == 1:
         cache = _run_navm_jobs_inline(
             jobs, base_model_by_fid, door_fids, collision_cache,
-            formid_offset, geom_cache, door_centers_cache)
+            formid_offset, geom_cache, door_centers_cache, collision_sources)
     else:
         # chunksize amortises IPC over many small jobs.
         chunksize = max(1, len(jobs) // (n_workers * 8))
@@ -2740,7 +2703,8 @@ def _precompute_navmeshes(by_type: dict, writer: PluginWriter,
                 initializer=navm_worker.init_worker,
                 initargs=(base_model_by_fid, door_fids, collision_cache,
                           formid_offset, geom_cache,
-                          get_injected_formids(), True, door_centers_cache),
+                          get_injected_formids(), True, door_centers_cache,
+                          collision_sources),
                 max_tasks_per_child=500) as ex:
             # buffersize bounds how many jobs are pickled and queued at once.
             # Without it ex.map submits ALL of them up front — measured 400 MB

@@ -314,20 +314,9 @@ def build_script_assigned_packages(by_type: dict, fid_to_edid: dict,
                                    master_export: dict = None) -> dict:
     """pack_fid -> set(actor ref_fid) for packages forced on by script.
 
-    TES4's `AddScriptPackage` puts a package on an actor that does NOT list it
-    in its AI package array — the package exists only to be forced on later.
-    Skyrim has no equivalent call (`SetOverridePackage` is a Fallout 4 API and
-    is absent from SkyrimSE.exe 1.6; only `EvaluatePackage` and
-    `KeepOffsetFromActor` exist), so the forced package must instead be
-    attached to the actor's quest alias as an ALPC.  Then the converted
-    `EvaluatePackage()` can actually select it, because it is finally ON the
-    stack the engine arbitrates.
-
-    Without this the package is invisible to arbitration and silently never
-    runs: 35 of Nehrim's 43 script-assigned packages and 75 of Oblivion's 97
-    appear on no actor at all.  MQ00CalebroPackage04 is the visible case —
-    Nehrim's Celebro stops following the player because the package that should
-    take over was never anywhere the engine could find it.
+    Script-assigned packages use the native interrupt-package path. The
+    importer still needs their actor aliases for package target bindings and
+    stable alias indices, but must not add them to automatic ALPC schedules.
 
     Both call forms are recovered.  `ref.AddScriptPackage Pkg` names the actor
     explicitly; a bare `AddScriptPackage Pkg` targets the script's own owner,
@@ -551,12 +540,8 @@ class PackagePlan:
                 self.needed_aliases.setdefault(q, set()).add(aref)
                 self.alias_actor[aref] = afid
 
-        # 2b. Packages forced on by `AddScriptPackage`, which are NOT in any
-        # actor's AI array — that is the whole point of the call.  Skyrim has
-        # no equivalent function, so the only way the engine can ever run one
-        # is to hang it off the actor's quest alias like any other quest
-        # package; the converted `EvaluatePackage()` then has something to
-        # select.  See build_script_assigned_packages.
+        # 2b. Preserve aliases for script-forced packages. TES4Runtime starts
+        # these explicitly; only authored actor AI lists create ALPC entries.
         #
         # ref_to_base inverts base_to_ref so a call naming the ACHR still
         # records which base actor fills the alias (alias_actor), exactly as
@@ -576,9 +561,9 @@ class PackagePlan:
                 aref = ref if ref in ref_to_base else base_to_ref.get(ref)
                 if aref is None:
                     continue
-                pkgs = self.quest_packages.setdefault(q, {}).setdefault(aref, [])
-                if pfid not in pkgs:
-                    pkgs.append(pfid)
+                # Retain alias slots and package target bindings, but only
+                # AddScriptPackage may start this package. Adding ALPC here
+                # would run it automatically whenever its quest starts.
                 self.needed_aliases.setdefault(q, set()).add(aref)
                 self.alias_actor.setdefault(aref, ref_to_base.get(aref, ref))
 

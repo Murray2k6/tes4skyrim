@@ -35,7 +35,7 @@ _MESH_BOUNDS: Dict[str, OBNDTuple] = {}
 _MESH_PHYSICS: Dict[str, int] = {}
 
 
-def load_mesh_bounds(cache_path: str, quiet: bool = False) -> int:
+def load_mesh_bounds(cache_path, quiet: bool = False) -> int:
     """Load previously computed bounds from *cache_path* into the module cache.
 
     Per-key lookup: if a key exists in the JSON it is used; missing keys fall
@@ -45,27 +45,26 @@ def load_mesh_bounds(cache_path: str, quiet: bool = False) -> int:
     each call this once in their pool initializer and would otherwise spam one
     line per worker.
     """
-    global _MESH_BOUNDS, _MESH_PHYSICS
-    if not os.path.exists(cache_path):
-        if not quiet:
-            print(f"  Mesh bounds: cache not found ({cache_path}), using type defaults")
-        return 0
-    try:
-        with open(cache_path, encoding='utf-8') as fh:
-            raw = json.load(fh)
-        # '__schema__' carries the cache version, not a mesh — see
-        # collision_extract.BOUNDS_SCHEMA_VERSION.  It is not a path key, so it
-        # can never be looked up, but it must not become a bounds entry either.
-        raw = {k: v for k, v in raw.items() if k != '__schema__'}
-        _MESH_BOUNDS = {k: tuple(v[:6]) for k, v in raw.items()}
-        _MESH_PHYSICS = {k: int(v[6]) for k, v in raw.items() if len(v) > 6}
-        if not quiet:
-            print(f"  Mesh bounds: loaded {len(_MESH_BOUNDS)} entries from cache")
-        return len(_MESH_BOUNDS)
-    except (OSError, json.JSONDecodeError) as exc:
-        if not quiet:
-            print(f"  Mesh bounds: could not load cache ({exc}), using type defaults")
-        return 0
+    # Every load replaces the previous plugin's state, including failed loads.
+    # Ordered paths merge master facts first and plugin overrides last.
+    _MESH_BOUNDS.clear()
+    _MESH_PHYSICS.clear()
+    paths = [cache_path] if isinstance(cache_path, (str, os.PathLike)) else cache_path
+    for path in paths:
+        try:
+            with open(path, encoding='utf-8') as fh:
+                raw = json.load(fh)
+            for key, value in raw.items():
+                if key == '__schema__':
+                    continue
+                _MESH_BOUNDS[key] = tuple(value[:6])
+                _MESH_PHYSICS[key] = int(value[6]) if len(value) > 6 else 0
+        except (OSError, json.JSONDecodeError) as exc:
+            if not quiet:
+                print(f"  Mesh bounds: could not load {path} ({exc}), using available cache entries")
+    if not quiet:
+        print(f"  Mesh bounds: loaded {len(_MESH_BOUNDS)} entries from cache")
+    return len(_MESH_BOUNDS)
 
 
 def get_mesh_obnd(path_key: str) -> Optional[OBNDTuple]:

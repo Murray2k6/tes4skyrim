@@ -38,8 +38,7 @@ Major Issues for V1:
 Later Issues:
 	1 - Bound items like dagger not removed from inventory, only hands
 	
-	3 - Ajust zip step to pack loose files if bsas are out of date or not generated
-		Also zip should work on mod without plugin
+	3 - DONE 2026-09-05: ZIP uses loose assets when BSAs are missing or stale, including mods without plugins. Successful BSA builds record source/archive file states; SKSE stays loose. Interrupted ZIP writes preserve the previous archive. See docs/pipeline_reference.md#zip-asset-selection.
 
 	4 - Fix walking up stairs
 
@@ -95,11 +94,8 @@ Minor Issues:
 
 	22 - OblivionBloodFountain01: geyser (SpecialIdle) never plays as the default state
 
-	23 - safe_run.py must REVERT a rule-breaking write, not just report it. Snapshot the bytes of every first-party .py before running, gate the changed set with --gate-file after, then restore (or delete, if newly created) only the files that broke a rule - clean files the same command wrote stay. Exit 2 naming each restored path, and say the write did NOT stand, because the child has already printed its own success. Same contract Edit/Write already gets from gate_pre; the Bash path reports instead of blocking, which is how union_mesh.py landed with 26 violations.
-		Add local imports prevention rule
-		Should not be able to import a _ method
-		see: docstring must REQUIRE an anchor
+	23 - DONE 2026-09-05: safe_run.py restores rejected writes, deletes rejected new files, preserves clean edits, and exits 2 saying the write did NOT stand. Local imports and private-name imports are rejected; all docstring citations require anchors. Verified by targeted rollback/rule tests, including a real child process. See docs/reference/script_convert_architecture.md#what-the-gate-must-see
 
-	24 - Bounds + Collision scanning should happen during the Meshes step to avoid having to do it twice
+	24 - DONE 2026-09-05: Meshes, generated book art, SpeedTrees and creatures refresh bounds + collision together before import. Existing caches update only written/deleted outputs; parse failures fail the stage without replacing good caches. Verified with targeted tests and scoped Oblivion/Nehrim builds. See docs/nif_conversion_notes.md#metadata-is-produced-by-asset-stages-2026-09-05.
 
 	25 - SKSE dll to automatically merge multiple creature animation projects at runtime

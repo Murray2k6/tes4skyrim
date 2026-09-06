@@ -5,9 +5,9 @@
 
 Bash is denied at the permission layer because a command's effect cannot be
 predicted before it runs, which is how a `python - <<'PY'` heredoc wrote files
-the PreToolUse gate never saw.  This is the one allowed passthrough: it hashes
-the tracked `.py` files, runs the command with the streams INHERITED so output
-still arrives live, re-hashes, and gates whatever changed.
+the PreToolUse gate never saw. This passthrough snapshots first-party Python
+files, runs the command with inherited streams, and gates every changed file.
+Rejected writes are rolled back to the snapshot; valid changes remain.
 
 Exit code is the child's, unless a write left a violation -- then it is 2, so a
 rule-breaking write can never be reported as success.
@@ -15,7 +15,7 @@ rule-breaking write can never be reported as success.
 See: docs/reference/script_convert_architecture.md#what-the-gate-must-see
 """
 
-import hashlib
+import ctypes
 import os
 import subprocess
 import sys
@@ -53,7 +53,6 @@ def raw_tail() -> str:
     """
     if os.name != 'nt':
         return ' '.join(sys.argv[1:])
-    import ctypes
     get = ctypes.windll.kernel32.GetCommandLineW
     get.restype = ctypes.c_wchar_p
     get.argtypes = []
@@ -66,14 +65,11 @@ def raw_tail() -> str:
     return tail
 
 
-def digests() -> dict:
-    """`{path: sha256}` for every first-party `.py` file in the repo."""
+def snapshot() -> dict:
+    """Original bytes of every first-party Python file, including uncommitted edits."""
     out = {}
     for path in CR.repo_files():
-        try:
-            out[path] = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            continue
+        out[path] = path.read_bytes()
     return out
 
 
@@ -82,12 +78,16 @@ def written(before: dict, after: dict) -> list:
     return sorted(p for p in after if before.get(p) != after[p])
 
 
-def gate_paths(paths: list) -> int:
-    """Print the gate report for each path; 1 when any of them broke a rule."""
-    worst = 0
-    for path in paths:
-        worst = max(worst, CR.gate_diff(path))
-    return worst
+def restore_rejected(paths: list, before: dict) -> list:
+    """Restore only files rejected by the whole-file gate; return restored paths."""
+    rejected = [path for path in paths if CR.gate_file(path)]
+    for path in rejected:
+        if path in before:
+            path.write_bytes(before[path])
+        else:
+            path.unlink()
+        print(f'  safe_run: restored {path}', file=sys.stderr, flush=True)
+    return rejected
 
 
 def main(argv: list) -> int:
@@ -101,20 +101,19 @@ def main(argv: list) -> int:
     if not argv:
         print(__doc__, file=sys.stderr)
         return BLOCKED
-    before = digests()
+    before = snapshot()
     spawn = shell_argv(argv)
     done = (subprocess.run(spawn, cwd=CR.ROOT) if spawn
             else subprocess.run(argv, shell=True, cwd=CR.ROOT))
-    changed = written(before, digests())
+    changed = written(before, snapshot())
     if not changed:
         return done.returncode
     print('\n  safe_run: %d file(s) written -- gating them'
           % len(changed), file=sys.stderr)
-    if not gate_paths(changed):
+    if not restore_rejected(changed, before):
         return done.returncode
-    print('\nTHE COMMAND WROTE CODE THAT BREAKS THE RULES. Fix the violations '
-          'above; the write has already landed, so the file is dirty until '
-          'you do.', file=sys.stderr)
+    print('\nTHE RULE-BREAKING WRITE DID NOT STAND. Rejected files were restored; '
+          'other changes from the command remain.', file=sys.stderr)
     return BLOCKED
 
 

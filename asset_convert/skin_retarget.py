@@ -372,11 +372,7 @@ def _m44_to_np(m) -> np.ndarray:
 
 def _np_to_nif_node(node, M: np.ndarray):
     """Write numpy 4×4 (row-vector) to a NiNode's local transform."""
-    node.rotation.m_11 = float(M[0, 0]); node.rotation.m_12 = float(M[0, 1]); node.rotation.m_13 = float(M[0, 2])
-    node.rotation.m_21 = float(M[1, 0]); node.rotation.m_22 = float(M[1, 1]); node.rotation.m_23 = float(M[1, 2])
-    node.rotation.m_31 = float(M[2, 0]); node.rotation.m_32 = float(M[2, 1]); node.rotation.m_33 = float(M[2, 2])
-    node.translation.x = float(M[3, 0]); node.translation.y = float(M[3, 1]); node.translation.z = float(M[3, 2])
-    node.scale = 1.0
+    _write_skin_transform(node, M)
 
 
 def _skin_transform_to_np(st) -> np.ndarray:
@@ -385,17 +381,25 @@ def _skin_transform_to_np(st) -> np.ndarray:
     M[0, 0] = st.rotation.m_11; M[0, 1] = st.rotation.m_12; M[0, 2] = st.rotation.m_13
     M[1, 0] = st.rotation.m_21; M[1, 1] = st.rotation.m_22; M[1, 2] = st.rotation.m_23
     M[2, 0] = st.rotation.m_31; M[2, 1] = st.rotation.m_32; M[2, 2] = st.rotation.m_33
+    M[:3, :3] *= st.scale
     M[3, 0] = st.translation.x; M[3, 1] = st.translation.y; M[3, 2] = st.translation.z
     return M
 
 
 def _write_skin_transform(st, M: np.ndarray):
     """Write numpy 4×4 (row-vector) to a PyFFI SkinTransform."""
-    st.rotation.m_11 = float(M[0, 0]); st.rotation.m_12 = float(M[0, 1]); st.rotation.m_13 = float(M[0, 2])
-    st.rotation.m_21 = float(M[1, 0]); st.rotation.m_22 = float(M[1, 1]); st.rotation.m_23 = float(M[1, 2])
-    st.rotation.m_31 = float(M[2, 0]); st.rotation.m_32 = float(M[2, 1]); st.rotation.m_33 = float(M[2, 2])
+    # NIF stores uniform scale separately from rotation. Copying scale into
+    # the rotation matrix makes animation/skinning consume a non-rotation
+    # (the female hand frame exposed this with an orthogonality error 0.274641).
+    scale = float(np.cbrt(np.linalg.det(M[:3, :3])))
+    if not np.isfinite(scale) or scale == 0:
+        raise ValueError('Cannot write a singular or non-finite skin transform')
+    R = M[:3, :3] / scale
+    st.rotation.m_11 = float(R[0, 0]); st.rotation.m_12 = float(R[0, 1]); st.rotation.m_13 = float(R[0, 2])
+    st.rotation.m_21 = float(R[1, 0]); st.rotation.m_22 = float(R[1, 1]); st.rotation.m_23 = float(R[1, 2])
+    st.rotation.m_31 = float(R[2, 0]); st.rotation.m_32 = float(R[2, 1]); st.rotation.m_33 = float(R[2, 2])
     st.translation.x = float(M[3, 0]); st.translation.y = float(M[3, 1]); st.translation.z = float(M[3, 2])
-    st.scale = 1.0
+    st.scale = scale
 
 
 def local_for_world(W_target: np.ndarray, parent_W: np.ndarray) -> np.ndarray:
@@ -431,7 +435,7 @@ def _build_parent_map(root):
         if not hasattr(node, 'children'):
             continue
         for child in node.children:
-            if child is not None and isinstance(child, NifFormat.NiNode):
+            if child is not None and isinstance(child, NifFormat.NiAVObject):
                 parent_map[id(child)] = node
     return parent_map
 
@@ -1012,13 +1016,7 @@ def _bake_geoms_to_bind_pose(skinned_geoms, skel_root):
         # S is normally inv(G) — so G cancels and the bind pose is driven by
         # the RAW stored coordinates.  S must therefore be part of the blend.
         skin_data = skin.data
-        S = np.eye(4, dtype=np.float64)
-        _s = skin_data.skin_transform
-        _sr = _s.rotation
-        S[:3, :3] = [[_sr.m_11, _sr.m_12, _sr.m_13],
-                     [_sr.m_21, _sr.m_22, _sr.m_23],
-                     [_sr.m_31, _sr.m_32, _sr.m_33]]
-        S[3, :3] = [_s.translation.x, _s.translation.y, _s.translation.z]
+        S = _skin_transform_to_np(skin_data.skin_transform)
         acc = np.zeros((num_verts, 4, 4), dtype=np.float64)
         wsum = np.zeros(num_verts, dtype=np.float64)
         bone_worlds = {}
@@ -1027,13 +1025,7 @@ def _bake_geoms_to_bind_pose(skinned_geoms, skel_root):
             if bone_node is None:
                 continue
             bone_data = skin_data.bone_list[bi]
-            st = bone_data.skin_transform
-            r = st.rotation
-            B = np.eye(4, dtype=np.float64)
-            B[:3, :3] = [[r.m_11, r.m_12, r.m_13],
-                         [r.m_21, r.m_22, r.m_23],
-                         [r.m_31, r.m_32, r.m_33]]
-            B[3, :3] = [st.translation.x, st.translation.y, st.translation.z]
+            B = _skin_transform_to_np(bone_data.skin_transform)
             try:
                 W = _m44_to_np(bone_node.get_transform(skel_root))
             except (ValueError, RuntimeError):
@@ -1467,6 +1459,20 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
     if not skel_root or not skinned_geoms:
         return 0
 
+    # A reflected/scaled source frame is still the same full matrix when
+    # its signed uniform scale is moved out of the rotation field. Do this
+    # before the bind solver asks PyFFI to compose those source frames.
+    parent_map = _build_parent_map(skel_root)
+    frames = bone_nodes | {skel_root} | {block for block, _, _ in skinned_geoms}
+    for frame in tuple(frames):
+        parent = parent_map.get(id(frame))
+        while parent is not None and parent not in frames:
+            frames.add(parent)
+            parent = parent_map.get(id(parent))
+    for frame in frames:
+        if not frame.rotation.is_rotation() and frame.rotation.is_scale_rotation():
+            _write_skin_transform(frame, _skin_transform_to_np(frame))
+
     # --- Phase 0: bake geometry into skeleton space -----------------------
     # Everything downstream (FK deform, body wrap, and Phase C's bind-matrix
     # rewrite) assumes a geometry's stored vertices ALREADY sit in skeleton
@@ -1539,8 +1545,6 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
                 sk_name, W_sk = _resolve_sk_target(prn_bone_name, sk_skel)
                 if sk_name is not None:
                     _np_to_nif_node(bone_node, W_sk)
-
-    parent_map = _build_parent_map(skel_root)
 
     def _depth(node):
         d, cur = 0, node

@@ -19,7 +19,7 @@ argument text -- so those are properties of the CALL and live on it.
 from script_convert import resolve_name as _resolve_name
 from script_convert.constants import (
     ACTOR_VALUE_MAP, ANIM_GROUP_EVENTS, ATTRIBUTE_STUB_VALUE, CASTABLE,
-    GMST_TO_ACTOR_VALUE, param_types,
+    param_types,
     PLACED_REF_SIGS, TES4_ATTRIBUTES, _ACTOR_VALUE_FUNCTIONS,
     _ACTOR_VALUE_READ_FUNCTIONS, TES4_ASSAULT_BOUNTY, TES4_MURDER_BOUNTY,
     TES4_STEAL_BOUNTY, _safe_property_name, papyrus_script_name,
@@ -27,13 +27,16 @@ from script_convert.constants import (
 
 #: TES4 command name (lowercase) -> handler `(ctx, call) -> str | None`.
 REGISTRY: dict = {}
+BARE_REGISTRY: set = set()
 
 
-def command(*names: str):
+def command(*names: str, bare: bool = False):
     """Register a handler for one or more TES4 command names."""
     def bind(fn):
         for name in names:
             REGISTRY[name] = fn
+            if bare:
+                BARE_REGISTRY.add(name)
         return fn
     return bind
 
@@ -75,7 +78,7 @@ class Call:
         """The whole argument list as the author wrote it."""
         return ', '.join(self._conv.arg_sources())
 
-    def arg(self, n: int, default: str = '') -> str:
+    def arg(self, n: int, default: str = '', wanted: str = None) -> str:
         """Argument `n` converted to Papyrus, cast to the parameter's type.
 
         The cast lives here rather than in the row renderer because a handler
@@ -83,9 +86,30 @@ class Call:
         takes a Faction while an OBSE user function's `ref` parameter is
         declared `Form`, which Papyrus will not convert down implicitly.
         """
-        text = self._conv.arg_expr(n, self.extends, default)
-        want = param_types(self.name).get(n)
-        if want and self._conv.type_of(text) in CASTABLE.get(want, ()):
+        want = param_types(self.name).get(n) if wanted is None else wanted
+        previous = self._conv.sc.expected_type
+        self._conv.sc.expected_type = want or ''
+        base_value = None
+        try:
+            if (n < len(self.args) and want and want not in
+                    ('Int', 'Float', 'Bool', 'String', 'Actor', 'ObjectReference',
+                     'TES4Collection') and not want.startswith('TES4_')):
+                base_value = self._conv.bind_value_record(self.args[n])
+            text = base_value or self._conv.arg_expr(n, self.extends, default)
+        finally:
+            self._conv.sc.expected_type = previous
+        if want and want not in ('Int', 'Float', 'Bool', 'String') and text.strip() in ('0', '0.0'):
+            return 'None'
+        from .symbols import type_of_expr
+        have = (self._conv.type_of(base_value) if base_value else
+                type_of_expr(self.args[n], self._conv.type_of) if n < len(self.args) else '') or self._conv.type_of(text)
+        if want and want not in ('Int', 'Float', 'Bool', 'String', 'TES4Collection') and have in ('Int', 'Float'):
+            # TES4 ref variables can hold a numeric value. Resolve its form
+            # identity before narrowing; an invalid/nonmatching form is None.
+            value = f'Game.GetForm(({text}) as Int)'
+            return value if want == 'Form' else f'({value} as {want})'
+        if want and (have in CASTABLE.get(want, ()) or
+                     (have == 'Form' and want not in ('Form', 'Int', 'Float', 'Bool', 'String', 'TES4Collection'))):
             return self._conv._cast(text, want)
         return text
 
@@ -102,6 +126,12 @@ class Call:
 # ---------------------------------------------------------------------------
 # Quests, stages and globals
 # ---------------------------------------------------------------------------
+
+@command('trapupdate', 'addachievement', bare=True)
+def engine_no_operation(ctx, call):
+    """Both PC command table entries use 0x977C50: mov al,1; ret."""
+    ctx._line_comments.append(f'; {call.raw_name}: Oblivion PC engine command has no operation')
+    return '0'
 
 @command('setstage', 'getstage', 'getstagedone')
 def stage(ctx, call) -> str:
@@ -122,6 +152,9 @@ def stage(ctx, call) -> str:
     # every such read ("field or property ChorrolMatch not found").
     if not _typed_already(ctx, prop):
         ctx.sc.property_refs[prop] = 'Quest'
+    prop = call.arg(0) if parts else prop
+    if ctx.type_of(quest_src) in ('Form', 'ObjectReference'):
+        prop = ctx._cast(prop, 'Quest')
     if call.name == 'setstage':
         return f'{prop}.SetStage({call.arg(1, "0") if len(parts) > 1 else 0})'
     # GetStageDone asks whether a specific stage has run; GetStage reads the
@@ -160,6 +193,9 @@ def quest_state(ctx, call) -> str:
     # VMAD script is TES4_QF_<EditorID> rather than the SCPT name.
     if not _typed_already(ctx, prop):
         ctx.sc.property_refs[prop] = 'Quest'
+    prop = call.arg(0) if parts else prop
+    if ctx.type_of(quest_src) in ('Form', 'ObjectReference'):
+        prop = ctx._cast(prop, 'Quest')
     papyrus = {'startquest': 'Start', 'stopquest': 'Stop',
                'getquestrunning': 'IsRunning',
                'completequest': 'CompleteQuest',
@@ -198,20 +234,21 @@ def is_playable(ctx, call) -> str:
     return f'TES4SKSE.GetBaseForm({target}).IsPlayable()'
 
 
-@command('getfirstref')
+@command('getfirstref', 'getfirstrefincell', 'getnextref', 'getnumrefs', 'getnumrefsincell')
 def get_first_ref(ctx, call) -> str:
-    """GetFirstRef <formtype> -- open OBSE's walk over loaded references.
-
-    Only the ACTOR walk (TES4 form type 69) converts: FindRandomActorFromRef is
-    the one primitive of this shape.  A walk over any other form type
-    neutralises to None, so the `While (<ref> != None)` the Label emits simply
-    never runs -- inert, not wrong.
-    """
-    if call.source(0).strip() == '69':
-        return 'Game.FindRandomActorFromRef(Game.GetPlayer(), 4096.0)'
-    return ctx.note(f'{call.raw_name} over form type '
-                    f'{call.source(0).strip() or "?"} - Papyrus iterates '
-                    f'actors only', value='None')
+    """OBSE keeps one cell walk per authored script, including across calls."""
+    script = ctx.sc.edid
+    if call.name == 'getnextref':
+        return f'TES4Runtime.GetNextRef("{script}")'
+    offset = 1 if call.name.endswith('incell') else 0
+    origin = f'({call.arg(0)} as Cell)' if offset else 'None'
+    args = [origin, f'({call.arg(offset, "0")} as Int)',
+            f'({call.arg(offset + 1, "0")} as Int)',
+            f'({call.arg(offset + 2, "False")} as Bool)',
+            f'({call.arg(offset + 3, "False")} as Bool)']
+    if call.name.startswith('getnum'):
+        return f'TES4Runtime.GetNumRefs({", ".join(args)})'
+    return f'TES4Runtime.GetFirstRef("{script}", {", ".join(args)})'
 
 
 @command('call')
@@ -229,13 +266,27 @@ def udf_call(ctx, call) -> str:
     on a property that has it.
     """
     target = call.source(0).strip().rstrip(',')
+    from .tes4 import nodes as N
     if not target:
         return None
+    if call.ref:
+        caller = ctx._resolve_objref_ref(call.ref, call.extends)
+    elif call.extends in ('Quest', 'Form'):
+        caller = 'None'
+    else:
+        caller = ctx._self_reference(call.extends)
+    if (target.lower() in ctx.sc.local_vars or
+            not isinstance(call.args[0], (N.Ident, N.Literal))):
+        from .function_calls import dynamic_call
+        return dynamic_call(ctx, call, caller)
     fid = ctx.xref.edid_to_formid.get(target.lower(), '') if ctx.xref else ''
     canon = ctx.xref.formid_to_edid.get(fid, target) if fid else target
     prop = _safe_property_name(canon)
     ctx.sc.property_refs[prop] = papyrus_script_name(canon)
-    args = [call.arg(i) for i in range(1, len(call))]
+    types = getattr(ctx.xref, 'function_params', {}).get(canon.lower(), [])
+    args = [call.arg(i, wanted=types[i - 1] if i <= len(types) else None)
+            for i in range(1, len(call))]
+    args.insert(0, caller)
     ctx.sc.udf_calls.append((prop, tuple(args)))
     return f'{prop}.TES4Call({", ".join(args)})'
 
@@ -258,9 +309,16 @@ def say(ctx, call) -> str:
     parts = ctx.arg_srcs()
     # SayTo names the TARGET first and the topic second.
     n = 1 if (call.name == 'sayto' and len(parts) >= 2) else 0
-    topic = call.arg(n, 'None')
+    topic = None
     if len(parts) > n:
-        ctx._mark_topic_property(parts[n].strip().split()[0])
+        authored = parts[n].strip().split()[0]
+        ctx._mark_topic_property(authored)
+        # A topic operand can share its EditorID with a command (vanilla's
+        # Flee). Resolve that form before interpreting a bare command read.
+        if ctx._property_type_ci(authored) == 'Topic':
+            topic = _resolve_name._record(ctx, authored, authored.lower())
+    if topic is None:
+        topic = call.arg(n, 'None', 'Topic')
 
     ref = ctx._resolve_objref_ref(call.ref, call.extends)
 
@@ -430,25 +488,6 @@ def set_pos(ctx, call) -> str:
     return f'{ref}.Set{verb}({", ".join(coords)})'
 
 
-@command('positionworld')
-def position_world(ctx, call) -> str:
-    """PositionWorld x, y, z, angleZ, worldspace -- teleport to absolute coords.
-
-    Papyrus splits this into SetPosition + SetAngle (both on ObjectReference);
-    there is no worldspace parameter, so that operand is dropped.  Emitted
-    verbatim before, it was an undefined function and every mount-recall in
-    TeleportRueckkehr failed to compile.
-    """
-    if len(call) < 3:
-        return ctx.note(f'{call.written()} (could not parse)')
-    ref = ctx._resolve_objref_ref(call.ref, call.extends)
-    xyz = ', '.join(call.arg(i) for i in range(3))
-    out = f'{ref}.SetPosition({xyz})'
-    if len(call) >= 4:
-        out += f'\n  {ref}.SetAngle(0.0, 0.0, {call.arg(3)})'
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Actors, factions and combat
 # ---------------------------------------------------------------------------
@@ -486,7 +525,7 @@ def start_combat(ctx, call) -> str:
 
 @command('moddisposition')
 def mod_disposition(ctx, call) -> str:
-    """ModDisposition -- disposition was removed in Skyrim.
+    """Preserve numeric disposition changes and update the dialogue rank.
 
     A full -100 drop is Oblivion's "make them hostile" idiom, so it becomes
     StartCombat.  DIRECTION MATTERS: TES4's signature is
@@ -502,13 +541,14 @@ def mod_disposition(ctx, call) -> str:
         hostile = len(parts) >= 2 and int(parts[-1]) <= -100
     except ValueError:
         hostile = False
-    if not hostile:
-        return ctx.note('ModDisposition')
     target = _as_actor(ctx, call.arg(0))
     ref = ctx._resolve_self_ref(call.ref, call.extends, actor_func=True)
+    change = f'TES4Runtime.ModDisposition({ref}, {target}, {call.arg(1, "0")})'
+    if not hostile:
+        return change
     if (call.ref or '').lower() in ('player', 'playerref'):
-        return f'{ref}.StartCombat({target})'
-    return ctx._force_combat_call(ref, target)
+        return change + f'\n{ref}.StartCombat({target})'
+    return change + '\n' + ctx._force_combat_call(ref, target)
 
 
 @command('pushactoraway')
@@ -523,7 +563,7 @@ def push_actor_away(ctx, call) -> str:
 def force_take_cover(ctx, call) -> str:
     """Run TES4's timed flee procedure without blocking the calling script."""
     actor = _as_actor(ctx, ctx._resolve_objref_ref(call.ref, call.extends))
-    threat = _as_actor(ctx, call.arg(0))
+    threat = call.arg(0, wanted='Actor')
     duration = call.arg(1, '0.0')
     ctx.sc.property_refs['TES4TakeCoverTaskBase'] = 'Activator'
     return (f'TES4Polyfill.ForceTakeCover({actor}, {threat}, {duration}, '
@@ -573,7 +613,7 @@ def _as_actor(ctx, target: str) -> str:
     """Cast or register `target` so it is Actor-typed at the call site."""
     vtype = ctx.sc.var_types.get(target.lower(), '')
     ptype = ctx.sc.property_refs.get(target, '')
-    if ptype.startswith('TES4_') or 'ObjectReference' in (ptype, vtype):
+    if ptype.startswith('TES4_') or {'ObjectReference', 'Form'}.intersection((ptype, vtype)):
         return f'({target} as Actor)'
     if not ptype and not vtype and target.isidentifier():
         ctx.sc.property_refs[target] = 'Actor'
@@ -609,36 +649,24 @@ def magic_effect_visuals(ctx, call) -> str:
 def is_spell_target(ctx, call) -> str:
     """IsSpellTarget -- "is ref currently affected by spell X".
 
-    Papyrus has no per-spell test, but HasMagicEffect on the effect the
-    converted SPEL actually carries (resolved through the importer's own
-    code->MGEF mapping) answers the same question at runtime.
+    Inspect the converted spell's effects, including generated script effects.
+    A vanilla effect-code alias cannot identify those effects.
     """
-    spell = call.source(0, '')
-    fid = (ctx.xref.get_spell_first_skyrim_mgef(spell)
-           if (ctx.xref and spell) else 0)
-    if not fid:
-        return ctx.note(f'{call.written()} (spell has no convertible effect)',
-                        value='False')
+    spell = call.arg(0, 'None')
     ref = ctx._resolve_self_ref(call.ref, call.extends, actor_func=True)
     if ref == 'Self' and call.extends != 'Actor':
         ref = '(Self as Actor)'
-    return f'TES4Polyfill.HasMagicEffectByID({ref}, 0x{fid:08X})'
+    return f'TES4Polyfill.HasSpellEffect({ref}, {spell})'
 
 
 @command('getiscurrentpackage')
 def get_is_current_package(ctx, call) -> str:
-    """GetIsCurrentPackage -- exact when the argument is a converted PACK."""
-    arg = call.source(0, '')
-    fid = ctx.xref.edid_to_formid.get(arg.lower(), '') if (ctx.xref and arg) \
-        else ''
-    if not fid or ctx.xref.record_type.get(fid, '') != 'PACK':
-        return ctx.note(call.written())
+    """Compare the current package with a named record or runtime form value."""
     ref = ctx._resolve_self_ref(call.ref, call.extends, actor_func=True)
     if ref == 'Self' and call.extends != 'Actor':
         ref = '(Self as Actor)'
-    safe = _safe_property_name(arg)
-    ctx.sc.property_refs[safe] = 'Package'
-    return f'({ref}.GetCurrentPackage() == {safe})'
+    package = call.arg(0, 'None', wanted='Package')
+    return f'({ref}.GetCurrentPackage() == {package})'
 
 
 # ---------------------------------------------------------------------------
@@ -647,24 +675,69 @@ def get_is_current_package(ctx, call) -> str:
 
 @command('sv_construct')
 def sv_construct(ctx, call) -> str:
-    """sv_Construct -- the ONE OBSE string command with an exact equivalent.
-
-    It builds a string_var from a literal, and Papyrus String IS that literal.
-    Falling through to the inert ar_/sv_ catch-all left
-    `quizQuestion = sv_Construct "..."` as an undefined identifier, which
-    failed the whole script -- Morroblivion's fbmwChargenQuestScript (the class
-    quiz) is the site, and the Chargen-and-Transport start menu imports it, so
-    the Imperial City transport NPC went down with it.  sv_Destruct stays a
-    no-op: Papyrus strings are garbage-collected.
-    """
-    arg = call.source(0)
-    if not arg:
+    """Build a Papyrus string from the authored OBSE format string."""
+    if not len(call):
         return '""'
-    # A bare quoted literal passes straight through; anything else is an
-    # expression (a format string plus args) the caller already handles.
-    if arg.startswith('"') and arg.endswith('"') and arg.count('"') == 2:
+    return (ctx._format_string_call(call.source(0), call.extends)
+            if call.source(0).startswith('"') else call.arg(0))
+
+
+@command('sv_destruct')
+def string_destruct(ctx, call) -> str:
+    if not call.args:
+        return '""'
+    from .tes4 import nodes as N
+    return '\n'.join(ctx.emit_assignment(
+        N.Assign(target=arg, value=N.Literal(text='""', is_string=True)), call.extends)
+        for arg in call.args)
+
+
+@command('sv_length', 'sv_substring')
+def string_slice(ctx, call) -> str:
+    if call.name == 'sv_length':
+        return f'TES4Runtime.StringLength({call.arg(0)})'
+    return (f'TES4Runtime.StringSlice({call.arg(0)}, ({call.arg(1, "0")}) as Int, '
+            f'({call.arg(2, "-1")}) as Int)')
+
+
+@command('sv_find', 'sv_count')
+def string_search(ctx, call) -> str:
+    # Format arguments precede the string variable and optional search range.
+    source = call.source(0)
+    if source.startswith('"'):
+        consumed = sum(m.group(0).lower() not in ('%%', '%r', '%q', '%e')
+                       for m in ctx._OBSE_FMT_RE.finditer(source))
+        index = 1 + consumed
+        needle = ctx._format_string_call(source, call.extends,
+                                         range(1, index))
+    else:
+        index, needle = 1, call.arg(0)
+    return (f'TES4Runtime.StringSearch({call.arg(index)}, {needle}, '
+            f'({call.arg(index + 1, "0")} as Int), '
+            f'({call.arg(index + 2, "-1")} as Int), '
+            f'({call.arg(index + 3, "False")} as Bool), '
+            f'{"True" if call.name == "sv_count" else "False"})')
+
+
+@command('chartoascii')
+def char_to_ascii(ctx, call) -> str:
+    return f'TES4Runtime.CharToAscii({call.arg(0)})'
+
+
+@command('tonumber', 'tostring')
+def string_conversion(ctx, call) -> str:
+    arg = call.arg(0)
+    from .symbols import type_of_expr
+    kind = type_of_expr(call.args[0], ctx.type_of) if call.args else ''
+    if call.name == 'tonumber':
+        if kind in ('Int', 'Float', 'Bool'):
+            return f'({arg} as Float)'
+        return f'TES4Runtime.StringToNumber({arg}, ({call.arg(1, "False")} as Bool))'
+    if kind == 'String':
         return arg
-    return call.arg(0)
+    if kind in ('Int', 'Float', 'Bool'):
+        return f'TES4Runtime.NumberToString({arg} as Float)'
+    return f'({arg} as Form).GetName()'
 
 
 @command('streammusic')
@@ -741,7 +814,7 @@ def _button_box(ctx, call) -> str:
         return None
     ctx.sc.property_refs[mesg] = 'Message'
     ctx.sc.uses_msg_buttons = True
-    return f'TES4_MsgButton = TES4_ShowMsg({mesg})'
+    return f'TES4_ShowMsg({mesg})'
 
 
 @command('isactionref')
@@ -921,20 +994,12 @@ def set_essential(ctx, call) -> str:
     return f'{target}.SetEssential({value})'
 
 
-@command('setownership')
+@command('setownership', 'clearownership')
 def set_ownership(ctx, call) -> str:
-    """SetOwnership -- Skyrim splits ownership into ACTOR and FACTION owners.
-
-    Which one this is depends on what the argument names, so the comparison
-    picks by record type; a bare call means the player.
-    """
+    """Resolve NPC, faction, reference and inventory-stack ownership at runtime."""
     ref = ctx._resolve_self_ref(call.ref, call.extends)
-    if not len(call):
-        return f'{ref}.SetActorOwner(Game.GetPlayer().GetActorBase())'
-    arg = call.arg(0)
-    if _is_faction(ctx, call, arg):
-        return f'{ref}.SetFactionOwner({arg})'
-    return f'{ref}.SetActorOwner({arg}.GetActorBase())'
+    arg = 'None' if call.name == 'clearownership' else (call.arg(0) if len(call) else 'Game.GetPlayer()')
+    return f'TES4Runtime.SetOwner({ref}, {arg})'
 
 
 @command('isowner')
@@ -944,13 +1009,9 @@ def is_owner(ctx, call) -> str:
     Written bare it asks "does the PLAYER own this reference"; with an
     argument it names the owner to test.
     """
-    ref = ctx._resolve_objref_ref(call.ref, call.extends)
-    if not len(call):
-        return f'({ref}.GetActorOwner() == Game.GetPlayer().GetActorBase())'
-    arg = call.arg(0)
-    if _is_faction(ctx, call, arg):
-        return f'({ref}.GetFactionOwner() == {arg})'
-    return f'({ref}.GetActorOwner() == {arg}.GetActorBase())'
+    ref = ctx._resolve_self_ref(call.ref, call.extends)
+    arg = call.arg(0) if len(call) else 'Game.GetPlayer()'
+    return f'(TES4Runtime.GetOwner({ref}) == TES4SKSE.GetBaseForm({arg}))'
 
 
 @command('activate')
@@ -967,7 +1028,9 @@ def activate(ctx, call) -> str:
     if parts and parts[-1].strip() in ('0', '1'):
         run_flag = parts[-1].strip()
         parts = parts[:-1]
-    ref = ctx._convert_ref(call.ref, call.extends) if call.ref else ''
+    ref = ctx._resolve_objref_ref(call.ref, call.extends)
+    if ctx.type_of(ref) == 'Form':
+        ref = ctx._cast(ref, 'ObjectReference')
     if parts:
         activator = call.arg(0)
     elif ref:
@@ -1048,14 +1111,11 @@ def place_at_me(ctx, call) -> str:
     Declared on ObjectReference, so the subject is NOT promoted to Actor.
     """
     base = call.arg(0, 'None')
-    count = call.source(1, '1')
-    ref = ctx._resolve_self_ref(call.ref, call.extends, actor_func=False)
-    if ref == 'Self':
-        if call.extends == 'ActiveMagicEffect':
-            ref = 'GetTargetActor()'
-        elif call.extends == 'TopicInfo':
-            ref = 'akSpeakerRef'
-    return f'{ref}.PlaceAtMe({base}, {count})'
+    if base in ctx.sc.property_refs:
+        ctx._bind_base_form_property(base)
+    count = call.arg(1, '1')
+    ref = ctx._resolve_objref_ref(call.ref, call.extends)
+    return f'({ref}).PlaceAtMe({base}, {count})'
 
 
 @command('dispel', 'dispelspell')
@@ -1267,6 +1327,9 @@ def actor_value(ctx, call) -> str:
     if not len(call):
         return None
     raw = call.source(0).rstrip(',').strip('"\'')
+    if raw.lower() == 'vampirism':
+        from .runtime_commands import vampire_value
+        return vampire_value(ctx, call)
     if raw.lower() in TES4_ATTRIBUTES:
         if call.name in _ACTOR_VALUE_READ_FUNCTIONS:
             return ATTRIBUTE_STUB_VALUE
@@ -1324,50 +1387,37 @@ _AV_PAPYRUS = {
 # Game settings
 # ---------------------------------------------------------------------------
 
-@command('getgamesetting', 'getgs')
+def _setting_name(ctx, call):
+    source = call.source(0).strip()
+    return (call.arg(0, wanted='String') if ctx.type_of(source) == 'String'
+            else '"' + source.strip('"') + '"')
+
+
+@command('getgamesetting', 'getgs', 'getnumericgamesetting', 'getstringgamesetting')
 def get_game_setting(ctx, call) -> str:
-    """GetGameSetting -- read a GMST.
-
-    A setting this converter WRITES through an actor value must also be READ
-    through it, or the save/restore pattern these scripts use ("remember the
-    old value, set a new one, put it back") reads the untouched global and
-    restores a number the write never changed.
-
-    Otherwise the Int/Float/String variant follows TES4's own naming
-    convention: `i` is an integer, `s` a string, everything else a float.
-    """
-    setting = call.source(0, 'fUnknown').strip().strip('"')
-    av = GMST_TO_ACTOR_VALUE.get(setting.lower())
-    if av:
-        target = ctx._actor_target_for_gamesetting(call.extends)
-        return f'{target}.GetActorValue("{av}")'
-    if setting.startswith('i'):
-        return f'Game.GetGameSettingInt("{setting}")'
-    if setting.startswith('s'):
-        return f'Game.GetGameSettingString("{setting}")'
-    return f'Game.GetGameSettingFloat("{setting}")'
+    """Read the same game-wide setting that OBSE writes."""
+    setting = _setting_name(ctx, call)
+    string = call.name == 'getstringgamesetting' or setting.lower().startswith('"s')
+    method = 'GetStringGameSetting' if string else 'GetNumericGameSetting'
+    return f'TES4Runtime.{method}({setting})'
 
 
 @command('setnumericgamesetting', 'setgamesetting',
          'setnumericgamesettingfloat')
 def set_game_setting(ctx, call) -> str:
-    """SetGameSetting (OBSE) -- write a GMST at runtime.
-
-    SKSE's Game.SetGameSettingFloat is the literal counterpart, but it does NOT
-    compile against the vanilla headers this pipeline builds with (verified:
-    "undefined function SetGameSettingFloat", while the getter resolves), and
-    requiring SKSE to build is not an option.  So the settings that have a
-    per-actor ACTOR VALUE equivalent go through Actor.ModActorValue -- a
-    vanilla native producing the same observable change on the player, scoped
-    to the actor instead of the whole game, which is what these scripts want.
-    Anything without an equivalent keeps a visible marker rather than a call
-    that silently does nothing.
-    """
+    """Set the typed GMST and preserve OBSE's success result."""
     if len(call) < 2:
         return (f';TODO: {call.raw_name} {call.src}'
                 f'  ;needs a setting name and value')
-    setting = call.source(0).strip().strip('"')
-    return ctx._gamesetting_write(setting, call.arg(1), call.extends)
+    return f'TES4Runtime.SetNumericGameSetting({_setting_name(ctx, call)}, ({call.arg(1)}) as Float)'
+
+
+@command('setstringgamesettingex')
+def set_string_game_setting(ctx, call):
+    source = call.source(0)
+    value = (ctx._format_string_call(source, call.extends) if source.startswith('"')
+             else call.arg(0, wanted='String'))
+    return f'TES4Runtime.SetStringGameSetting({value})'
 
 
 def _typed_already(ctx, prop: str) -> bool:

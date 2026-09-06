@@ -48,6 +48,8 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 
 from .facegen_tri import TriFile, TriError, build_skyrim_hair_tri
+from .game_paths import matches_path_scope
+from .texture_prune import refs_from_assets
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -684,7 +686,7 @@ def _bake_one(job):
     return out_stem, True, tinted, None
 
 
-def run(export_dir, out_meshes_dir, *, verbose: bool = True) -> dict:
+def run(export_dir, out_meshes_dir, *, verbose: bool = True, mesh_subdirs=None) -> dict:
     """Convert every hair variant this plugin needs.
 
     Reads the extracted Oblivion hair NIF/.tri pairs, bakes each required
@@ -719,6 +721,8 @@ def run(export_dir, out_meshes_dir, *, verbose: bool = True) -> dict:
         if not model:
             continue
         rel = _norm_model(model)
+        if not matches_path_scope(rel, mesh_subdirs):
+            continue
         src_nif = os.path.join(src_root, *rel.split('/'))
         if not os.path.isfile(src_nif):
             stats['missing'] += 1
@@ -786,6 +790,7 @@ def run(export_dir, out_meshes_dir, *, verbose: bool = True) -> dict:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             yield from pool.map(_bake_one, jobs, chunksize=4)
 
+    texture_refs = set()
     for out_stem, written, tinted, error in _iter_results():
         if error:
             stats['errors'] += 1
@@ -794,6 +799,10 @@ def run(export_dir, out_meshes_dir, *, verbose: bool = True) -> dict:
             continue
         stats['written'] += written
         stats['tinted'] += tinted
+        if written:
+            texture_refs.update(refs_from_assets([os.path.join(out_dir, out_stem + '.nif')]))
+
+    stats['textures_used'] = texture_refs
 
     if verbose:
         print('  Hair: %d records, %d group/length variants, %d written, '

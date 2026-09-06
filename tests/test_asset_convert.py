@@ -15,12 +15,12 @@ from asset_convert.nif_converter import (
     OUTPUT_VERSION as _SKY_VERSION,
     _categorize_pyffi_warnings,
     _door_hinge_point,
-    _matches_subdir_filter,
     _rewrite_tex_path,
     batch_convert,
     convert_nif,
 )
 from asset_convert import wearable_plan
+from asset_convert.game_paths import matches_path_scope
 from asset_convert.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP as BONE_MAP
 
 # Primary Oblivion NIF version (no single constant exported)
@@ -33,15 +33,15 @@ _OBV_VERSION = 0x14000004
 
 class TestMeshSubdirFilter:
     def test_accepts_nested_prefix_with_either_slash(self):
-        rel = ('morro', 'd', 'door.nif')
-        assert _matches_subdir_filter(rel, ['morro/d'])
-        assert _matches_subdir_filter(rel, [r'morro\d'])
-        assert not _matches_subdir_filter(rel, ['morro/x'])
+        rel = 'morro/d/door.nif'
+        assert matches_path_scope(rel, ['morro/d'])
+        assert matches_path_scope(rel, [r'morro\d'])
+        assert not matches_path_scope(rel, ['morro/x'])
 
     def test_root_prefix_and_unfiltered_behavior_stay_unchanged(self):
-        rel = ('architecture', 'anvil', 'wall.nif')
-        assert _matches_subdir_filter(rel, ['architecture'])
-        assert _matches_subdir_filter(rel, None)
+        rel = 'architecture/anvil/wall.nif'
+        assert matches_path_scope(rel, ['architecture'])
+        assert matches_path_scope(rel, None)
 
 class TestTexturePathRewriting:
     """Test texture path rewriting logic."""
@@ -1328,7 +1328,7 @@ class TestFlameNodeConversion:
         """Quads and emitters must stay in ONE frame -- the source's.
 
         These meshes are authored +Y-up and their PLACED REFERENCES carry the
-        stand-up rotation: across Oblivion.esm, 494 REFRs of the Fire\*.nif
+        stand-up rotation: across Oblivion.esm, 494 REFRs of the Fire/*.nif
         lights use RotX = +-90 deg (10/10 for FireTorchLargeSmoke).  The REFR
         rotates the whole model at once, so the conversion must not re-frame
         any PART of it.

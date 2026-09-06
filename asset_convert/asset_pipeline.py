@@ -138,6 +138,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         'textures_copied': 0,
         'other_copied': 0,
     }
+    selected_refs = set()
 
     plugin_dir = _out_root(output_dir, source_name, extract_dir)
     # Build bookkeeping, not a shipped asset -- see texture_prune.MANIFEST_NAME.
@@ -177,7 +178,8 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         # manifest rather than replace it: overwriting leaves the prune believing
         # nothing outside those folders uses a texture, and it deletes the rest.
         _used = stats['mesh_conversion'].pop('textures_used', set())
-        if mesh_subdirs:
+        selected_refs.update(_used)
+        if mesh_subdirs is not None:
             _used = set(_used) | texture_prune.read_manifest(mesh_manifest_dir)
         texture_prune.write_manifest(mesh_manifest_dir, _used)
 
@@ -186,7 +188,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         # ships opaque copies of exactly these; see
         # texture_prune.OVERLAY_MANIFEST_NAME.
         _overlays = stats['mesh_conversion'].pop('overlay_diffuses', set())
-        if mesh_subdirs:
+        if mesh_subdirs is not None:
             _overlays = set(_overlays) | texture_prune.read_manifest(
                 mesh_manifest_dir, texture_prune.OVERLAY_MANIFEST_NAME)
         texture_prune.write_manifest(mesh_manifest_dir, _overlays,
@@ -207,18 +209,40 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
     # Skyrim equivalent and is baked in per variant.  See hair_pipeline.
     # -----------------------------------------------------------------------
     if mesh_src.exists() and not textures_only:
-        stats['hair'] = hair_pipeline.run(rec_dir, plugin_dir / 'meshes')
+        stats['hair'] = hair_pipeline.run(rec_dir, plugin_dir / 'meshes',
+                                          mesh_subdirs=mesh_subdirs)
+        selected_refs.update(stats['hair'].pop('textures_used', set()))
 
     if mesh_src.exists() and not textures_only:
+        from . import base_plugins
+        master_mesh_roots = [
+            _plugin_out_root(output_dir, name, extract_dir) / 'meshes'
+            for name in base_plugins.names_for(rec_dir)]
         processed, modified, missing = grass_profile.run(
-            rec_dir, plugin_dir / 'meshes')
+            rec_dir, plugin_dir / 'meshes', mesh_subdirs=mesh_subdirs,
+            master_mesh_roots=master_mesh_roots)
         stats['grass_profile'] = {
             'processed': processed, 'modified': modified, 'missing': missing}
         print(f"  Grass models: {processed} placed under landscape\\grass, "
               f"{modified} profiled"
               + (f", {missing} missing" if missing else ""))
 
-    # -----------------------------------------------------------------------
+    relative_textures = None
+    if mesh_subdirs is not None:
+        relative_textures = {r.removeprefix('tes4/') for r in
+                             texture_prune.texture_dependencies(selected_refs)}
+    stats.update(copy_textures(
+        asset_dir, plugin_dir, relative_textures=relative_textures,
+        alpha_opacity_diffuse=stats.get('mesh_conversion', {}).get(
+            'alpha_opacity_diffuse', ())))
+    return stats
+
+
+def copy_textures(asset_dir, plugin_dir, *, relative_textures=None,
+                  alpha_opacity_diffuse=None):
+    """Resume textures; retain diffuse alpha without the mesh pass's use-set."""
+    asset_dir, plugin_dir = Path(asset_dir), Path(plugin_dir)
+    stats = {'textures_copied': 0}
     # Copy Textures
     # -----------------------------------------------------------------------
     print("\n" + "=" * 60)
@@ -228,7 +252,10 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
     tex_src = asset_dir / 'textures'
     if tex_src.exists():
         tex_dst = plugin_dir / 'textures' / 'tes4'
-        stats['textures_copied'] = _copy_tree(tex_src, tex_dst)
+        stats['textures_copied'] = _copy_tree(tex_src, tex_dst, relative_textures)
+        texture_paths = (None if relative_textures is None else
+                         [tex_dst / r for r in relative_textures
+                          if (tex_dst / r).is_file()])
         print(f"  Textures: {stats['textures_copied']} files -> {tex_dst}")
 
         # Oblivion ships its GLOW maps as 8-bit DDPF_LUMINANCE, whose single
@@ -238,7 +265,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         # report (clutter\candle_g.dds on uppersilverplatecandles01).  Expand
         # L into R=G=B.  Runs after the copy so re-copies can't resurrect the
         # L8 originals; re-running is a no-op once converted.
-        lum_checked, lum_fixed = luminance_textures.run(tex_dst)
+        lum_checked, lum_fixed = luminance_textures.run(tex_dst, paths=texture_paths)
         stats['luminance_textures_fixed'] = lum_fixed
         print(f"  Luminance textures: {lum_checked} L8 found, "
               f"{lum_fixed} expanded to BGRA")
@@ -247,7 +274,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         # landscape shader reads as a full-strength specular mask (shiny
         # ground).  Re-container as DXT5 with a dark alpha.  Runs after the
         # copy so re-copies don't resurrect the DXT1 versions.
-        checked, fixed = landscape_normals.run(tex_dst / 'landscape')
+        checked, fixed = landscape_normals.run(tex_dst / 'landscape', paths=texture_paths)
         stats['landscape_normals_fixed'] = fixed
         print(f"  Landscape normals: {checked} checked, {fixed} DXT1->DXT5 fixed")
 
@@ -258,7 +285,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         # -- see nif_converter._SPEC_STRENGTH for why that trade is worth
         # making.  Landscape is excluded: just handled, with a dimmer value.
         n_checked, n_fixed, n_kinds = landscape_normals.normalize_specular_alpha(
-            tex_dst, skip=(os.sep + 'landscape' + os.sep,))
+            tex_dst, skip=(os.sep + 'landscape' + os.sep,), paths=texture_paths)
         # AFTER the sweep: the stand-in is a constant alpha by design, so a
         # sweep that saw it would count it as one more file it "fixed".
         landscape_normals.write_default_normal(tex_dst)
@@ -274,16 +301,16 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         # use for that channel any more, and DXT1 is half the size.  Keyed on
         # the `_p` file the mesh stage wrote, so this is a no-op unless
         # --parallax ran.  After the copy, for the same reason as above.
-        from . import parallax as _parallax
-        _n, _skip, _kept, _saved = _parallax.strip_diffuse_alpha(
-            tex_dst, keep=stats.get('mesh_conversion', {}).get(
-                'alpha_opacity_diffuse', ()))
-        if _n or _skip or _kept:
-            stats['parallax_diffuse_bc1'] = _n
-            print(f"  Parallax diffuse: {_n} DXT5->DXT1 "
-                  f"({_saved / (1024 * 1024):.1f} MB saved)"
-                  + (f", {_kept} kept (read as opacity)" if _kept else "")
-                  + (f", {_skip} already stripped" if _skip else ""))
+        if alpha_opacity_diffuse is not None:
+            from . import parallax as _parallax
+            _n, _skip, _kept, _saved = _parallax.strip_diffuse_alpha(
+                tex_dst, paths=texture_paths, keep=alpha_opacity_diffuse)
+            if _n or _skip or _kept:
+                stats['parallax_diffuse_bc1'] = _n
+                print(f"  Parallax diffuse: {_n} DXT5->DXT1 "
+                      f"({_saved / (1024 * 1024):.1f} MB saved)"
+                      + (f", {_kept} kept (read as opacity)" if _kept else "")
+                      + (f", {_skip} already stripped" if _skip else ""))
 
     return stats
 
@@ -349,9 +376,20 @@ def convert_sounds(source_file, extract_dir='export', output_dir='output',
                        output_dir=output_dir, ffmpeg_path=ffmpeg_path)
 
 
-def _copy_tree(src, dst):
+def _copy_tree(src, dst, relative_paths=None):
     """Copy a directory tree, returning file count."""
     count = 0
+    if relative_paths is not None:
+        for rel in sorted(relative_paths):
+            source = Path(src) / rel
+            target = Path(dst) / rel
+            if not source.resolve().is_relative_to(Path(src).resolve()):
+                raise ValueError(f'texture path escapes source root: {rel}')
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                count += 1
+        return count
     for root, _dirs, files in os.walk(src):
         for fname in files:
             src_file = Path(root) / fname

@@ -10,7 +10,7 @@ import struct
 from tes5_import.text_reader import parse_export_file
 from worker_budget import worker_count
 
-from script_convert.constants import (_sanitize_name, _safe_property_name, _record_type_to_papyrus, papyrus_script_name,
+from script_convert.constants import (_sanitize_name, _safe_property_name, papyrus_script_name,
                                      KNOWN_COMMANDS, SERVICE_MENU_CALL,
                                      UDF_WIDE_TYPES)
 from script_convert.cross_ref import CrossRefGraph, master_names
@@ -20,7 +20,7 @@ from script_convert.objective_completion import (
     objective_lines,
     sweep_targets,
 )
-from script_convert.symbols import property_declarations, IMPLICIT_NAMES
+from script_convert.symbols import property_declarations, used_property_refs, IMPLICIT_NAMES
 from script_convert.tes5.blocks import (
     Kind,
     classify,
@@ -47,7 +47,7 @@ def _new_stats() -> dict:
         'scpt_total': 0, 'scpt_ok': 0, 'scpt_err': 0,
         'info_total': 0, 'info_ok': 0, 'info_err': 0,
         'qust_total': 0, 'qust_ok': 0, 'qust_err': 0,
-        'todo_count': 0, 'errors': [],
+        'warning_count': 0, 'errors': [],
         # script name (lower) -> OBSE user-function parameter types, in order.
         # Collected AS each script converts, so the cross-script cast pass is
         # a lookup rather than a second read of every generated .psc.
@@ -112,7 +112,7 @@ def _script_worker_init(xref, output_dir, info_reveals, service_topics,
     # Windows spawns workers, so module-level caches loaded in the parent do
     # NOT carry over — each worker reloads the mesh-bounds cache or every
     # needs_havok_release() lookup answers 0 and no trap gets its release.
-    if mesh_bounds_cache:
+    if mesh_bounds_cache is not None:
         from tes5_import.mesh_bounds import load_mesh_bounds
         load_mesh_bounds(mesh_bounds_cache, quiet=True)
     _WORKER_CTX.update(xref=xref, output_dir=output_dir,
@@ -180,7 +180,7 @@ def _chunk(records: list, size: int):
 # High-level conversion functions
 # ===========================================================================
 
-def build_script_context(export_dir: str, output_dir: str) -> dict:
+def build_script_context(export_dir: str, output_dir: str, *, clean: bool = True) -> dict:
     """Everything a script-conversion worker needs, built ONCE per plugin.
 
     Returns {'initargs': tuple for _script_worker_init, 'scpt_work': [...],
@@ -207,10 +207,10 @@ def build_script_context(export_dir: str, output_dir: str) -> dict:
     # anything present IS something this run produced.  Both source and
     # compiled output are cleared: a stale .pex is worse than a stale .psc,
     # because the VM loads it whether or not the source is still there.
-    if os.path.isdir(output_dir):
-            shutil.rmtree(output_dir)
+    if clean and os.path.isdir(output_dir):
+        shutil.rmtree(output_dir)
     pex_dir = os.path.dirname(output_dir)
-    if os.path.isdir(pex_dir):
+    if clean and os.path.isdir(pex_dir):
         for _n in os.listdir(pex_dir):
             if _n.lower().endswith('.pex'):
                 try:
@@ -224,22 +224,8 @@ def build_script_context(export_dir: str, output_dir: str) -> dict:
     # constrained trap islands).  Without this the lookup silently answers 0
     # for every mesh and no trap ever gets its SetMotionType release — see
     # CrossRefGraph.needs_havok_release.
-    from tes5_import.mesh_bounds import load_mesh_bounds
-    from asset_convert.collision_extract import bounds_cache_is_current
-    _bounds_cache = str(assets_for(export_dir) / 'mesh_bounds_cache.json')
-    # A cache from before the HELD bit existed loads fine and answers 0 for
-    # every mesh, so the release silently vanishes from every converted script.
-    # This step cannot rebuild it (--scripts-only runs with no mesh scan), so
-    # say so instead of emitting quietly-wrong scripts.
-    if not bounds_cache_is_current(_bounds_cache):
-        print("  WARNING: mesh bounds cache is missing or predates the current "
-              "schema.\n"
-              "           Breakaway/trap havok releases will NOT be emitted "
-              "(planks and traps\n"
-              "           will hang instead of falling).  Run the import or "
-              "meshes step to\n"
-              f"           rebuild it: {_bounds_cache}")
-    load_mesh_bounds(_bounds_cache, quiet=True)
+    from script_convert.mesh_metadata import load_script_mesh_metadata
+    _bounds_cache = load_script_mesh_metadata(export_dir)
 
     # Deploy static scripts (TES4Polyfill + shared service-menu fragments) so
     # they compile alongside the generated ones.
@@ -254,6 +240,9 @@ def build_script_context(export_dir: str, output_dir: str) -> dict:
     # which resolve to the master's shipped copy (phase_compile puts every
     # master's source dir on the -h header path).
     static_dir = os.path.join(os.path.dirname(__file__), 'static_scripts')
+    from .actor_value_codes import write_setter
+    from .runtime_commands import _AV_CODE_NAMES
+    generated_static = 'TES4ActorValues.psc'
     if master_names(export_dir):
         print('  Static scripts: skipped (owned by this plugin\'s master)')
         # Remove copies an older (pre-skip) build left in this plugin's
@@ -263,7 +252,7 @@ def build_script_context(export_dir: str, output_dir: str) -> dict:
         # it failed to compile), and the stale .pex ships under the same
         # script name as the master's — whichever loads last wins in-game.
         if os.path.isdir(static_dir):
-            for name in os.listdir(static_dir):
+            for name in [*os.listdir(static_dir), generated_static]:
                 if not name.endswith('.psc'):
                     continue
                 stale_psc = os.path.join(output_dir, name)
@@ -274,6 +263,7 @@ def build_script_context(export_dir: str, output_dir: str) -> dict:
                         os.remove(stale)
                         print(f'    removed stale master-owned copy: {stale}')
     else:
+        write_setter(output_dir, _AV_CODE_NAMES)
         if os.path.isdir(static_dir):
             for name in os.listdir(static_dir):
                 if name.endswith('.psc'):
@@ -494,7 +484,7 @@ def convert_all_scripts(export_dir: str, output_dir: str, workers: int = None) -
     print(f'    SCPT: {stats["scpt_ok"]}/{stats["scpt_total"]} converted')
     print(f'    INFO: {stats["info_ok"]}/{stats["info_total"]} fragments')
     print(f'    QUST: {stats["qust_ok"]}/{stats["qust_total"]} stage scripts')
-    print(f'    Total: {total} converted, {errs} errors, {stats["todo_count"]} TODOs')
+    print(f'    Total: {total} converted, {errs} errors, {stats["warning_count"]} script warnings (TODO/NE)')
     if stats['errors']:
         # One line per DISTINCT failure, with a count and an example: 2,393
         # identical messages say no more than one does, and hiding them
@@ -620,8 +610,13 @@ def _fix_udf_call_arg_types(output_dir: str, sigs: dict, callers: dict) -> None:
 
 def _needs_cast(have: str, want: str, arg: str) -> bool:
     """Papyrus converts freely UP, so only a DOWNCAST needs an explicit `as`."""
-    return (bool(have) and have.lower() in UDF_WIDE_TYPES
-            and want.lower() not in UDF_WIDE_TYPES and ' as ' not in arg)
+    if not have or have == want:
+        return False
+    if want == 'Int' and have in ('Float', 'Bool'):
+        return True
+    if want in ('Form', 'Int', 'Float', 'Bool', 'String'):
+        return False
+    return have == 'Form' or (have == 'ObjectReference' and want != 'Form')
 
 
 # `Owner.member` at the head of a statement, which is the shape a dangling
@@ -670,9 +665,12 @@ def _scpt_batch(records: list, output_dir: str, xref: CrossRefGraph, stats: dict
                 types = {k.lower(): v
                          for k, v in conv.get_property_refs().items()}
                 types.update(conv.sc.var_types)
+                for _, args in conv.sc.udf_calls:
+                    for arg in args:
+                        types[arg.lower()] = conv.remote_type_of(arg) or conv.type_of(arg) or types.get(arg.lower(), '')
                 stats['udf_callers'][script_name] = (conv.sc.udf_calls, types)
             stats['scpt_ok'] += 1
-            stats['todo_count'] += papyrus.count(';TODO')
+            stats['warning_count'] += len(re.findall(r';(?:TODO|NE):?', papyrus))
         except Exception as e:
             stats['scpt_err'] += 1
             stats['errors'].append(f'SCPT {edid} ({formid}): {e}')
@@ -1062,7 +1060,8 @@ def _info_batch(records: list, output_dir: str, xref: CrossRefGraph,
                 conv.set_scro_aliases(resolve_scro_aliases(
                     result_script, _scro_list(rec), xref))
                 body_lines = conv.convert_fragment(result_script, 'TopicInfo')
-                prop_refs = dict(conv.sc.property_refs)
+                prop_refs = used_property_refs(conv.sc.property_refs,
+                                               body_lines + conv.get_cell_family_helpers())
 
             script_name = f'TES4_TIF__{formid}'
             out_lines = [
@@ -1168,7 +1167,7 @@ def _info_batch(records: list, output_dir: str, xref: CrossRefGraph,
             write_psc(output_dir, script_name, papyrus)
             if has_script:
                 stats['info_ok'] += 1
-            stats['todo_count'] += papyrus.count(';TODO')
+            stats['warning_count'] += len(re.findall(r';(?:TODO|NE):?', papyrus))
         except Exception as e:
             stats['info_err'] += 1
             stats['errors'].append(f'INFO {formid}: {e}')
@@ -1313,7 +1312,8 @@ def _qust_batch(records: list, output_dir: str, xref: CrossRefGraph,
                                     if q == edid.lower() for g in gs})
             for gi, gname in enumerate(quest_globals):
                 out_lines.insert(2 + gi, f'GlobalVariable Property {gname} Auto')
-            prop_refs = conv.get_property_refs()
+            out_lines.extend(conv.get_cell_family_helpers())
+            prop_refs = used_property_refs(conv.get_property_refs(), out_lines)
             if prop_refs:
                 # Merge case-variant keys: pick the most specific type (non-Quest wins)
                 merged: dict[str, tuple[str, str]] = {}  # lower_name -> (canonical_name, type)
@@ -1352,13 +1352,10 @@ def _qust_batch(records: list, output_dir: str, xref: CrossRefGraph,
                     {n: t for n, t in merged.values()}, declared)
                 out_lines[insert_idx:insert_idx] = lines + ['']
 
-            # GetInCell prefix-family helpers the stage bodies call by name.
-            out_lines.extend(conv.get_cell_family_helpers())
-
             papyrus = '\n'.join(out_lines)
             write_psc(output_dir, script_name, papyrus)
             stats['qust_ok'] += scripted_count
-            stats['todo_count'] += papyrus.count(';TODO')
+            stats['warning_count'] += len(re.findall(r';(?:TODO|NE):?', papyrus))
         except Exception as e:
             stats['qust_err'] += scripted_count
             stats['errors'].append(f'QUST {edid}: {e}')
@@ -1424,24 +1421,40 @@ def _scro_body_tokens(body: str) -> list:
     unknown OBSE commands survive, which resolve_scro_aliases handles by
     construction.
     """
-    lines = []
-    for raw in body.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
-        lines.append(raw.split(';', 1)[0])
-    # Oblivion's parser accepts QUOTES around any EditorID and the vanilla
-    # scripts use them (`PlaceAtMe "TG03LlathasasBust" 1,0,0`).  A quoted name is
-    # a form reference like any other, so drop the quotes rather than the name:
-    # stripping the whole literal made TG03LlathasasBust look like a SCRO the
-    # body never spells, and that stage's `IsXBox` — an OBSE command with no
-    # command entry — then looked like the rename it paired with.
-    text = re.sub(r'"([^"]*)"', r' \1 ', '\n'.join(lines))
+    from .tes4.parser import parse
+    from .tes4 import nodes as N
+    from .constants import AXIS_COMMANDS, _ACTOR_VALUE_FUNCTIONS, param_types
+
+    tree = parse(body)
+    locals_ = {var.name.lower() for var in tree.variables}
+    nodes = list(N.walk_exprs_in(tree.body + tree.blocks))
+    ignored = set()
+    quoted_forms = set()
+    # Axis and actor-value names are command operands, not record references.
+    axes = set(AXIS_COMMANDS) | {'setpos', 'setangle', 'getstartingpos', 'getstartingangle', 'rotate'}
+    operand_commands = axes | _ACTOR_VALUE_FUNCTIONS
+    for node in nodes:
+        if isinstance(node, N.Call) and node.args and node.name.lower() in operand_commands:
+            ignored.add(id(node.args[0]))
+        if isinstance(node, N.Call):
+            for index, wanted in param_types(node.name.lower()).items():
+                if index < len(node.args) and wanted not in ('Int', 'Float', 'Bool', 'String', 'TES4Collection'):
+                    quoted_forms.add(id(node.args[index]))
     out = []
-    for m in re.finditer(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?',
-                         text):
-        head = m.group(0).split('.', 1)[0]
-        low = head.lower()
-        if low in _SCRO_WALK_SKIP_KEYWORDS or low in KNOWN_COMMANDS:
+    for node in nodes:
+        if id(node) in ignored:
             continue
-        out.append(head)
+        if isinstance(node, (N.Ident, N.Call)):
+            head = node.name
+        elif (isinstance(node, N.Literal) and node.is_string
+              and id(node) in quoted_forms and re.fullmatch(r'"\w+"', node.text)):
+            head = node.text[1:-1]
+        else:
+            continue
+        low = head.lower()
+        if low not in locals_ and low not in _SCRO_WALK_SKIP_KEYWORDS and low not in KNOWN_COMMANDS and low not in operand_commands:
+            out.append(head)
+    out.extend(block.filter for block in tree.blocks if re.fullmatch(r'\w+', block.filter))
     return out
 
 
@@ -1534,14 +1547,14 @@ def _add_scro_ref(conv: 'ScriptConverter', fid: str, xref: CrossRefGraph):
     if not edid:
         return
     rtype = xref.record_type.get(fid, '')
-    ptype = _record_type_to_papyrus(rtype)
+    ptype = conv._papyrus_type_for(fid, rtype)
     # Prefer attached SCPT-derived type for cross-script property accesses
     # (e.g. Arena.AnnounceWin). For QUST records, start with 'Quest' base type —
     # the specific type will be promoted later if the script body uses dot-notation
     # variable access (e.g. Arena.AnnounceWin) which the converter handles.
     if rtype != 'QUST':
         script_type = xref.get_record_script_type(edid)
-        if script_type:
+        if script_type and conv._script_type_binds(ptype, fid):
             ptype = script_type
     # Key on the Papyrus-SAFE name, which is what _convert_ref stores and what
     # _collect_scro_properties writes into the VMAD.  Keying on the raw EditorID

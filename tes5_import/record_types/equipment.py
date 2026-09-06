@@ -197,7 +197,7 @@ def _pack_effects(rec: dict, count_key: str = 'EffectCount', pad_to: int = 0,
     # When EVERY effect dropped (pure script-effect spells), the first filler
     # keeps the longest dropped duration: the spell then still registers as an
     # active magic effect for as long as the TES4 spell did, which is what the
-    # converted IsSpellTarget checks (TES4Polyfill.HasMagicEffectByID) look for.
+    # converted IsSpellTarget checks look for.
     want = max(pad_to, 1)
     used = {fid for fid, _, _, _, _ in effects}
     fillers = iter(fid for fid in _FILLER_EFFECTS if fid not in used)
@@ -244,7 +244,8 @@ def _book_source_mesh_missing(writer, model: str) -> bool:
     return hit
 
 
-def _build_model_stat(edid: str, model_path: str, stat_fid: int) -> bytes:
+def _build_model_stat(edid: str, model_path: str, stat_fid: int,
+                      *, book_art: bool = False) -> bytes:
     """Build a minimal STAT record wrapping a mesh (WEAP WNAM / BOOK INAM target).
 
     TES5 STAT order: EDID OBND MODL DNAM
@@ -253,8 +254,15 @@ def _build_model_stat(edid: str, model_path: str, stat_fid: int) -> bytes:
     subs += pack_string_subrecord('EDID', edid)
     subs += pack_obnd()
     subs += pack_string_subrecord('MODL', model_path)
+    if book_art:
+        # Every one of Skyrim.esm's 819 resolved BOOK.INAM targets has model
+        # data and the same 90-degree STAT maximum angle.  BookMenu consumes
+        # these STATs as animated reading art rather than ordinary world
+        # statics, so reproduce that unanimous record contract.
+        subs += pack_subrecord('MODT', struct.pack('<III', 2, 0, 0))
     # DNAM: MaxAngle(float) + Directional Material(FormID, null)
-    subs += pack_subrecord('DNAM', struct.pack('<fI', 0.0, 0))
+    subs += pack_subrecord('DNAM', struct.pack('<fI',
+                                               90.0 if book_art else 0.0, 0))
     return pack_record('STAT', stat_fid, 0, subs)
 
 
@@ -898,7 +906,8 @@ def convert_BOOK(rec: dict, writer=None) -> bytes:
                 inam_fid = writer.derive_formid('BOOK_INVART', model.lower())
                 inv_model = 'clutter\\books\\inv\\' + base + '.nif'
                 stat_bytes = _build_model_stat('InvArt_' + base,
-                                               _prefix_path(inv_model), inam_fid)
+                                               _prefix_path(inv_model), inam_fid,
+                                               book_art=True)
                 writer.add_record('STAT', stat_bytes)
                 cache[base] = inam_fid
     subs += pack_formid_subrecord('INAM', inam_fid)
@@ -1020,7 +1029,7 @@ def convert_SPEL(rec: dict, writer=None) -> bytes:
     # Half-cost Perk FormID at 32 = 0
     subs += pack_subrecord('SPIT', bytes(spit))
 
-    # Effects.  An Ability (4) or Lesser Power (3) is applied, never cast, so
+    # Effects. An Ability (4) or Disease (1) is applied, never cast, so
     # any bound-item effect it carries needs the scripted stand-in.
     from .magic import UNCASTABLE_SPELL_TYPES
     subs += _pack_effects(rec, delivery=target_type, writer=writer,

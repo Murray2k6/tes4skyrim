@@ -50,6 +50,10 @@ _VALUE_TYPES_LOW = frozenset(t.lower() for t in _PAPYRUS_VALUE_TYPES)
 _REF_RETURNING = frozenset({
     'getcontainer', 'getlinkedref', 'getparentref', 'getself',
     'getactionref', 'getcombattarget', 'getcrimeknown',
+    'getparentcell', 'getcurrentweatherid', 'getparentworldspace',
+    'getworldspaceparentworldspace',
+    'getclass', 'getnthlevitem', 'getlevitembylevel', 'calclevitem', 'calcleveleditem',
+    'calclevitemnr', 'calcleveleditemnr',
 })
 
 
@@ -82,12 +86,16 @@ def is_ref_typed(conv, node: N.Expr) -> bool:
              or conv._property_type_ci(node.name)).lower()
         return bool(t) and t not in _VALUE_TYPES_LOW
     if isinstance(node, N.Call):
-        return node.name.lower() in _REF_RETURNING
+        from script_convert.symbols import type_of_expr
+        result_type = type_of_expr(node, conv.type_of).lower()
+        return node.name.lower() in _REF_RETURNING or bool(result_type and result_type not in _VALUE_TYPES_LOW)
     if isinstance(node, N.Member):
         # TES4 permits a zero-argument call without parentheses after a
         # receiver (`target.GetParentRef`).  The parser represents that as a
         # Member, but its value is still the command's reference return.
-        if node.name.lower() in _REF_RETURNING:
+        from script_convert.constants import RETURN_TYPES
+        result_type = RETURN_TYPES.get(node.name.lower(), '').lower()
+        if node.name.lower() in _REF_RETURNING or (result_type and result_type not in _VALUE_TYPES_LOW):
             return True
         # `Owner.var` on another converted script.  BOTH routes are needed:
         # `remote_type_of` resolves through the owner's declared `TES4_<script>`
@@ -223,6 +231,18 @@ def emit(conv, node: N.Expr, extends: str) -> str:
         return conv.emit_member(emit_bare(conv, node.owner), node.name, extends)
 
     if isinstance(node, N.Unary):
+        if node.op == '*':
+            from script_convert.collection_commands import kind
+            previous = conv.sc.expected_type
+            conv.sc.expected_type = 'TES4Collection'
+            try:
+                inner = emit(conv, node.operand, extends)
+            finally:
+                conv.sc.expected_type = previous
+            result = f'TES4Collections.Dereference{kind(previous)}({inner})'
+            if kind(previous) == 'Form' and previous != 'Form':
+                result += f' as {previous}'
+            return result
         inner = emit(conv, node.operand, extends)
         # OBSE `$x` is a string cast, not an operator Papyrus knows.
         if node.op == '$':
@@ -241,11 +261,8 @@ def emit(conv, node: N.Expr, extends: str) -> str:
         return conv.emit_call(node, extends)
 
     if isinstance(node, N.Index):
-        # OBSE arrays have no Papyrus equivalent.  Emit the BASE variable and
-        # drop the subscript, which is what the string path does -- returning a
-        # `0` marker instead is more honest but does not compile where the
-        # comparand is a typed form (`0 == <Spell>`, 2 scripts in Morroblivion).
-        return conv.emit_array_read(emit_bare(conv, node.target), extends)
+        from script_convert.collection_commands import read
+        return read(conv, node, extends)
 
     if isinstance(node, N.BinOp):
         return _binop(conv, node, extends)
@@ -288,6 +305,10 @@ def _package_comparison(conv, node: N.BinOp, extends: str):
             and not lhs.args:
         recv = emit_bare(conv, lhs.receiver) if lhs.receiver else None
     else:
+        return None
+    if lhs.name.lower() == 'getcurrentaipackage' and _is_number(node.right):
+        # Numeric reads use runtime metadata, including packages selected by
+        # scripts that are not in the actor's authored package list.
         return None
     return conv.emit_package_test(recv, node.op, emit_source(node.right),
                                   extends)
@@ -355,16 +376,22 @@ def _base_object(conv, ref, base, node, extends):
     narrows it, and its local type still reads `ObjectReference` here because
     the signature is decided after the body.
     """
-    if not isinstance(base, N.Ident):
+    if (not isinstance(base, N.Ident)
+            or base.name.lower() in ('player', 'playerref', 'self', 'this', 'getself')):
         return None
-    btype = (conv.type_of(base.name, locals_first=False)
-             or conv._base_record_type(base.name))
+    from script_convert.symbols import type_of_expr
+    if type_of_expr(ref, conv.type_of) in BASE_FORM_TYPES | {'Form'}:
+        bound = conv.bind_value_record(base)
+        if bound:
+            return emit(conv, ref, extends), bound
+    btype = (conv.type_of(base.name) if base.name.lower() in conv.sc.local_vars else
+             conv._base_record_type(base.name) or conv.type_of(base.name, locals_first=False))
     if btype not in BASE_FORM_TYPES or not is_ref_typed(conv, ref):
         return None
     if isinstance(ref, N.Ident) and ref.name.lower() in conv.sc.udf_params:
         return None
-    return (f'{emit(conv, ref, extends)}.GetBaseObject()',
-            emit(conv, base, extends))
+    return (f'TES4SKSE.GetBaseForm({emit(conv, ref, extends)})',
+            conv.bind_value_record(base) or emit(conv, base, extends))
 
 
 def _self_cast(conv, a, b, node, extends):
@@ -400,22 +427,11 @@ def _bool_as_int(conv, a, b, node, extends):
 
 
 def _container(conv, a, b, node, extends):
-    """`GetContainer == 0` -> "am I lying in the world?".
-
-    TES4Polyfill.IsInContainer answers that exactly.  Any other comparison
-    (`GetContainer != SomeRef` -- "is a PARTICULAR actor holding me") has no
-    Papyrus equivalent, so it is neutralised to the value that does not fire
-    the branch and left as a TODO rather than compiled into a lie.
-    """
+    """Compare the actual container, including inventory-reference proxies."""
     container = _get_container_receiver(conv, a, extends)
     if container is None:
         return None
-    if _is_zero(b):
-        call = f'TES4Polyfill.IsInContainer({container})'
-        return f'!{call}' if node.op == '==' else call
-    conv._line_comments.append(
-        f';TODO: GetContainer has no Papyrus equivalent ({emit_source(node)})')
-    return 'False' if node.op == '!=' else 'True'
+    return f'{emit(conv, a, extends)} {node.op} {"None" if _is_zero(b) else emit(conv, b, extends)}'
 
 
 def _get_container_receiver(conv, node: N.Expr, extends: str):
@@ -434,6 +450,18 @@ def _get_container_receiver(conv, node: N.Expr, extends: str):
     return None
 
 
+def _numeric_reference(conv, reference, number, node, extends):
+    """Read the reference identity used by assignments into numeric slots."""
+    if (_is_number(number) or not is_ref_typed(conv, reference)
+            or is_ref_typed(conv, number)):
+        return None
+    numeric_value = emit(conv, number, extends)
+    numeric_type = conv.remote_type_of(numeric_value) or conv.type_of(numeric_value)
+    if numeric_type != 'Int':
+        return None
+    return f'TES4SKSE.NumericFormID({emit(conv, reference, extends)})', numeric_value
+
+
 #: Comparison rules, each `(ops, fn)`.  `fn(conv, a, b, node, extends)` is
 #: tried with the operands both ways round and returns either a whole
 #: replacement expression (a string) or the rewritten `(a, b)` pair -- the
@@ -445,6 +473,7 @@ _CMP_RULES = (
     (('==', '!='), _self_cast),
     (('>', '>=', '<', '<='), _bool_as_int),
     (('==', '!='), _container),
+    (('==', '!='), _numeric_reference),
 )
 
 
@@ -468,6 +497,37 @@ def _apply_cmp_rules(conv, node: N.BinOp, extends: str):
 def _binop(conv, node: N.BinOp, extends: str) -> str:
     op = OP_MAP.get(node.op, node.op)
     left, right = node.left, node.right
+    # Eval is transparent to value typing. The parser may put it around only
+    # the left operand of `if eval array[index] == form`.
+    if isinstance(left, N.Call) and left.name.lower() == 'eval' and left.args:
+        left = _as_call(left.args)
+    if isinstance(right, N.Call) and right.name.lower() == 'eval' and right.args:
+        right = _as_call(right.args)
+    # OBSE collections are heterogeneous.  The other comparison operand
+    # tells us which typed element accessor this particular read needs.
+    if op in ('==', '!=', '<', '>', '<=', '>=') and (
+            isinstance(left, N.Index) or isinstance(right, N.Index)):
+        from script_convert.symbols import type_of_expr
+        other = right if isinstance(left, N.Index) else left
+        bound = conv.bind_value_record(other)
+        wanted = conv.type_of(bound) if bound else type_of_expr(other, conv.type_of)
+        if wanted:
+            previous = conv.sc.expected_type
+            conv.sc.expected_type = wanted
+            try:
+                lhs = bound if bound and other is left else emit(conv, left, extends)
+                rhs = bound if bound and other is right else emit(conv, right, extends)
+                return f'{lhs} {op} {rhs}'
+            finally:
+                conv.sc.expected_type = previous
+
+    bitwise = {'&': 'LogicalAnd', '|': 'LogicalOr',
+               '<<': 'LeftShift', '>>': 'RightShift'}
+    if op in bitwise:
+        a, b = emit(conv, left, extends), emit(conv, right, extends)
+        return f'Math.{bitwise[op]}(({a}) as Int, ({b}) as Int)'
+    if op == '^':
+        return f'Math.Pow({emit(conv, left, extends)}, {emit(conv, right, extends)})'
 
     packaged = _package_comparison(conv, node, extends)
     if packaged is not None:
@@ -617,6 +677,10 @@ def _as_call(args) -> N.Expr:
     i.e. the first argument is the command and the rest are its own.
     """
     head, rest = args[0], args[1:]
+    if not rest:
+        return head
     if isinstance(head, N.Ident):
         return N.Call(head.name, tuple(rest), None, line=head.line)
+    if isinstance(head, N.Member):
+        return N.Call(head.name, tuple(rest), head.owner, line=head.line)
     return head

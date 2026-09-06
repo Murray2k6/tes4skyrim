@@ -27,7 +27,7 @@ _GEOM_CACHE: tuple = None
 def init_worker(base_model_by_fid: dict, door_fids: set, collision_cache: str,
                 formid_offset: int = 0, geom_cache: tuple = None,
                 injected_formids: dict = None, disable_gc: bool = True,
-                door_centers_cache: str = None):
+                door_centers_cache: str = None, collision_sources=None):
     """ProcessPool initializer: stash context; load the collision cache.
 
     Runs once per worker process.  A spawned child does NOT inherit the parent's
@@ -58,9 +58,9 @@ def init_worker(base_model_by_fid: dict, door_fids: set, collision_cache: str,
     from .text_reader import set_formid_index_offset, set_injected_formids
     set_formid_index_offset(formid_offset)
     set_injected_formids(injected_formids or {})
-    if collision_cache:
-        from asset_convert.collision_extract import load_collision
-        load_collision(collision_cache, quiet=True)
+    from asset_convert.collision_extract import load_collision
+    load_collision(collision_sources if collision_sources is not None
+                   else ([collision_cache] if collision_cache else []), quiet=True)
 
     # Door panel centroids: the REFR position is the door's hinge, not the
     # doorway; _collect_doors offsets to the panel centre using these.  Module

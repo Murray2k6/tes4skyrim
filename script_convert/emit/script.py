@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 
 from script_convert.emit import stmt as S
+from script_convert.emit import string_edits
 from script_convert.tes4 import nodes as N
 
 #: Papyrus indents with two spaces per level, matching the emitted events.
@@ -45,18 +46,15 @@ def emit_body(conv, body, extends: str, depth: int = 0) -> list[str]:
     conv.sc.refwalk_var = ''
     for st in body:
         lines = emit_stmt(conv, st, extends, depth)
-        # An OBSE `forEach <it> <- <container> ... loop` body is INERT: Papyrus
-        # has no equivalent of OBSE's dynamic containers, the iterator carries
-        # no value, and the body reads it element-by-element.  The opener
-        # converts to a `;TODO:` and everything up to the `loop` follows it
-        # into a comment rather than running against an unassigned iterator.
-        if conv.sc.in_foreach:
-            lines = [_comment(l) for l in lines]
-        if _opens_foreach(st):
-            conv.sc.in_foreach += 1
-        elif conv.sc.in_foreach and _closes_foreach(st):
-            conv.sc.in_foreach -= 1
+        if (conv.sc.loop_stack and conv.sc.loop_stack[-1][1]
+                and not isinstance(st, (N.Comment, N.Blank, N.VarDecl))):
+            skip = conv.sc.loop_stack[-1][1]
+            lines = [INDENT * depth + f'If !{skip}'] + [INDENT + l for l in lines] + [INDENT * depth + 'EndIf']
         out += _deferred_destroy(lines, animated)
+        # Papyrus rejects statements after an unconditional Return in the
+        # same block; TES4 accepted such unreachable leftovers.
+        if isinstance(st, N.Return):
+            break
     # An OBSE ref-walk's `While` is opened by a `Label` mid-body and its `Goto`
     # cannot close it in place (the Goto sits inside the loop's own `if` nest,
     # and `EndWhile` there would cross those blocks).  The walk therefore ends
@@ -73,10 +71,8 @@ def emit_stmt(conv, st: N.Stmt, extends: str, depth: int) -> list[str]:
     pad = INDENT * depth
     if isinstance(st, N.If):
         return _if(conv, st, extends, depth)
-    if isinstance(st, N.While):
-        return ([pad + _text(conv, st, extends)]
-                + emit_body(conv, st.body, extends, depth + 1)
-                + [pad + 'EndWhile'])
+    if isinstance(st, (N.While, N.ForEach)):
+        return _loop(conv, st, extends, depth)
     conv.sc.block_depth = depth
     text = _text(conv, st, extends)
     if not text:
@@ -84,6 +80,112 @@ def emit_stmt(conv, st: N.Stmt, extends: str, depth: int) -> list[str]:
         # (it was hoisted to a property), so it must not leave an empty line.
         return [''] if isinstance(st, N.Blank) else []
     return _indent(text, pad)
+
+
+def _loop(conv, st, extends, depth):
+    from script_convert.emit import expr as E
+    from script_convert.constants import _safe_property_name
+    from script_convert.symbols import type_of_expr
+    pad = INDENT * depth
+    tag = f'TES4_Loop{st.line}'
+    if conv.sc.batch_stack:
+        import hashlib
+        tag += hashlib.sha256(str(conv.sc.batch_stack[-1].name).encode()).hexdigest()[:8]
+    controlled = _has_loop_jump(st.body)
+    stop, skip = (tag + 'Stop', tag + 'Skip') if controlled else ('', '')
+    types = {stop: 'Bool', skip: 'Bool'} if controlled else {}
+    prefix = [pad + f'{stop} = False'] if controlled else []
+    step = []
+    setup = []
+    suffix = []
+    inventory_scope = ''
+    if isinstance(st, N.ForEach):
+        cursor, source = tag + 'Index', tag + 'Source'
+        target = conv._convert_ref(E.emit_source(st.target), extends)
+        filtered = isinstance(st.value, N.Call) and st.value.name.lower() == 'getinvrefsforitem'
+        source_type = type_of_expr(st.value, conv.type_of)
+        is_array = not filtered and (source_type == 'TES4Collection' or conv._is_obse_array(st.value))
+        types.update({cursor: 'Int', source: 'TES4Collection' if is_array else 'Int'})
+        if filtered:
+            receiver = E.emit_source(st.value.receiver) if st.value.receiver else ''
+            owner = conv._resolve_objref_ref(receiver, extends)
+            item = E.emit(conv, st.value.args[0], extends) if st.value.args else 'None'
+            src = f'TES4Runtime.BeginInventory({owner}, {item})'
+        else:
+            src = E.emit(conv, st.value, extends)
+        if not filtered and not is_array and source_type == 'Form':
+            src = f'({src} as ObjectReference)'
+        if not filtered and not is_array:
+            src = f'TES4Runtime.BeginInventory({src})'
+        prefix += [pad + f'{source} = {src}', pad + f'{cursor} = 0']
+        if is_array:
+            prefix += [pad + f'{target} = TES4Collection.Create("StringMap")']
+            key = tag + 'Key'
+            types[key] = 'String'
+            condition = f'{cursor} < TES4Collections.Size({source})'
+            setup = [f'{key} = {source}.KeyAt({cursor})',
+                     f'If {source}.Kind == 2',
+                     f'  {target}.SetString("key", {key})',
+                     'Else',
+                     f'  {target}.SetNumber("key", {key} as Float)',
+                     'EndIf',
+                     f'{target}.CopyValue("value", {source}, {key})']
+            suffix = [pad + f'{target} = None']
+        else:
+            if isinstance(st.target, N.Ident):
+                name = st.target.name
+                ptype = 'TES4Collection' if filtered else 'Form'
+                conv.sc.var_types[name.lower()] = ptype
+                conv.sc.var_types[_safe_property_name(name).lower()] = ptype
+            condition = f'{cursor} < TES4Runtime.InventorySize({source})'
+            setup = [f'{target} = TES4Runtime.InventoryReference({source}, {cursor})']
+            if filtered:
+                prefix += [pad + f'{target} = TES4Collection.Create("StringMap")']
+                setup = [f'{target}.SetInteger("key", {cursor})',
+                         f'{target}.SetForm("value", TES4Runtime.InventoryReference({source}, {cursor}))']
+            inventory_scope = source
+            suffix = [pad + f'TES4Runtime.EndInventory({source})', pad + f'{target} = None']
+        step = [pad + INDENT + f'{cursor} += 1']
+    else:
+        condition_lines, cond = string_edits.lower(conv, st.cond, extends)
+        condition = S.emit_condition(conv, cond, extends)
+        prefix += [pad + line for line in condition_lines]
+        if condition_lines:
+            if controlled:
+                step += [pad + INDENT + f'If !{stop}']
+                step += [pad + INDENT * 2 + line for line in condition_lines]
+                step += [pad + INDENT + 'EndIf']
+            else:
+                step += [pad + INDENT + line for line in condition_lines]
+    for name, ptype in types.items():
+        conv.sc.synthetic_vars[name] = ptype
+        conv.sc.var_types[name.lower()] = ptype
+        conv.sc.local_vars.add(name.lower())
+    conv.sc.loop_stack.append((stop, skip))
+    if inventory_scope:
+        conv.sc.inventory_scopes.append(inventory_scope)
+    try:
+        body = emit_body(conv, st.body, extends, depth + 1)
+    finally:
+        conv.sc.loop_stack.pop()
+        if inventory_scope:
+            conv.sc.inventory_scopes.pop()
+    condition = f'!{stop} && ({condition})' if controlled else condition
+    reset = [pad + INDENT + f'{skip} = False'] if controlled else []
+    return (prefix + [pad + f'While {condition}'] + reset
+            + [pad + INDENT + line for line in setup] + body + step
+            + [pad + 'EndWhile'] + suffix)
+
+
+def _has_loop_jump(body):
+    for st in body:
+        if isinstance(st, N.ExprStmt) and st.expr.called in ('break', 'continue'):
+            return True
+        if isinstance(st, N.If):
+            parts = [st.body, st.orelse] + [branch for _, branch, _ in st.elifs]
+            if any(_has_loop_jump(part) for part in parts):
+                return True
+    return False
 
 
 def _indent(text: str, pad: str) -> list[str]:
@@ -110,15 +212,32 @@ def _indent(text: str, pad: str) -> list[str]:
 def _if(conv, st: N.If, extends: str, depth: int) -> list[str]:
     """`If` with its elseif chain and else, each body owning its own nesting."""
     pad = INDENT * depth
-    out = [pad + _text(conv, st, extends)]
+    before, cond = string_edits.lower(conv, st.cond, extends)
+    from dataclasses import replace
+    out = [pad + line for line in before]
+    out.append(pad + _text(conv, replace(st, cond=cond), extends))
     out += emit_body(conv, st.body, extends, depth + 1)
+    nested = 0
     for cond, body, _line in st.elifs:
-        out.append(pad + 'ElseIf ' + S.emit_condition(conv, cond, extends))
+        before, cond = string_edits.lower(conv, cond, extends)
+        header = _text(conv, N.If(cond=cond, body=[], line=_line), extends)
+        if before:
+            out.append(pad + 'Else')
+            depth += 1
+            nested += 1
+            pad = INDENT * depth
+            out += [pad + line for line in before]
+            out.append(pad + header)
+        else:
+            out.append(pad + 'Else' + header)
         out += emit_body(conv, body, extends, depth + 1)
     if st.orelse:
         out.append(pad + 'Else')
         out += emit_body(conv, st.orelse, extends, depth + 1)
     out.append(pad + 'EndIf')
+    for _ in range(nested):
+        depth -= 1
+        out.append(INDENT * depth + 'EndIf')
     return out
 
 
@@ -130,7 +249,10 @@ def _text(conv, st: N.Stmt, extends: str) -> str:
     existed to undo.
     """
     conv._line_comments.clear()
+    before, st = string_edits.statement(conv, st, extends)
     text = conv._guard_stage_timer(S.emit(conv, st, extends))
+    if before:
+        text = '\n'.join(before + ([text] if text else []))
     if isinstance(st, N.Comment):
         text = _source_comment(text)
     notes = '  '.join(conv._line_comments)
@@ -161,16 +283,6 @@ def _comment(line: str) -> str:
     if not stripped or stripped.startswith(';'):
         return line
     return line[:len(line) - len(stripped)] + ';' + stripped
-
-
-def _opens_foreach(st) -> bool:
-    """Does this statement open an OBSE `forEach` block?"""
-    return isinstance(st, N.ExprStmt) and st.expr.called == 'foreach'
-
-
-def _closes_foreach(st) -> bool:
-    """Does this statement close one with `loop`?"""
-    return isinstance(st, N.ExprStmt) and st.expr.called == 'loop'
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +348,7 @@ def _is_say_assignment(st) -> bool:
 
 def _opens_a_body(st) -> bool:
     """Does this statement open a nested body, ending a scan window?"""
-    return isinstance(st, (N.If, N.While))
+    return isinstance(st, (N.If, N.While, N.ForEach))
 
 
 #: The polyfill call a `setDestroyed 1` becomes, and its deferred twin.

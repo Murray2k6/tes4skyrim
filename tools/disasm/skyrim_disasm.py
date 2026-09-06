@@ -276,10 +276,34 @@ class LiveBinary(Binary):
         self.base, size = self._module_range()
         self.path = f'<live pid {pid}>'
         self.data = self._dump(self.base, size, chunk)
+        self._prepare_image()
+
+    def _prepare_image(self):
+        """Initialize analysis of an image whose file offsets equal RVAs."""
+        self.pe = pefile.PE(data=self.data, fast_load=True)
         # offset == rva for a virtual image
         self._sections = [(0, len(self.data), 0, '.live')]
         self.md = Cs(CS_ARCH_X86, CS_MODE_64)
         self.md.detail = True
+
+    def save_snapshot(self, path):
+        """Save only the executable image and its relocated base for analysis."""
+        with open(path, 'wb') as stream:
+            stream.write(struct.pack('<8sQ', b'TES5IMG1', self.base))
+            stream.write(self.data)
+
+    @classmethod
+    def from_snapshot(cls, path):
+        """Read a saved image without attaching to or starting any process."""
+        image = cls.__new__(cls)
+        image.path = path
+        with open(path, 'rb') as stream:
+            magic, image.base = struct.unpack('<8sQ', stream.read(16))
+            if magic != b'TES5IMG1':
+                raise ValueError('Not a Skyrim executable-image snapshot')
+            image.data = stream.read()
+        image._prepare_image()
+        return image
 
     @staticmethod
     def _find_pid() -> int:
@@ -434,18 +458,24 @@ def main():
     ap.add_argument('--strings',
                     help='dump consecutive NUL-terminated strings at this RVA')
     ap.add_argument('--count', type=int, default=60)
-    ap.add_argument('--live', action='store_true',
+    source = ap.add_mutually_exclusive_group()
+    source.add_argument('--snapshot', help='analyse a saved executable-image snapshot')
+    source.add_argument('--live', action='store_true',
                     help='analyse the RUNNING process instead of the file on '
                          'disk (REQUIRED for the Steam build, whose on-disk '
                          '.text is DRM-encrypted; also gives RVAs that match '
                          'the running build exactly)')
+    ap.add_argument('--save-snapshot', help='save the captured live image for later analysis')
     ap.add_argument('--pid', type=int, default=0,
                     help='with --live: target pid (default: find SkyrimSE)')
     ap.add_argument('--show-targets', action='store_true',
                     help='list call/jmp targets found')
     args = ap.parse_args()
 
-    if args.live:
+    if args.snapshot:
+        b = LiveBinary.from_snapshot(args.snapshot)
+        print(f'SNAPSHOT {args.snapshot}  imagebase={b.base:#x}')
+    elif args.live:
         b = LiveBinary(args.pid)
         print(f'LIVE pid={b.pid}  imagebase={b.base:#x}  '
               f'image={len(b.data) / (1 << 20):.1f} MB')
@@ -454,6 +484,12 @@ def main():
             sys.exit(f'not found: {args.exe}')
         b = Binary(args.exe)
         print(f'{os.path.basename(args.exe)}  imagebase={b.base:#x}')
+
+    if args.save_snapshot:
+        if not isinstance(b, LiveBinary):
+            ap.error('--save-snapshot requires --live or --snapshot')
+        b.save_snapshot(args.save_snapshot)
+        print(f'Saved executable image: {args.save_snapshot}')
 
     if args.find:
         names = b.find_rtti_names(args.find)
@@ -467,10 +503,10 @@ def main():
               f'{", ".join(hex(v) for v in vts) or "none"}')
         for vt in vts:
             print(f'\n  vtable {vt:#x}:')
-            for slot, frva in b.vtable_slots(vt):
+            for slot, frva in b.vtable_slots(vt, max(24, (args.slot or 0) + 1)):
                 print(f'    [{slot:2d}] {frva:#010x}')
         if args.slot is not None and vts:
-            slots = dict(b.vtable_slots(vts[0]))
+            slots = dict(b.vtable_slots(vts[0], max(24, args.slot + 1)))
             if args.slot in slots:
                 rva = slots[args.slot]
                 print(f'\n  disasm slot {args.slot} @ {rva:#x}:')

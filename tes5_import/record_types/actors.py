@@ -902,10 +902,8 @@ _merchant_faction_by_npc: dict[int, int] = {}
 # every plugin shares, so Nehrim NPCs passed them. Race was Oblivion's plugin
 # boundary only because Oblivion was the only file loaded.
 #
-# ONLY a root master (no TES4 masters of its own) creates and applies this.
-# A DLC/plugin must stay ungated so it can extend and override its master's
-# dialogue exactly as it does in Oblivion — its own actors are already members
-# via the master's NPC records it inherits or overrides.
+# Root masters create this; dependents use the same marker for their NEW actors
+# so those actors can use inherited greetings, topics, and services.
 _origin_faction_fid = 0
 
 
@@ -914,13 +912,17 @@ def get_origin_faction_fid() -> int:
     return _origin_faction_fid
 
 
-def create_origin_faction(writer) -> int:
-    """Create the plugin-origin marker faction. Root masters only.
+def create_origin_faction(writer, master_index=None) -> int:
+    """Adopt the master's origin marker, or create one for a root plugin.
 
     A plain membership marker: no flags, no relations, no vendor data, so it
     can never affect crime, combat reaction, or the barter menu.
     """
     global _origin_faction_fid
+    _origin_faction_fid = (master_index.find_by_edid(
+        b'FACT', 'TES4PluginOriginFaction') if master_index is not None else 0)
+    if _origin_faction_fid:
+        return _origin_faction_fid
     _origin_faction_fid = writer.derive_formid('FACT', 'TES4PluginOriginFaction')
     subs = pack_string_subrecord('EDID', 'TES4PluginOriginFaction')
     subs += pack_subrecord('DATA', struct.pack('<I', 0))
@@ -1006,7 +1008,7 @@ def _write_vendor_faction(writer, edid: str, flst_fid: int, venc_fid: int = 0) -
     return fact_fid
 
 
-def create_vendor_factions(by_type: dict, writer) -> None:
+def create_vendor_factions(by_type: dict, writer, master_index=None) -> None:
     """Phase 0c: Pre-scan NPC_/CREA for services and create vendor FACTs + FLSTs.
 
     Two kinds of vendor faction are produced:
@@ -1022,6 +1024,9 @@ def create_vendor_factions(by_type: dict, writer) -> None:
     """
     _vendor_faction_cache.clear()
     _merchant_faction_by_npc.clear()
+    global _merchant_marker_faction_fid
+    _merchant_marker_faction_fid = (master_index.find_by_edid(
+        b'FACT', 'TES4MerchantFaction') if master_index is not None else 0)
 
     chest_by_npc = _build_merchant_chest_map(by_type)
 
@@ -1045,15 +1050,21 @@ def create_vendor_factions(by_type: dict, writer) -> None:
     for svc_mask in sorted(unique_services):
         if not _keywords_for_services(svc_mask):
             continue
-        flst_fid = writer.derive_formid('VENDOR_FLST', svc_mask)
-        writer.add_record('FLST', pack_record('FLST', flst_fid, 0,
-                                              _vendor_flst_subs(svc_mask)))
+        flst_fid = (master_index.find_by_edid(b'FLST', f'TES4VendorList_{svc_mask:06X}')
+                    if master_index is not None else 0)
+        if not flst_fid:
+            flst_fid = writer.derive_formid('VENDOR_FLST', svc_mask)
+            writer.add_record('FLST', pack_record('FLST', flst_fid, 0,
+                                                _vendor_flst_subs(svc_mask)))
         flst_by_svc[svc_mask] = flst_fid
 
     # Shared (chest-less) faction per service bitmask.
     for svc_mask, flst_fid in flst_by_svc.items():
-        _vendor_faction_cache[svc_mask] = _write_vendor_faction(
-            writer, f'TES4VendorFaction_{svc_mask:06X}', flst_fid)
+        edid = f'TES4VendorFaction_{svc_mask:06X}'
+        inherited = (master_index.find_by_edid(b'FACT', edid)
+                     if master_index is not None else 0)
+        _vendor_faction_cache[svc_mask] = inherited or _write_vendor_faction(
+            writer, edid, flst_fid)
 
     # Dedicated faction per merchant that owns a chest.
     n_chest = 0
@@ -1070,14 +1081,14 @@ def create_vendor_factions(by_type: dict, writer) -> None:
     # faction (no Vendor flag / VEND / VENV) — it exists only as a membership
     # marker, so it can never compete with the real vendor faction the engine
     # resolves for the barter menu.
-    global _merchant_marker_faction_fid
-    _merchant_marker_faction_fid = writer.derive_formid('FACT', 'TES4MerchantFaction')
-    marker = pack_string_subrecord('EDID', 'TES4MerchantFaction')
-    marker += pack_string_subrecord('FULL', 'Merchant')
-    marker += pack_subrecord('DATA', struct.pack('<I', 0))
-    marker += pack_subrecord('CRVA', b'\x01\x01' + b'\x00' * 18)
-    writer.add_record('FACT', pack_record('FACT', _merchant_marker_faction_fid,
-                                          0, marker))
+    if not _merchant_marker_faction_fid:
+        _merchant_marker_faction_fid = writer.derive_formid('FACT', 'TES4MerchantFaction')
+        marker = pack_string_subrecord('EDID', 'TES4MerchantFaction')
+        marker += pack_string_subrecord('FULL', 'Merchant')
+        marker += pack_subrecord('DATA', struct.pack('<I', 0))
+        marker += pack_subrecord('CRVA', b'\x01\x01' + b'\x00' * 18)
+        writer.add_record('FACT', pack_record('FACT', _merchant_marker_faction_fid,
+                                              0, marker))
 
     print(f"  Creating vendor factions: {len(flst_by_svc)} shared service combos, "
           f"{n_chest} chest-backed merchants, 1 merchant marker faction...")
@@ -1149,10 +1160,11 @@ def _npc_trainer_params(rec: dict):
     return TES5_SKILL_ORDER.index(teaches_name), min(255, max_train)
 
 
-def create_trainer_records(by_type: dict, writer) -> None:
+def create_trainer_records(by_type: dict, writer, master_index=None) -> None:
     """Phase 0c2: trainer FACT + per-trainer CLAS clones for NPC_ trainers."""
     global _trainer_faction_fid
-    _trainer_faction_fid = 0
+    _trainer_faction_fid = (master_index.find_by_edid(
+        b'FACT', 'TES4JobTrainerFaction') if master_index is not None else 0)
     _trainer_class_by_npc.clear()
 
     clas_by_fid = {get_formid(r, 'FormID'): r for r in by_type.get('CLAS', [])
@@ -1172,12 +1184,13 @@ def create_trainer_records(by_type: dict, writer) -> None:
 
     # One faction marks every trainer; the generated Training topic is gated
     # on GetInFaction(this). Flags 0 like vanilla JobTrainerFaction.
-    _trainer_faction_fid = writer.derive_formid('FACT', 'TES4JobTrainerFaction')
-    f = pack_string_subrecord('EDID', 'TES4JobTrainerFaction')
-    f += pack_string_subrecord('FULL', 'Trainer')
-    f += pack_subrecord('DATA', struct.pack('<I', 0))
-    f += pack_subrecord('CRVA', b'\x01\x01' + b'\x00' * 18)
-    writer.add_record('FACT', pack_record('FACT', _trainer_faction_fid, 0, f))
+    if not _trainer_faction_fid:
+        _trainer_faction_fid = writer.derive_formid('FACT', 'TES4JobTrainerFaction')
+        f = pack_string_subrecord('EDID', 'TES4JobTrainerFaction')
+        f += pack_string_subrecord('FULL', 'Trainer')
+        f += pack_subrecord('DATA', struct.pack('<I', 0))
+        f += pack_subrecord('CRVA', b'\x01\x01' + b'\x00' * 18)
+        writer.add_record('FACT', pack_record('FACT', _trainer_faction_fid, 0, f))
 
     # CLAS clones, deduped per (source class, skill, cap). NPCs without a
     # resolvable class get a minimal default class carrying the trainer data.
@@ -1227,6 +1240,10 @@ def _resolve_npc_race(rec: dict):
     # Mask off load-order high byte — TES4_RACE_FID_TO_EDID uses base FormIDs
     race_edid = TES4_RACE_FID_TO_EDID.get(tes4_race_fid & 0x00FFFFFF, 'Imperial')
     skyrim_race = RACE_MAP.get(race_edid, DEFAULT_RACE)
+    from ..race_records import race_target
+    target = race_target(tes4_race_fid)
+    if target:
+        race_edid, skyrim_race = target
     tes4_flags = get_int(rec, 'ACBS.Flags')
     gender = 'Female' if (tes4_flags & 1) else 'Male'
     return race_edid, skyrim_race, gender
