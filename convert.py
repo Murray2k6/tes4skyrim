@@ -105,91 +105,8 @@ configure_multiprocessing()
 # subprocess is created; no-ops off Windows and never raises.
 create_pool_job()
 
-
-def load_config(config_path: str = None) -> dict:
-    path = Path(config_path) if config_path else SCRIPT_DIR / "conversion_config.json"
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-_CONFIG_PATH_KEYS = {"oblivion": "tes4DataPath", "skyrimse": "tes5DataPath"}
-
-
-def find_game_path(game: str, config: dict = None) -> str:
-    """Auto-detect a game's Data path.
-
-    Windows behaviour is unchanged: the registry is consulted and this is
-    normally all that's needed. Off Windows `winreg` doesn't exist, so that
-    lookup is a no-op there -- the equivalent is an explicit path in
-    conversion_config.json's tes4DataPath/tes5DataPath, checked FIRST (this
-    also lets a Windows user override a registry entry that points at the
-    wrong install). Empty/absent by default, so on Windows this changes
-    nothing.
-    """
-    if config:
-        key = _CONFIG_PATH_KEYS.get(game)
-        if key:
-            configured = config.get(key, "") or ""
-            if configured and os.path.isdir(configured):
-                return configured
-    try:
-        import winreg
-        keys = {
-            "oblivion": [
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Bethesda Softworks\Oblivion"),
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Bethesda Softworks\Oblivion"),
-            ],
-            "skyrimse": [
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Bethesda Softworks\Skyrim Special Edition"),
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Bethesda Softworks\Skyrim Special Edition"),
-            ],
-        }
-        for hkey, subkey in keys.get(game, []):
-            try:
-                with winreg.OpenKey(hkey, subkey) as key:
-                    path, _ = winreg.QueryValueEx(key, "Installed Path")
-                    data = os.path.join(path, "Data")
-                    if os.path.isdir(data):
-                        return data
-            except (FileNotFoundError, OSError):
-                continue
-    except ImportError:
-        pass  # Not on Windows
-    return ""
-
-
-def get_paths(config: dict) -> tuple:
-    """Get TES4 and TES5 data paths."""
-    tes4 = find_game_path("oblivion", config)
-    tes5 = find_game_path("skyrimse", config)
-    return tes4, tes5
-
-
-def resolve_plugin_path(file_name: str, tes4_data: str,
-                        export_dir: str = None) -> str:
-    """Absolute path to a plugin's TES4 binary.
-
-    Checked in order: a mod archive's retained binary under
-    `export/<plugin>/_source/`, any other registered Data directory (a
-    Morrowind install, say), then the Oblivion Data directory.
-
-    EVERY place that used to build `os.path.join(tes4_data, name)` must go
-    through here -- one missed call site and an imported mod half-works.
-    """
-    export_dir = export_dir or str(SCRIPT_DIR / "export")
-    try:
-        from asset_convert.sources import source_registry
-        imported = source_registry.plugin_binary(export_dir, file_name)
-        if imported:
-            return str(imported)
-        registered = source_registry.directory_for(export_dir, file_name)
-        if registered:
-            return os.path.join(registered, file_name)
-    except Exception:
-        # A broken/absent registry must never stop a normal Data-directory
-        # conversion -- that is the whole additive guarantee.
-        pass
-    return os.path.join(tes4_data or "", file_name)
+from source_paths import (find_game_path, get_paths, is_asset_only,
+                          load_config, resolve_plugin_path)
 
 
 def _mod_commands(args, export_dir: str, tes4_data: str) -> int:
@@ -336,25 +253,6 @@ def _mod_commands(args, export_dir: str, tes4_data: str) -> int:
     return 0
 
 
-def _is_asset_only(file_name: str, export_dir: str) -> bool:
-    """True for an imported mod that ships assets but NO plugin.
-
-    Texture/mesh replacers and resource packs are legitimate mods with nothing
-    to export or import (e.g. "Tamriel Landscape Pack" is one BSA of 2,018
-    meshes/textures/trees). Their asset phases run normally; the record phases
-    have no binary to read and are skipped rather than failed.
-    """
-    try:
-        from asset_convert.sources import source_registry
-        entry = source_registry.get(export_dir, file_name)
-    except Exception:
-        return False
-    if not entry:
-        return False
-    caps = entry.get('capabilities')
-    if isinstance(caps, dict) and 'plugin' in caps:
-        return not caps['plugin']
-    return not entry.get('plugin')
 
 
 def _import_ordered(sources, args, export_dir, tes4_data, mod_ingest):
@@ -1658,11 +1556,7 @@ def _run_pipeline():
         _step_ok.setdefault(step_key, {})[fn] = (
             _step_ok.get(step_key, {}).get(fn, True) and ok)
 
-    # An asset-only mod (a texture/mesh replacer imported from an archive) has
-    # no plugin binary, so the record phases have nothing to read. Drop those
-    # files from the plugin-only phases rather than letting each one fail on a
-    # missing source; their asset phases still run normally.
-    _asset_only = {fn for fn in order if _is_asset_only(fn, export_dir)}
+    _asset_only = {fn for fn in order if is_asset_only(fn, export_dir)}
     order_with_plugin = [fn for fn in order if fn not in _asset_only]
     if _asset_only:
         print(f"  Asset-only (no plugin): {', '.join(sorted(_asset_only))}")

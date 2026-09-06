@@ -35,6 +35,11 @@ def register_fallout_source(by_type: dict):
         _IS_FALLOUT_SOURCE.append(True)
 
 
+def is_fallout_source() -> bool:
+    """True when this run's source plugin is FO3/FNV."""
+    return bool(_IS_FALLOUT_SOURCE)
+
+
 def marker_substitute(name_raw: int):
     """The Skyrim invisible marker standing in for an FO3/FNV marker base."""
     if not _IS_FALLOUT_SOURCE:

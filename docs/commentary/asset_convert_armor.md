@@ -21,6 +21,24 @@ The same rule governs the body-splice fill: a fill partition takes the piece's
 primary biped slot, because an ARMA only renders partitions for slots it claims
 — a slot-44 pants ARMA culls a partition-32 fill, leaving invisible skin holes.
 
+## <a id="biped-slot-conversion"></a>Biped slots: equipment conflicts vs body coverage
+
+**Code:** `tes5_import/record_types/common.py` `_convert_biped_flags`
+
+The source record's biped flags become the TES5 BOD2 first-person flags, and
+the conversion adds **equipment-conflict** extras only: a helmet also claims
+the Circlet slot so the two cannot be worn together (`BIPED_SLOT_EXTRA`).
+
+**Body-coverage** extras are deliberately NOT added here — a cuirass covering
+the forearms goes on the ARMA via `ARMA_BODY_COVERAGE_EXTRA` instead. Putting
+coverage on the ARMO would make the ARMO occupy slots it does not equip, so it
+would conflict with every other item using them.
+
+Which table supplies the bits depends on the source game: Oblivion's 16-bit
+set uses `BIPED_SLOT_MAP`, FO3/FNV's 20-bit set `FNV_BIPED_SLOT_MAP` — they
+share only bits 0-2, see
+[tes4_export_falloutnv.md](tes4_export_falloutnv.md#fnv-biped-slots).
+
 ## Head gear is fitted by MEASUREMENT, not by a scale
 <a id="head-gear-fit"></a>
 

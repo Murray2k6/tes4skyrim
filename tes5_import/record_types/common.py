@@ -178,17 +178,17 @@ def _simple_object(rec: dict, sig: str, has_full: bool = True,
 
 
 def _convert_biped_flags(tes4_flags: int) -> int:
-    """Convert TES4 biped flags to TES5 first person flags.
+    """Convert source biped flags to TES5 first person flags.
 
-    Returns PRIMARY equip slots plus equipment-conflict extras (e.g. helmets
-    block the Circlet slot so you can't wear both simultaneously).
-    Body-coverage extras (e.g. ForeArms on a cuirass) are NOT included here —
-    they go on the ARMA (via ARMA_BODY_COVERAGE_EXTRA) so that the ARMO only
-    occupies its own equipment slot and doesn't conflict with other equipped items.
+    Returns PRIMARY equip slots plus equipment-conflict extras; the source
+    game selects the slot table.  Both imports are function-local to break
+    the cycle equipment_falloutnv -> common -> equipment_falloutnv.
+    See: docs/commentary/asset_convert_armor.md#biped-slot-conversion
     """
     from ..constants import BIPED_SLOT_MAP, BIPED_SLOT_EXTRA
+    from .equipment_falloutnv import biped_slot_map
     tes5 = 0
-    for tes4_bit, tes5_bit in BIPED_SLOT_MAP.items():
+    for tes4_bit, tes5_bit in (biped_slot_map() or BIPED_SLOT_MAP).items():
         if tes4_flags & (1 << tes4_bit):
             tes5 |= (1 << tes5_bit)
     # Apply equipment-conflict extras (e.g. helmet → also block Circlet slot)

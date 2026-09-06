@@ -39,12 +39,45 @@ python convert.py --list-mods                     # names + what each ships
 python convert.py -f "Tamriel Landscape Pack" --speedtrees-only
 ```
 
-Only the record stages (`export`/`import`/`scripts`/`creatures`) are skipped —
-there is no binary to read, so they no-op rather than fail
-(`convert.py::_is_asset_only`).
+Only the record stages (`export`/`import`/`scripts`/`creatures`) are skipped.
+There is no binary for them to read, so those files are dropped from the
+plugin-only phases up front (`source_paths.is_asset_only`) rather than left to
+fail one by one on a missing source; the asset phases still run normally.
 After `--import-mod`, the tool prints the exact command with the applicable
 flags already filled in. **Never conclude that an asset has "no plugin to
 build" because no ESP references it** — check `--list-mods` first.
+
+### <a id="plugin-source-resolution"></a>Where a plugin's binary comes from
+
+**Code:** `convert.py` `resolve_plugin_path`
+
+`-f <plugin>` names a plugin, not a path. Three sources are tried in order:
+
+1. **An imported mod's retained binary** — `export/<plugin>/_source/<plugin>`,
+   written by `mod_ingest.py` when the plugin came from a mod archive.
+2. **The registered game directory that owns it** — `source_registry`
+   records each source Data folder as `kind: "directory"` (Oblivion, Nehrim,
+   Fallout New Vegas), and `directory_for()` maps a plugin name back to its
+   own folder.
+3. **The default Data directory** (`tes4_data`), for anything unregistered.
+
+Step 2 is what lets a second or third game convert at all. Without it every
+plugin resolves against the *default* Data directory, so `-f FalloutNV.esm`
+looked for `FalloutNV.esm` inside the Oblivion folder and failed with
+"Source file not found" — even though the registry held the correct path all
+along. Nehrim worked only because its export tree already existed.
+
+A registry that is missing or broken must never break a default-directory
+conversion, so every registry lookup here is inside one `try` that falls
+through to step 3.
+
+### <a id="game-data-path-detection"></a>Detecting a game's own Data path
+
+`find_game_path` checks the **config key first** (`tes4DataPath` /
+`tes5DataPath`), then the Windows registry. Config wins deliberately: a
+non-Windows host has no `winreg` at all, and a Windows user whose registry
+entry points at the wrong install needs a way to override it. Both keys are
+empty by default, so on a normal Windows box this changes nothing.
 
 ### Unreferenced textures are dropped at PACK time, never deleted
 

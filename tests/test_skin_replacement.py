@@ -41,10 +41,10 @@ from asset_convert.character.skin_replacement import (
     is_underwear_only,
     is_torso_skin,
 )
+from asset_convert.character.head_gear import remap_bone_names
+from asset_convert.character.prn_skin import upgrade_skin_instances
 from asset_convert.nif.nif_converter import (
     walk_node,
-    upgrade_skin_instances,
-    remap_bone_names,
     OUTPUT_VERSION,
     OUTPUT_USER_VERSION,
     OUTPUT_USER_VERSION_2,

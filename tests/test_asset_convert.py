@@ -19,6 +19,8 @@ from asset_convert.nif.nif_converter import (
 )
 from asset_convert.character import wearable_plan
 from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP as BONE_MAP
+from tes5_import.record_types import world_falloutnv
+from tes5_import.record_types.common import _convert_biped_flags
 
 # Primary Oblivion NIF version (no single constant exported)
 _OBV_VERSION = 0x14000004
@@ -4799,3 +4801,36 @@ class TestFalloutBoneAliases:
         from asset_convert.character.skyrim_overrides_falloutnv import oblivion_alias_map
         assert oblivion_alias_map({'Bip01 L ForearmTwist': None}) == {}
         assert oblivion_alias_map(None) == {}
+
+
+class TestFalloutBipedSlotsAreNotOblivions:
+    """FNV biped bits share only 0-2 with Oblivion's.
+
+    See: docs/commentary/tes4_export_falloutnv.md#fnv-biped-slots
+    """
+
+    def teardown_method(self):
+        """Clear the per-plugin Fallout latch."""
+        world_falloutnv._IS_FALLOUT_SOURCE.clear()
+
+    def test_head_body_hair_agree(self):
+        """Bits 0-2 mean the same thing in both games."""
+        for bit in (0, 1, 2):
+            world_falloutnv.register_fallout_source({'TERM': [1]})
+            fnv = _convert_biped_flags(1 << bit)
+            world_falloutnv._IS_FALLOUT_SOURCE.clear()
+            assert _convert_biped_flags(1 << bit) == fnv
+
+    def test_hat_reaches_a_head_slot_not_a_weapon_slot(self):
+        """FNV bit 10 is Hat; Oblivion's table gave it no slot at all."""
+        world_falloutnv.register_fallout_source({'TERM': [1]})
+        hat = _convert_biped_flags(1 << 10)
+        assert hat & (1 << 1)
+        world_falloutnv._IS_FALLOUT_SOURCE.clear()
+        assert _convert_biped_flags(1 << 10) == 0
+
+    def test_weapon_bit_claims_no_slot(self):
+        """FNV bit 5 is Weapon, which no ARMO may occupy."""
+        world_falloutnv.register_fallout_source({'TERM': [1]})
+        assert _convert_biped_flags(1 << 5) == 0
+

@@ -211,9 +211,15 @@ Extraction used `bsa_extract.extract_bsa(bsa, 'export', source_name='FalloutNV.e
 per archive; conversion used
 `asset_pipeline.convert_meshes(source_file='FalloutNV.esm')`.
 
-FalloutNV is **not** in the source registry — its export tree was created
-directly, so `convert.py -f FalloutNV.esm --meshes-only` will not find it.
-Registering it as an asset-only mod is the missing step for a normal CLI run.
+~~FalloutNV is not in the source registry.~~ **Superseded — this was wrong.**
+FalloutNV IS registered, as a `kind: "directory"` game source alongside
+Oblivion and Nehrim, and `convert.py -f FalloutNV.esm` works. It is a source
+GAME, not an imported mod, so `--import-mod` never applied.
+
+What actually failed was `convert.py::resolve_plugin_path`, which never
+consulted `source_registry.directory_for` and so looked for `FalloutNV.esm`
+inside the *Oblivion* Data folder. Fixed; see
+[pipeline.md](../reference/pipeline.md#plugin-source-resolution).
 
 Calling `nif_converter.batch_convert` directly converts meshes but **not**
 textures; the stage entry point is `convert_meshes`. All harness scripts were

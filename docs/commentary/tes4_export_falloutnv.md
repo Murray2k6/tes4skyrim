@@ -270,3 +270,89 @@ FO3/FNV otherwise use -1 for no" "neighbour exactly as TES5 does (251,745
 occurrences). parse_triangles normalizes an out-of-range edge to -1, because
 navm_split._components indexes comp[e] directly and only guards against -1;
 an unchecked value raises IndexError and kills the whole import.
+
+## Marker base objects
+<a id="marker-base-objects"></a>
+
+**Code:** `tes5_import/record_types/world_falloutnv.py`
+
+FO3/FNV ship their editor markers as ordinary `STAT` records with real meshes
+(`MarkerX.nif`, `Marker_Audio.NIF`, `Markers\FurnitureMarker01.NIF`). The engine
+hides them by convention; Skyrim has no such rule, so they convert into fully
+visible statics scattered through every interior.
+
+`TES4_MARKER_FORMID_TO_SKYRIM` already substitutes Skyrim.esm's invisible
+markers for the ones FO3/FNV share with Oblivion -- XMarker `0x3B`,
+XMarkerHeading `0x34`, MapMarker `0x10`, NorthMarker `0x03` all keep their
+Oblivion FormIDs. Six do not, counted from `export/FalloutNV.esm/REFR.txt`:
+
+| EditorID | FormID | REFRs |
+|---|---|---:|
+| CollisionMarker | `0x21` | 2,761 |
+| RoomMarker | `0x1F` | 679 |
+| AudioMarker | `0x23` | 577 |
+| COCMarkerHeading | `0x32` | 135 |
+| RadiationMarker | `0x33` | 119 |
+| MultiBoundMarker | `0x15` | 2 |
+
+4,273 references in all, `CollisionMarker` alone accounting for two thirds and
+concentrated in interiors.
+
+🛑 **These must never be merged into the shared TES4 table.** FO3/FNV reuse the
+low FormID space Oblivion fills with real content -- measured in both
+Oblivion.esm and Nehrim.esm:
+
+| FormID | FO3/FNV | Oblivion / Nehrim |
+|---|---|---|
+| `0x15` | MultiBoundMarker | `CLOT` JailPants |
+| `0x1F` | RoomMarker | `STAT` FlameNode1 |
+| `0x21` | CollisionMarker | `STAT` FlameNode3 |
+| `0x23` | AudioMarker | `STAT` FlameNode5 |
+
+Merging the two tables would turn Oblivion's flame nodes and a pair of trousers
+invisible. The FO3/FNV table is selected per source instead.
+
+## <a id="fnv-biped-slots"></a>FNV biped slots
+
+FO3/FNV `BMDT.BipedFlags` is a **20-bit** field (`itU32`); Oblivion's is
+**16-bit** (`itU16`), and the two share only bits 0-2. From bit 3 they mean
+entirely different things, so reading FNV flags through `BIPED_SLOT_MAP`
+silently puts armor in the wrong slot rather than failing.
+
+| Bit | FNV | Oblivion | Skyrim slot chosen |
+|---:|---|---|---|
+| 3 | Left Hand | Lower Body | 33-Hands |
+| 4 | Right Hand | Hand | 33-Hands |
+| 5 | Weapon | Foot | *dropped — not a wearable slot* |
+| 6 | PipBoy | Right Ring | 34-Forearms |
+| 7 | Backpack | Left Ring | 46-Unnamed |
+| 8 | Necklace | Amulet | 35-Amulet |
+| 9 | Headband | Weapon | 42-Circlet |
+| 10 | Hat | Back Weapon | 31-Hair |
+| 11 | Eye Glasses | Side Weapon | 42-Circlet |
+| 12 | Nose Ring | Quiver | 43-Ears |
+| 13 | Earrings | Shield | 43-Ears |
+| 14 | Mask | Torch | 30-Head |
+| 15 | Choker | Tail | 35-Amulet |
+| 16-19 | Mouth Object, Body AddOn 1-3 | — | 43-Ears, 47-49 |
+
+Censused over all 393 FNV ARMO records, the bits actually authored and what
+the Oblivion table made of them:
+
+| Bit | Records | FNV meaning | Was read as |
+|---:|---:|---|---|
+| 9 | 131 | Headband | Weapon |
+| 10 | 104 | Hat | Back Weapon |
+| 14 | 57 | Mask | Torch |
+| 11 | 33 | Eye Glasses | Side Weapon |
+| 2 | 231 | Upper Body | Upper Body (correct) |
+| 1 | 87 | Hair | Hair (correct) |
+| 0 | 18 | Head | Head (correct) |
+
+So 325 of 393 head-and-face items were landing in weapon slots. Only bits
+0-2 (336 records) were ever right.
+
+Several FNV slots collapse onto one Skyrim slot because Skyrim has no
+equivalent: both hands share 33-Hands, and the four head-accessory bits
+distribute across Circlet/Ears/Head by where the item actually sits. Weapon
+(bit 5) is dropped outright — an ARMO occupying it would block the weapon.
