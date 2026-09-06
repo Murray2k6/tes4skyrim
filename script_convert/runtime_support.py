@@ -3,7 +3,6 @@
 from pathlib import Path
 import mmap
 import re
-import shutil
 
 from .cross_ref import master_names
 from .constants import papyrus_script_name
@@ -32,11 +31,9 @@ def deploy_runtime(export_dir, output_dir):
     plugins = masters + [export.name]
     directory = output / 'SKSE/Plugins'
     directory.mkdir(parents=True, exist_ok=True)
-    if not masters:
-        dll = Path(__file__).resolve().parents[1] / 'runtime/dist/TES4Runtime.dll'
-        if not dll.is_file():
-            raise FileNotFoundError('Build runtime/TES4Runtime before converting scripts')
-        shutil.copy2(dll, directory / dll.name)
+    dll = directory / 'TES4Runtime.dll'
+    if dll.is_file():
+        dll.unlink()
     rows = []
     # These signatures change to another base class during import. The
     # authored identity remains relevant to GetObjectType/GetCreatureType.
