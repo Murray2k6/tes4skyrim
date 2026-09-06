@@ -48,6 +48,62 @@ configure_multiprocessing()
 create_pool_job()
 
 
+def _supplier_asset_dirs(names, out_root, export_root, _out_root) -> list:
+    """Converted output roots holding meshes/textures a tile may need."""
+    return [_out_root(out_root, n, export_root) for n in names
+            if _out_root(out_root, n, export_root).is_dir()]
+
+
+def _supplier_overlay_dirs(names, export_root, record_dir) -> list:
+    """Each plugin's detail-overlay diffuse manifest dir, beside its meshes."""
+    return [assets_for(record_dir(export_root, n)) for n in names
+            if record_dir(export_root, n).is_dir()]
+
+
+def _plan_jobs(wanted, owners, plugins, touched, out_root, export_root,
+               _out_root, master_chain, _worldspace_fid) -> list:
+    """One (edid, owner, esm, overlays, contributors, suppliers) job per world.
+
+    `contributors` are overlaid as RECORDS and are scoped to plugins that
+    actually place something here; `suppliers` is every dependency-legal
+    plugin, because one that places nothing can still define the base objects
+    another plugin's references point at.
+    See: docs/commentary/asset_convert_terrain.md#lod-suppliers-vs-contributors
+    """
+    jobs = []
+    for edid in wanted:
+        owner = owners.get(edid)
+        if owner is None:
+            print(f"  '{edid}': no selected plugin supplies terrain for it; "
+                  f"skipping")
+            continue
+        owner_esm = _out_root(out_root, owner, export_root) / owner
+        if not owner_esm.is_file():
+            print(f"  '{edid}': {owner} has no converted ESM; skipping")
+            continue
+
+        contributors = [n for n in plugins if n != owner
+                        and owner in master_chain(n, export_root, plugins)]
+        suppliers = list(contributors)
+
+        wrld_fid = _worldspace_fid(owner_esm, edid)
+        if wrld_fid is not None:
+            scoped = [n for n in contributors
+                      if touched.get(n) is None or wrld_fid in touched[n]]
+            if len(scoped) != len(contributors):
+                skipped = [n for n in contributors if n not in scoped]
+                print(f"  '{edid}': {len(skipped)} dependent(s) place nothing "
+                      f"here, not overlaid ({', '.join(skipped)})")
+            contributors = scoped
+
+        overlays = [_out_root(out_root, n, export_root) / n
+                    for n in contributors
+                    if (_out_root(out_root, n, export_root) / n).is_file()]
+        jobs.append((edid, owner, owner_esm, overlays, contributors,
+                     suppliers))
+    return jobs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Generate every plugin's distant LOD once, into a "
@@ -177,60 +233,15 @@ def main() -> int:
     # `worldspace_owner` per worldspace re-listing every plugin each time.
     owners = owner_map(wanted, plugins, export_root, out_root)
 
-    jobs = []
-    for edid in wanted:
-        owner = owners.get(edid)
-        if owner is None:
-            print(f"  '{edid}': no selected plugin supplies terrain for it; "
-                  f"skipping")
-            continue
-        owner_esm = _out_root(out_root, owner, export_root) / owner
-        if not owner_esm.is_file():
-            print(f"  '{edid}': {owner} has no converted ESM; skipping")
-            continue
-        # Overlays: every OTHER plugin that actually depends on the owner,
-        # in load order. Records merge by FormID, so a REFR one plugin moved
-        # and another left alone resolves exactly as the engine would.
-        #
-        # The dependency gate is not optional. A plugin that does not rest on
-        # the owner cannot legally touch its worldspace, and overlaying one
-        # anyway merges two unrelated games: Nehrim.esm is standalone with its
-        # own worldspace, and stacking it onto Oblivion's TES4Tamriel would
-        # pull its FormIDs into Cyrodiil's tiles.
-        contributors = [n for n in plugins if n != owner
-                        and owner in master_chain(n, export_root, plugins)]
-
-        # ...and of those, only the ones that actually have records in THIS
-        # worldspace. The dependency gate above is about what a plugin is
-        # ALLOWED to touch; this is about what it DOES touch. Morrowind_ob.esm
-        # rests on Oblivion.esm and so passes the gate for all 18 of its
-        # worldspaces, while placing nothing in any of them — 18 parses of a
-        # 206 MB file to merge zero records.
-        #
-        # A plugin whose ESM could not be read is kept rather than dropped: the
-        # cost of an unnecessary overlay is time, the cost of a missing one is
-        # lost LOD.
-        wrld_fid = _worldspace_fid(owner_esm, edid)
-        if wrld_fid is not None:
-            scoped = [n for n in contributors
-                      if touched.get(n) is None or wrld_fid in touched[n]]
-            if len(scoped) != len(contributors):
-                skipped = [n for n in contributors if n not in scoped]
-                print(f"  '{edid}': {len(skipped)} dependent(s) place nothing "
-                      f"here, not overlaid ({', '.join(skipped)})")
-            contributors = scoped
-
-        overlays = [_out_root(out_root, n, export_root) / n
-                    for n in contributors
-                    if (_out_root(out_root, n, export_root) / n).is_file()]
-        jobs.append((edid, owner, owner_esm, overlays, contributors))
+    jobs = _plan_jobs(wanted, owners, plugins, touched, out_root, export_root,
+                      _out_root, master_chain, _worldspace_fid)
 
     if not jobs:
         print("Nothing to generate.")
         return 0
 
     print("  Plan:")
-    for edid, owner, _esm, overlays, contributors in jobs:
+    for edid, owner, _esm, overlays, contributors, _suppliers in jobs:
         print(f"    {edid}: records from {owner}, "
               f"{len(overlays)} overlay(s) on top"
               + (f" ({', '.join(contributors)})" if contributors else ""))
@@ -241,7 +252,7 @@ def main() -> int:
         return 0
 
     ok_all = True
-    for edid, owner, owner_esm, overlays, contributors in jobs:
+    for edid, owner, owner_esm, overlays, contributors, suppliers in jobs:
         print("-" * 54)
         print(f"  {edid}  (records: {owner})")
         print("-" * 54)
@@ -265,21 +276,10 @@ def main() -> int:
         if stale:
             print(f"  Cleared {stale} tile(s) from a previous run")
 
-        # Assets come from the owner AND every contributor: one tile draws
-        # objects from all of them, so a model converted into only one plugin's
-        # output still has to be findable. Scoped to this worldspace's
-        # contributors rather than every selected plugin, for the same reason
-        # the overlays are — an unrelated plugin's meshes are not in this world.
-        asset_dirs = [_out_root(out_root, n, export_root)
-                      for n in [owner] + contributors
-                      if _out_root(out_root, n, export_root).is_dir()]
-        # Where each contributor's mesh conversion left its detail-overlay
-        # diffuse manifest (build bookkeeping, so export/ not output/).
-        # The overlay manifest sits beside the SHARED meshes it describes,
-        # which for an imported mod is one level above the record dir.
-        overlay_dirs = [assets_for(record_dir(export_root, n))
-                        for n in [owner] + contributors
-                        if record_dir(export_root, n).is_dir()]
+        asset_dirs = _supplier_asset_dirs(
+            [owner] + suppliers, out_root, export_root, _out_root)
+        overlay_dirs = _supplier_overlay_dirs(
+            [owner] + suppliers, export_root, record_dir)
 
         cloud_rel = merge_cloud_bank(out_root, lod_dir, edid, owner,
                                      contributors, export_root)

@@ -416,7 +416,58 @@ def worldspaces_by_plugin_diagnosed(names: list[str], export_root: Path,
         out[name] = [edid for edid, _fid in found]
         if why:
             reasons[name] = why
+
+    _add_edited_worldspaces(names, export_root, out, reasons)
     return out, reasons
+
+
+def _add_edited_worldspaces(names, export_root: Path, out: dict,
+                            reasons: dict) -> None:
+    """Join a plugin to any ALREADY-QUALIFIED worldspace it adds cells to.
+
+    Widens who contributes to a worldspace someone else's shipped LOD already
+    qualified; it never qualifies one. Morrowind-native content ships no
+    Oblivion-format LOD and so contributed nothing to a grid it fills.
+    See: docs/commentary/asset_convert_terrain.md#lod-for-plugins-that-only-edit
+    """
+    qualified = {edid for edids in out.values() for edid in edids}
+    if not qualified:
+        return
+    for name in names:
+        missing = qualified.difference(out.get(name, ()))
+        if not missing:
+            continue
+        edited = _edited_worldspace_edids(record_dir(export_root, name))
+        joined = [edid for edid in missing if edid in edited]
+        if joined:
+            out.setdefault(name, []).extend(joined)
+            reasons.pop(name, None)
+
+
+def _edited_worldspace_edids(export_dir: Path) -> frozenset:
+    """EDIDs of every worldspace this export puts EXTERIOR cells in.
+
+    Read from the CELL dump's ParentWRLD, not the converted ESM: this runs
+    before the bake, for plugins that may not be converted yet.
+    """
+    from asset_convert.lod.terrain_lod import worldspace_edids
+    cell_txt = Path(export_dir) / 'CELL.txt'
+    if not cell_txt.is_file():
+        return frozenset()
+    edid_by_fid = worldspace_edids(Path(export_dir))
+    found = set()
+    for line in cell_txt.read_text(encoding='utf-8',
+                                   errors='replace').splitlines():
+        if not line.startswith('ParentWRLD='):
+            continue
+        try:
+            fid = int(line[11:].strip(), 16)
+        except ValueError:
+            continue
+        edid = edid_by_fid.get(fid)
+        if edid:
+            found.add(edid)
+    return frozenset(found)
 
 
 def lod_worldspaces(names: list[str], export_root: Path,

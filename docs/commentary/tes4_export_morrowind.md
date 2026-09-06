@@ -287,6 +287,26 @@ layers. Census of vanilla Skyrim's 15,564 LAND records: 31 (5,887), 25
 `0x008` set**. We now write **29** (`0x1D`), the vanilla value that carries
 everything we emit and omits only the colours bit.
 
+### <a id="vtex-is-offset-one-column"></a>VTEX is applied one column east of where it is stored
+
+**Code:** `morrowind_land.shift_textures`, `export_morrowind.land_records`.
+
+Morrowind does not draw VTEX entry `[y][x]` on the x-th column of ground. The
+engine applies it one column to the east: ground column x shows entry `x-1`,
+and column 0 shows the WEST neighbour's entry 15. OpenMW reproduces this in
+`components/esmterrain/gridsampling.hpp` (`sampleBlendmaps`: `minRow = ... - 1`,
+then `--minCellX; minRow += textureSize` when it goes negative) and, in its
+older `Storage::getVtexIndexAt`, as a bare `--x` before the neighbour-cell
+wrap. Only the X axis shifts; Y is stored where it is drawn.
+
+Exporting the grid unshifted moved every texture 256 units east of where
+Morrowind draws it, and the west 1/16 of every cell showed the texture the
+neighbour owns — the reported "bad blending between cells". The exporter now
+walks every LAND once to index the grids by cell, then shifts each grid with
+its west neighbour's column 15. When the west LAND is not in the plugin (the
+border with a master's terrain) the cell's own column 0 stands in, which is
+the one strip that stays approximate.
+
 ### LTEX ICON is relative to Textures\\, not Textures\\Landscape\\
 
 `convert_LTEX` unconditionally prepended `landscape\` because an Oblivion LTEX
@@ -437,6 +457,28 @@ states for every other generated record.
 
 The patch is generated only in Morroblivion mode. With all masters converted
 the index is complete, no gap exists, and no patch is written.
+
+### Textures are extracted WHOLESALE, meshes are not
+
+Meshes are pulled per gap record; textures cannot be, and the difference is not
+symmetry that was overlooked.
+
+Morroblivion reorganizes its texture tree wholesale: of the **4,385** textures
+in `Morrowind.bsa` + `Bloodmoon.bsa`, **zero** share an archive path with one
+Morroblivion ships (17,173). So "only what Morroblivion lacks" excludes
+nothing, and the cheap filter is pure cost.
+
+The filter was also wrong. Textures used to be derived from the meshes the
+patch had just extracted, which silently assumed every mesh referencing a
+vanilla texture is itself a gap record. Third-party Morrowind content breaks
+that: Tamriel Data and Tamriel Rebuilt ship their OWN meshes and reference
+vanilla texture names from them. Those meshes are not gap records, so their
+textures were never extracted and rendered **purple** in game -- measured at
+**2,438** references from converted meshes resolving to a texture present only
+in `export/Morrowind.esm`, plus 308 only in Bloodmoon.
+
+`_extract_textures` therefore writes every `textures\` entry of the vanilla
+BSAs, with no reference to what any record or mesh names.
 
 ## <a id="tes4-vocabulary"></a>Every exporter speaks the TES4 KEY vocabulary
 

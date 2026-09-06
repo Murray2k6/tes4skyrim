@@ -17,13 +17,19 @@ any other missing master.
 Only the assets those records name are extracted, so the patch ships the ~10%
 of Morrowind's tree Morroblivion is missing rather than all of it.
 
+`build_patch` runs that whole pass when the user asks for a build; the rest
+answers where the patch is and what it supplies.
+
 See: docs/commentary/tes4_export_morrowind.md#morroblivion-gap-patch
 """
 
 import hashlib
 import os
-import re
+import time
 
+from asset_convert.sources.bsa_extract_morrowind import (is_morrowind_bsa,
+                                                         iter_bsa)
+from asset_convert.sources.source_registry import asset_root
 from output_layout import record_dir
 
 from .morrowind_ids import BASE_TYPES, IdIndex, load_index
@@ -156,25 +162,138 @@ def _add_asset(wanted: set, rec, sig: str, subtree: str,
     wanted.add('%s%s%s' % (subtree, chr(92), path.lstrip(chr(92))))
 
 
-#: A texture path as a NIF stores it: printable ASCII ending in an image suffix.
-_NIF_TEXTURE = re.compile(rb'[ -~]{3,120}\.(?:dds|tga|bmp)', re.IGNORECASE)
+def build_patch(data_dir: str, export_dir: str, morroblivion_exports,
+                progress=print) -> dict:
+    """Build the shared patch from a Morrowind Data folder; report what it made.
 
-
-def nif_textures(nif_path: str) -> set:
-    """Every texture an extracted NIF names, as an archive path under textures.
-
-    Scanned rather than parsed: a texture path is a plain string in the block
-    data, so the whole tree costs one pass per file instead of a full NIF
-    parse. Looked up as .dds, which is what the archives ship.
+    `morroblivion_exports` are the converted Morroblivion plugins whose records
+    define the gap: anything they already supply is not filled.
     """
+    start = time.time()
+    esms, missing = source_paths(data_dir, PATCH_SOURCES)
+    if missing:
+        return {'ok': False, 'error': _missing_message(data_dir, missing)}
+    if not morroblivion_exports:
+        return {'ok': False, 'error': _no_morroblivion_message()}
+
+    progress(f'Indexing {len(morroblivion_exports)} converted Morroblivion '
+             f'plugin(s)...')
+    index = supplied_index(export_dir, morroblivion_exports)
+    progress(f'  {len(index)} objects already supplied')
+
+    progress(f'Scanning {len(esms)} vanilla master(s) for gaps...')
+    gaps = collect_gap_records(esms, index)
+    progress(f'  {len(gaps)} base records Morroblivion does not supply')
+    if not gaps:
+        return {'ok': True, 'records': 0, 'assets': 0, 'output': '',
+                'seconds': time.time() - start}
+
+    out_dir = _write_records(gaps, export_dir, progress)
+    assets = _extract_assets(gaps.values(), data_dir, export_dir, progress)
+    _convert_assets(export_dir, progress)
+    return {'ok': True, 'records': len(gaps), 'assets': assets,
+            'output': out_dir, 'seconds': time.time() - start}
+
+
+def _convert_assets(export_dir: str, progress) -> None:
+    """Convert the extracted patch assets into `output/`.
+
+    Building the patch is ONE user action, so it has to leave installable
+    files behind. Extraction alone populates `export/` only, and every texture
+    it pulled stayed invisible to the game until an unrelated stage happened
+    to run.
+    """
+    from asset_convert.asset_pipeline import convert_meshes
+    progress('  Converting patch assets to output')
     try:
-        data = open(nif_path, 'rb').read()
-    except OSError:
-        return set()
-    found = set()
-    for raw in _NIF_TEXTURE.findall(data):
-        name = raw.decode('cp1252', errors='replace')
-        name = as_dds(name.replace('/', chr(92)).strip().lower())
-        if name:
-            found.add('textures' + chr(92) + name.lstrip(chr(92)))
-    return found
+        stats = convert_meshes(PATCH_NAME, extract_dir=export_dir)
+    except Exception as exc:
+        progress(f'  Asset conversion FAILED: {exc}')
+        return
+    mesh = stats.get('mesh_conversion') or {}
+    progress(f"  Converted {mesh.get('converted', 0)} meshes, "
+             f"{stats.get('textures_copied', 0)} textures")
+
+
+def _write_records(gaps: dict, export_dir: str, progress) -> str:
+    """Export every gap record under its shared derived FormID.
+
+    Imported inside the function to break the cycle with `export_morrowind`,
+    which needs PATCH_NAME from this module at its own import time.
+    """
+    from .export_morrowind import (MorrowindContext, export_record,
+                                   write_export, write_header)
+    from .record_types.morrowind import tes4_signature
+
+    ids = {key: patch_formid(key) for key in gaps}
+    ctx = MorrowindContext(own_index=0)
+    for key, rec in gaps.items():
+        signature = tes4_signature(rec)
+        ctx.register_own(rec.record_id, signature)
+        ctx.gap_ids[(signature, key[1])] = ids[key]
+    out = {}
+    for key, rec in sorted(gaps.items()):
+        lines = export_record(rec, ctx)
+        if lines:
+            out.setdefault(tes4_signature(rec), []).append((ids[key], lines))
+    out_dir = patch_dir(export_dir)
+    counts = write_export(out, out_dir)
+    write_header(out_dir, [], sum(counts.values()),
+                 'Objects Morroblivion does not convert')
+    progress(f'  Wrote {sum(counts.values())} records to {out_dir}')
+    return out_dir
+
+
+def _extract_assets(records, data_dir: str, export_dir: str,
+                    progress) -> int:
+    """Extract the meshes the gap records name, plus EVERY vanilla texture.
+
+    Meshes come per record; textures cannot, because third-party content
+    references vanilla names from meshes that are not gap records. Both are
+    taken in ONE pass per archive: `iter_bsa` holds the whole BSA in memory
+    (Morrowind.bsa is ~800 MB), so walking it twice ran out of it.
+    See: docs/commentary/tes4_export_morrowind.md#morroblivion-gap-patch
+    """
+    asset_dir = asset_root(export_dir, PATCH_NAME)
+    wanted = gap_assets(records)
+    progress(f'  {len(wanted)} meshes named; extracting those and all textures')
+    written = 0
+    for name in PATCH_ARCHIVES:
+        path = os.path.join(data_dir, name)
+        if os.path.isfile(path) and is_morrowind_bsa(path):
+            written += _extract_one(path, wanted, asset_dir)
+    progress(f'  Extracted {written} files')
+    return written
+
+
+def _extract_one(bsa_path: str, wanted: set, asset_dir) -> int:
+    """Write every entry of one BSA `wanted` names OR that is a texture."""
+    prefix = 'textures' + chr(92)
+    written = 0
+    for name, data in iter_bsa(bsa_path):
+        key = name.replace('/', chr(92)).strip().lower()
+        if key not in wanted and not key.startswith(prefix):
+            continue
+        dest = asset_dir / key
+        if dest.exists():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        written += 1
+    return written
+
+
+def _missing_message(data_dir: str, missing: list) -> str:
+    """The refusal naming each vanilla master the chosen folder lacks."""
+    lines = ['That folder is not a Morrowind Data Files directory.', '',
+             f'Looked in: {data_dir or "(nothing chosen)"}', '', 'Missing:']
+    lines += [f'  {name}' for name in missing]
+    return '\n'.join(lines)
+
+
+def _no_morroblivion_message() -> str:
+    """The refusal when nothing defines what the gap actually is."""
+    return ('No converted Morroblivion plugin was found.\n\n'
+            'The patch holds what Morroblivion does NOT supply, so '
+            'Morroblivion has to be converted first:\n\n'
+            '  python convert.py -f Morrowind_ob.esm')

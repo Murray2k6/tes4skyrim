@@ -375,7 +375,7 @@ def lod_capable_worldspaces(export_dir: Path, out_root: Path = None,
                 f"on its parent's LOD grid).")
 
 
-def _worldspace_edids(export_dir):
+def worldspace_edids(export_dir):
     """{FormID: EditorID} from this export's WRLD.txt and every master's.
 
     Masters are scanned too, and resolved through the registry rather than as
@@ -444,7 +444,7 @@ def shipped_lod_worldspaces(export_dir: Path):
     if not counts and not by_edid:
         return []
 
-    edid_by_fid = _worldspace_edids(export_dir)
+    edid_by_fid = worldspace_edids(export_dir)
 
     # The importer renames Oblivion's 'Tamriel' worldspace to 'TES4Tamriel'
     # (tes5_import/record_types/world.py) so it doesn't override Skyrim's

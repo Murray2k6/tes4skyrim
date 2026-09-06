@@ -322,6 +322,22 @@ def test_terrain_carries_texture_layers(morrowind_records):
     assert layered > 0.9 * len(out['LAND']), 'most terrain must be textured'
 
 
+def test_vtex_grid_shifts_one_column_east_borrowing_from_the_west_cell():
+    """Ground column x shows VTEX column x-1; column 0 is the west cell's 15.
+
+    See: docs/commentary/tes4_export_morrowind.md#vtex-is-offset-one-column
+    """
+    n = land.TES3_TEX_SIZE
+    own = [y * 100 + x for y in range(n) for x in range(n)]
+    west = [9000 + y for y in range(n) for _x in range(n)]
+    shifted = land.shift_textures(own, west)
+    for y in range(n):
+        assert shifted[y * n] == 9000 + y
+        assert shifted[y * n + 1:(y + 1) * n] == own[y * n:(y + 1) * n - 1]
+    alone = land.shift_textures(own, None)
+    assert [alone[y * n] for y in range(n)] == [own[y * n] for y in range(n)]
+
+
 def test_landscape_icon_only_prefixes_a_bare_name():
     """Morrowind ships terrain textures flat; Oblivion under Landscape\\.
 

@@ -18,7 +18,8 @@ from tes4_export.export_morrowind import (MORROWIND_SOURCE_KEY,
                                           SOURCE_MORROBLIVION, SOURCE_VANILLA,
                                           morroblivion_exports)
 from tes4_export.morrowind_patch import (PATCH_NAME, PATCH_SOURCES,
-                                         patch_exists, source_paths)
+                                         build_patch, patch_exists,
+                                         source_paths)
 
 #: Source set -> its menu label, in menu order.
 _LABELS = (
@@ -95,8 +96,6 @@ def build_patch_dialog(parent, export_dir: str) -> None:
 def _run_build_window(parent, data_dir: str, export_dir: str,
                       exports: list) -> None:
     """Run the build on a worker thread, streaming progress into a window."""
-    from tes4_export.morrowind_patch_build import build_patch
-
     win = tk.Toplevel(parent)
     win.title("Building compatibility patch")
     win.geometry("620x300")

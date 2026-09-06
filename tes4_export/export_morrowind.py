@@ -27,7 +27,8 @@ from .morrowind_ids import (IdIndex, exterior_key, interior_key, land_key,
 from .morrowind_patch import PATCH_NAME
 from .morrowind_land import (TES4_TEX_SIZE, decode_heights, decode_textures,
                              encode_heights, layer_lines, ltex_index,
-                             quadrant_normals, quadrant_textures)
+                             quadrant_normals, quadrant_textures,
+                             shift_textures)
 from .morrowind_world import (TES4_CELL_SIZE, WORLDSPACE_EDID, cell_editor_id,
                               cell_grid, tes3_cell_quadrants)
 from .record_types.morrowind import (MORROWIND_ITEM_EXPORTERS, emit_ref,
@@ -120,6 +121,7 @@ class MorrowindContext:
         self.sound_gens = {}
         self.gap_ids = {}
         self.unlinked_doors = 0
+        self.vtex_by_cell = {}
 
     def register_ltex(self, index: int, form_id: str) -> None:
         """Note the FormID a LAND's VTEX index resolves to."""
@@ -491,6 +493,7 @@ def convert_plugin(records, ctx: MorrowindContext) -> dict:
         if rec.type in EXPORTERS and not rec.deleted:
             ctx.register_own(rec.record_id, tes4_signature(rec))
     _register_land_textures(records, ctx)
+    _register_land_grids(records, ctx)
     register_sound_gens(records, ctx)
 
     out = {sig: [] for sig in ('CELL', 'REFR', 'ACHR', 'ACRE', 'LAND')}
@@ -529,6 +532,25 @@ def _register_land_textures(records, ctx: MorrowindContext) -> None:
             continue
         ctx.register_ltex(struct.unpack_from('<I', intv.data, 0)[0],
                           ctx.resolve(rec.record_id, 'LTEX'))
+
+
+def _register_land_grids(records, ctx: MorrowindContext) -> None:
+    """Index every LAND's decoded VTEX grid by cell, before any is written.
+
+    A cell's west strip of ground shows its WEST neighbour's textures, so a
+    LAND cannot be exported until the grid beside it is known.
+    See: docs/commentary/tes4_export_morrowind.md#vtex-is-offset-one-column
+    """
+    for rec in records:
+        if rec.type != 'LAND' or rec.deleted:
+            continue
+        intv = get_subrecord(rec, 'INTV')
+        vtex = get_subrecord(rec, 'VTEX')
+        if intv is None or len(intv.data) < 8 or vtex is None:
+            continue
+        grid = decode_textures(vtex.data)
+        if grid:
+            ctx.vtex_by_cell[struct.unpack_from('<ii', intv.data, 0)] = grid
 
 
 def worldspace_record(ctx: MorrowindContext) -> list:
@@ -648,8 +670,10 @@ def land_records(rec, ctx: MorrowindContext) -> list:
     heights = decode_heights(vhgt.data)
     vnml = get_subrecord(rec, 'VNML')
     normals = vnml.data if vnml else b''
-    vtex = get_subrecord(rec, 'VTEX')
-    textures = decode_textures(vtex.data) if vtex else []
+    textures = ctx.vtex_by_cell.get((cell_x, cell_y), [])
+    if textures:
+        textures = shift_textures(
+            textures, ctx.vtex_by_cell.get((cell_x - 1, cell_y)))
 
     out = []
     for quad in ((0, 0), (1, 0), (0, 1), (1, 1)):

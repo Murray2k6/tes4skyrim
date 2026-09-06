@@ -32,6 +32,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
+from subprocess_flags import run_streamed
+
 MASTER = 'master'
 
 
@@ -45,25 +47,6 @@ def git(*args, check=False):
     """Run a git command in the repo root, capturing its output."""
     return subprocess.run(['git', *args], cwd=repo_root(), check=check,
                           capture_output=True, text=True)
-
-
-def git_streamed(*args):
-    """Run git with output shown live AND kept.  (returncode, combined text).
-
-    A failing step must be able to explain itself.  Letting git write straight
-    to the terminal loses its message as soon as anything else prints -- the
-    pre-push hook emits ~40 lines while publishing -- so a generic "FAILED"
-    then replaces the only evidence of the cause.
-    """
-    proc = subprocess.Popen(['git', *args], cwd=repo_root(),
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
-    lines = []
-    for line in proc.stdout:
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        lines.append(line)
-    return proc.wait(), ''.join(lines)
 
 
 def pushed_ok() -> bool:
@@ -144,7 +127,7 @@ def do_merge(branch: str, sample: int, dry_run: bool) -> int:
         print('\n$ git %s' % ' '.join(args))
         if dry_run:
             continue
-        rc, output = git_streamed(*args)
+        output, rc = run_streamed(['git', *args], cwd=repo_root())
         if rc == 0:
             continue
         if args[0] == 'push' and pushed_ok():

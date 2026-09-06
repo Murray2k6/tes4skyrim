@@ -19,7 +19,7 @@ from tes4_export.record_types.morrowind import (export_ARMO, export_DOOR,
                                                 tes4_signature)
 from tes4_export.record_types.morrowind_actors import export_LEVI, export_NPC_
 from tes4_export.record_types.morrowind_scripts import export_SCPT
-from tes4_export.morrowind_patch import PATCH_NAME, patch_formid
+from tes4_export.morrowind_patch import PATCH_NAME, build_patch, patch_formid
 
 #: Struct layouts of the fixed subrecords the tests author.
 _WPDT = '<fihHffH6Bi'
@@ -391,8 +391,6 @@ def test_gap_patch_holds_what_morroblivion_lacks(tmp_path):
     a rival copy.
     See: docs/commentary/tes4_export_morrowind.md#morroblivion-gap-patch
     """
-    from tes4_export.morrowind_patch_build import build_patch
-
     export = tmp_path / 'export'
     export.mkdir()
     data = tmp_path / 'Data Files'

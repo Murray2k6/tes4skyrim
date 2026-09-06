@@ -766,8 +766,8 @@ def generate_missing_far_nifs(stats: dict, output_meshes_dir: Path,
 
     Returns the number of _far.nif files successfully created.
     """
-    from asset_convert.lod.lod_gen import (FLAG_DISTANT_LOD, FLAG_WORLD_MAP, far_nif_path,
-                          LOD8_MIN_SIZE, obnd_max_dim)
+    from asset_convert.lod.lod_gen import (FLAG_DISTANT_LOD, far_nif_path,
+                                           LOD8_MIN_SIZE, obnd_max_dim)
     import multiprocessing as mp
 
     if workers is None:
@@ -779,8 +779,7 @@ def generate_missing_far_nifs(stats: dict, output_meshes_dir: Path,
     seen: set = set()
 
     for stat in stats.values():
-        flags = stat.get('flags', 0)
-        if not (flags & (FLAG_DISTANT_LOD | FLAG_WORLD_MAP)):
+        if not (stat.get('flags', 0) & FLAG_DISTANT_LOD):
             continue
         model = stat.get('model', '')
         if not model or model in seen:
@@ -810,10 +809,7 @@ def generate_missing_far_nifs(stats: dict, output_meshes_dir: Path,
         if not src.exists() and not tree:
             continue  # source doesn't exist yet
 
-        # Which far-ring tiers does this object need?  (Trees reuse their
-        # billboard at every level, so they never need tier meshes.)
-        need8  = (not tree) and obnd_max_dim(stat) >= LOD8_MIN_SIZE
-        need16 = (not tree) and bool(flags & FLAG_WORLD_MAP)
+        need8 = need16 = (not tree) and obnd_max_dim(stat) >= LOD8_MIN_SIZE
 
         tasks.append((src, dst, tree, stat.get('obnd'), rel, tex_root,
                       need8, need16))

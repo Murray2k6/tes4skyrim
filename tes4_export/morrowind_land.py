@@ -139,6 +139,23 @@ def decode_textures(vtex: bytes) -> list:
     return out
 
 
+def shift_textures(textures: list, west: list) -> list:
+    """The 16x16 VTEX grid as the engine APPLIES it: one column east.
+
+    Ground column x shows VTEX column x-1; column 0 shows the WEST neighbour's
+    column 15, or this cell's own column 0 when that LAND is not in the plugin.
+    See: docs/commentary/tes4_export_morrowind.md#vtex-is-offset-one-column
+    """
+    n = TES3_TEX_SIZE
+    out = list(textures)
+    for y in range(n):
+        row = y * n
+        out[row + 1:row + n] = textures[row:row + n - 1]
+        if west:
+            out[row] = west[row + n - 1]
+    return out
+
+
 def ltex_index(vtex_value: int):
     """The LTEX index a VTEX entry names, or None for the default texture.
 
