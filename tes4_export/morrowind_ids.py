@@ -37,7 +37,14 @@ _RECORD_BEGIN = '---RECORD_BEGIN---'
 _RECORD_END = '---RECORD_END---'
 
 #: Lines the scan keeps from each record.
-_INDEXED_KEYS = ('FormID', 'EditorID', 'XCLC.X', 'XCLC.Y', 'ParentCELL')
+_INDEXED_KEYS = ('FormID', 'EditorID', 'XCLC.X', 'XCLC.Y', 'ParentCELL',
+                 'ParentWRLD', 'RecordFlags')
+
+#: CELL RecordFlags bit marking a worldspace's persistent-reference cell.
+_PERSISTENT_FLAG = 0x400
+
+#: Lines `load_master_doors` keeps from each REFR.
+_DOOR_KEYS = ('FormID', 'ParentCELL', 'PosX', 'PosY', 'PosZ', 'XTEL.Door')
 
 
 def encode_editor_id(record_id: str) -> str:
@@ -62,6 +69,11 @@ def exterior_key(grid: tuple) -> str:
 def land_key(cell_form_id: str) -> str:
     """The index key of the LAND under one exterior cell."""
     return 'land:' + cell_form_id.upper()
+
+
+def persistent_key(wrld_form_id: str) -> str:
+    """The index key of one worldspace's persistent-reference cell."""
+    return 'persistent:' + wrld_form_id.upper()
 
 
 class IdIndex:
@@ -130,6 +142,13 @@ class IdIndex:
         """The FormID of a master's exterior cell at this TES4 grid."""
         return self._by_key.get(exterior_key(grid))
 
+    def lookup_persistent(self, wrld_form_id: str):
+        """The FormID of a master's persistent cell for this worldspace.
+
+        See: docs/commentary/tes4_export_morrowind.md#teleport-doors
+        """
+        return self._by_key.get(persistent_key(wrld_form_id))
+
     def form_ids(self):
         """Every FormID this index hands out, so derivation can avoid them."""
         return self._by_key.values()
@@ -162,6 +181,45 @@ def load_index(export_dir: str, types=BASE_TYPES, remap: dict = None) -> IdIndex
     return index
 
 
+def load_master_doors(export_dir: str, remap: dict = None) -> dict:
+    """Parent cell FormID -> [(door REFR FormID, position), ...] from a master.
+
+    A dependent plugin's load door usually arrives in a cell the MASTER owns,
+    so its partner door is the master's and is invisible to a scan of this
+    plugin's own placements.
+    See: docs/commentary/tes4_export_morrowind.md#teleport-doors
+    """
+    doors = {}
+    path = os.path.join(export_dir or '', 'REFR.txt')
+    if not os.path.isfile(path):
+        return doors
+    fields = {}
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            if line.startswith(_RECORD_BEGIN):
+                fields = {}
+            elif line.startswith(_RECORD_END):
+                _add_door(fields, doors, remap)
+            else:
+                _keep_field(fields, line, _DOOR_KEYS)
+    return doors
+
+
+def _add_door(fields: dict, doors: dict, remap) -> None:
+    """Record one master REFR as a partner candidate when it teleports."""
+    if 'XTEL.Door' not in fields:
+        return
+    form_id = remap_form_id(fields.get('FormID', ''), remap)
+    parent = remap_form_id(fields.get('ParentCELL', ''), remap)
+    if not form_id or not parent:
+        return
+    try:
+        pos = tuple(float(fields[k]) for k in ('PosX', 'PosY', 'PosZ'))
+    except (KeyError, ValueError):
+        return
+    doors.setdefault(parent, []).append((form_id, pos))
+
+
 def remap_form_id(form_id: str, remap: dict):
     """`form_id` re-keyed through `remap`, or None when unreachable."""
     try:
@@ -189,11 +247,28 @@ def _index_file(path: str, index: IdIndex, signature: str, remap) -> None:
                 _keep_field(fields, line)
 
 
-def _keep_field(fields: dict, line: str) -> None:
-    """Store `line`'s value when it is one of the id lines the scan keeps."""
+def _keep_field(fields: dict, line: str, keys=_INDEXED_KEYS) -> None:
+    """Store `line`'s value when its key is one the scan keeps."""
     key, sep, value = line.partition('=')
-    if sep and key in _INDEXED_KEYS:
+    if sep and key in keys:
         fields[key] = value.strip()
+
+
+def _add_cell(fields: dict, form_id: str, index: IdIndex, remap) -> None:
+    """Index one exterior CELL, by worldspace when it is the persistent one.
+
+    A persistent cell carries XCLC too -- almost always (0, 0) -- so keying on
+    the grid alone files it as the real cell at that square and leaves nothing
+    a dependent plugin can reuse.
+    See: docs/commentary/tes4_export_morrowind.md#teleport-doors
+    """
+    if int(fields.get('RecordFlags', '0')) & _PERSISTENT_FLAG:
+        wrld = remap_form_id(fields.get('ParentWRLD', ''), remap)
+        if wrld:
+            index.add(persistent_key(wrld), form_id, 'CELL')
+        return
+    grid = (int(fields['XCLC.X']), int(fields['XCLC.Y']))
+    index.add(exterior_key(grid), form_id, 'CELL')
 
 
 def _add_record(fields: dict, index: IdIndex, signature: str, remap) -> None:
@@ -207,8 +282,7 @@ def _add_record(fields: dict, index: IdIndex, signature: str, remap) -> None:
             index.add(land_key(parent), form_id, signature)
         return
     if signature == 'CELL' and 'XCLC.X' in fields:
-        grid = (int(fields['XCLC.X']), int(fields['XCLC.Y']))
-        index.add(exterior_key(grid), form_id, signature)
+        _add_cell(fields, form_id, index, remap)
         return
     edid = fields.get('EditorID')
     if not edid:

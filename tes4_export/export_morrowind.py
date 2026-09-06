@@ -23,6 +23,7 @@ from plugin_masters import masters_from_export_header
 
 from .morrowind_cell import parse_cell
 from .morrowind_ids import (IdIndex, exterior_key, interior_key, land_key,
+                            load_master_doors, persistent_key,
                             load_index, marker_formid)
 from .morrowind_patch import PATCH_NAME
 from .morrowind_land import (TES4_TEX_SIZE, decode_heights, decode_textures,
@@ -158,11 +159,16 @@ class MorrowindContext:
         return form_id
 
     def persistent_cell_id(self) -> str:
-        """The FormID of the worldspace's dummy cell for persistent refs.
+        """The dummy cell for persistent refs: a master's own, else ours.
 
         See: docs/commentary/tes4_export_morrowind.md#teleport-doors
         """
-        return self.derive('cell:persistent:' + WORLDSPACE_EDID)
+        return (self.index.lookup_persistent(self.worldspace_id())
+                or self.derive(persistent_key(WORLDSPACE_EDID)))
+
+    def owns_persistent_cell(self) -> bool:
+        """Whether this plugin has to define the persistent cell itself."""
+        return self.index.lookup_persistent(self.worldspace_id()) is None
 
     def interior_cell_id(self, name: str) -> str:
         """The FormID for an interior cell: a master's, else keyed on the name."""
@@ -325,6 +331,7 @@ def load_context(export_root: str, masters=()) -> MorrowindContext:
              for _n, p in masters]
     slot_of = {n.lower(): i for i, n in enumerate(_master_list(masters))}
     index = IdIndex()
+    master_doors = []
     for slot, path in enumerate(paths):
         own = masters_from_export_header(path)
         remap = {len(own): slot}
@@ -333,7 +340,11 @@ def load_context(export_root: str, masters=()) -> MorrowindContext:
             if target is not None:
                 remap[k] = target
         index.merge(load_index(path, remap=remap))
+        master_doors.append(load_master_doors(path, remap))
     ctx = MorrowindContext(index, own_index=len(paths))
+    for doors in master_doors:
+        for cell, entries in doors.items():
+            ctx.doors_by_cell.setdefault(cell, []).extend(entries)
     ctx.master_bounds = _master_world_bounds(paths)
     return ctx
 
@@ -867,7 +878,7 @@ def persistent_cell_record(ctx: MorrowindContext) -> list:
     See: docs/commentary/tes4_export_morrowind.md#teleport-doors
     """
     form_id = ctx.persistent_cell_id()
-    if not ctx.rehomed_persistent:
+    if not ctx.rehomed_persistent or not ctx.owns_persistent_cell():
         return []
     return [(form_id,
              [f'EditorID={WORLDSPACE_EDID}Persistent', 'DATA.Flags=2',
@@ -879,10 +890,8 @@ def _partner_door(ctx: MorrowindContext, cell: str, pos: tuple,
                   door_id: str) -> str:
     """The door reference standing at `pos` in `cell`, or '' if none is near.
 
-    Morrowind authors a load door as a PAIR: the DODT position is where the
-    destination cell's own door back again stands, so the partner is authored
-    data rather than something to synthesise. All 3,127 of Morrowind.esm's
-    teleport doors have one within 1,024 units, 2,946 of them within 256.
+    Candidates are this plugin's placements AND its masters', since a
+    dependent plugin's door usually arrives in a cell the master owns.
     See: docs/commentary/tes4_export_morrowind.md#teleport-doors
     """
     best, best_dist = '', _PARTNER_RADIUS
