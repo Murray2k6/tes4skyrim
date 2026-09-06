@@ -517,7 +517,7 @@ every downstream stage sees the same shape of input it always has.
 - Diagnostics: `tools/nif/skin_partition_dump.py <nif>` (per-shape/partition
   bone/vert/tri counts, flags >80-bone shapes + index-range problems).
 
-## PRN-attached rigid pieces take no FK compensation
+## <a id="prn-attached-rigid-pieces"></a>PRN-attached rigid pieces take no FK compensation
 <a id="prn-rigid-piece-offsets"></a>
 
 PRN-attached rigid pieces (no real skin in the Oblivion NIF; rigid-skinned

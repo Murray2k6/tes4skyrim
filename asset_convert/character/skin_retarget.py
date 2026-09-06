@@ -57,9 +57,13 @@ from asset_convert.character.skyrim_overrides import (
 # ---------------------------------------------------------------------------
 # Skeleton data paths and cache
 # ---------------------------------------------------------------------------
+from asset_convert.character.skyrim_overrides_falloutnv import (
+    FALLOUT_SKELETON_MARKERS, bone_map_for, is_fallout_skeleton)
+
 _GENERATED_DIR = paths.GENERATED
 
 SKEL_OBLIVION = _GENERATED_DIR / 'skeleton_bones_oblivion.json'
+SKEL_FALLOUT = _GENERATED_DIR / 'skeleton_bones_falloutnv.json'
 SKEL_SKYRIM_MALE = _GENERATED_DIR / 'skeleton_bones_skyrim_male.json'
 SKEL_SKYRIM_FEMALE = _GENERATED_DIR / 'skeleton_bones_skyrim_female.json'
 _skel_cache: dict[str, dict[str, np.ndarray]] = {}
@@ -89,11 +93,34 @@ def load_skeleton_from_nif(json_path: Path) -> dict[str, np.ndarray]:
     return load_skeleton(json_path)
 
 
+def _source_skeleton(data) -> dict:
+    """The skeleton matching the bones this NIF actually names.
+
+    A mesh weighted to an FO3-only bone needs the FO3 bind pose; anything
+    else is Oblivion.  Decided by AUTHORED bone names, never a plugin name.
+    See: docs/commentary/asset_convert_falloutnv.md#selected-by-authored-bone-names
+    """
+    for root in data.roots:
+        if root is None:
+            continue
+        for block in root.tree():
+            name = getattr(block, 'name', None)
+            if not name:
+                continue
+            if bytes(name).rstrip(b'\x00').decode(
+                    'latin-1', 'replace') in FALLOUT_SKELETON_MARKERS:
+                return load_skeleton(SKEL_FALLOUT) or load_skeleton(SKEL_OBLIVION)
+    return load_skeleton(SKEL_OBLIVION)
+
+
 def build_bone_mapping(ob_skel: dict, sk_skel: dict) -> dict[str, str]:
-    """Build {ob_name: sk_name} mapping for bones present in both skeletons."""
-    from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
+    """Build {src_name: sk_name} mapping for bones present in both skeletons.
+
+    The source skeleton's own bone names select the table.
+    See: docs/commentary/asset_convert_falloutnv.md#fnv-skeleton-bones
+    """
     mapping = {}
-    for ob_name, sk_name in OBLIVION_TO_SKYRIM_BONE_MAP.items():
+    for ob_name, sk_name in bone_map_for(ob_skel).items():
         if ob_name in ob_skel and sk_name in sk_skel:
             mapping[ob_name] = sk_name
     return mapping
@@ -354,19 +381,18 @@ def get_body_parts_for_bone(bone_name: str, num_partitions: int):
     return [bp] * num_partitions
 
 
-def _resolve_sk_target(name: str, sk_skel: dict) -> tuple:
+def _resolve_sk_target(name: str, sk_skel: dict, src_map: dict = None) -> tuple:
     """Resolve a bone name to its Skyrim skeleton target.
 
-    Handles both Oblivion-named bones (maps through OB→SK) and
-    bones that already have Skyrim names (e.g. PRN bones).
+    Handles source-named bones (mapped through src_map, which defaults to
+    Oblivion's) and bones that already have Skyrim names (e.g. PRN bones).
 
     Returns (sk_name, W_sk_4x4) or (None, None) if not found.
     """
     # Direct lookup (already Skyrim name, e.g. from _add_prn_skin)
     if name in sk_skel:
         return name, sk_skel[name]
-    # Map Oblivion name → Skyrim name
-    sk_name = OBLIVION_TO_SKYRIM_BONE_MAP.get(name)
+    sk_name = (src_map or OBLIVION_TO_SKYRIM_BONE_MAP).get(name)
     if sk_name and sk_name in sk_skel:
         return sk_name, sk_skel[sk_name]
     return None, None
@@ -679,32 +705,37 @@ def _mat3_to_quat(R: np.ndarray) -> np.ndarray:
 # Animation-based FK pre-deformation (Phase B.1)
 
 _ANIM_POSE_PATH = _GENERATED_DIR / 'best_animation_pose.json'
-_anim_delta_cache = None
+_ANIM_POSE_FALLOUT = _GENERATED_DIR / 'best_animation_pose_falloutnv.json'
+_anim_delta_cache: dict = {}
 
 
-def load_animation_deltas():
-    """Load pre-computed delta matrices (inv(rest_world) @ anim_world) per bone.
-    
-    These are computed by tools/generators/kf_animation_explorer.py --build-cache using the
-    FULL Oblivion skeleton hierarchy. Each delta transforms a vertex from its
-    rest-pose position to the best-matching animation pose position.
+def load_animation_deltas(src_skel: dict = None):
+    """Pre-computed delta matrices (inv(rest_world) @ anim_world) per bone.
+
+    Built by tools/generators/kf_animation_explorer.py --build-cache over the
+    source game's own .kf corpus and skeleton; each delta moves a vertex from
+    its rest pose to the best-matching animation pose.  FO3/FNV bind poses
+    differ from Oblivion's, so the source skeleton selects the cache.
+    See: docs/commentary/asset_convert_falloutnv.md#fnv-animation-pose
     """
-    global _anim_delta_cache
-    if _anim_delta_cache is not None:
-        return _anim_delta_cache
-    if not _ANIM_POSE_PATH.exists():
-        _anim_delta_cache = {}
-        return _anim_delta_cache
-    try:
-        with open(_ANIM_POSE_PATH, 'r') as fh:
-            raw = json.load(fh)
-        deltas = raw.get('delta_matrices', {})
-        _anim_delta_cache = {}
-        for bone_name, flat in deltas.items():
-            _anim_delta_cache[bone_name] = np.array(flat, dtype=np.float64).reshape(4, 4)
-    except Exception:
-        _anim_delta_cache = {}
-    return _anim_delta_cache
+    path = _ANIM_POSE_PATH
+    if src_skel is not None and is_fallout_skeleton(src_skel)             and _ANIM_POSE_FALLOUT.exists():
+        path = _ANIM_POSE_FALLOUT
+    key = str(path)
+    if key in _anim_delta_cache:
+        return _anim_delta_cache[key]
+    result = {}
+    if path.exists():
+        try:
+            with open(path, 'r') as fh:
+                raw = json.load(fh)
+            for bone_name, flat in raw.get('delta_matrices', {}).items():
+                result[bone_name] = np.array(
+                    flat, dtype=np.float64).reshape(4, 4)
+        except Exception:
+            result = {}
+    _anim_delta_cache[key] = result
+    return result
 
 
 def _bake_geoms_to_bind_pose(skinned_geoms, skel_root):
@@ -1029,100 +1060,63 @@ def deform_vertices_animation_fk(skinned_geoms, skel_root, bone_deltas):
                 geom_data.normals[vi].y = float(new_norms[vi, 1])
                 geom_data.normals[vi].z = float(new_norms[vi, 2])
 
-# def _apply_residual_corrections(skinned_geoms, skel_root,
-#                                 old_bone_worlds, ob_skel, sk_skel,
-#                                 bone_deltas):
-#     """Apply Z-scale residual correction after FK deformation.
-
-#     Scales vertices proportionally along Z (height) relative to pelvis to
-#     correct for Oblivion/Skyrim skeleton height ratio differences.
-#     Only fires when both head AND pelvis OB world transforms are available.
-#     Skipped for NIFs that only contain head/neck/arm bones (e.g. helmets) where
-#     the pelvis is absent and the scale ratio would be meaningless or wrong.
-#     """
-#     # Require pelvis to be explicitly present — otherwise the height ratio is
-#     # computed from pelvis_z=0 (identity matrix fallback) which produces a
-#     # wildly incorrect z_scale and destroys the mesh positions.
-#     if 'Bip01 Pelvis' not in old_bone_worlds:
-#         return
-
-#     # Compute Z-scale factor from pelvis-to-head height ratio
-#     pelvis_ob_z = old_bone_worlds.get('Bip01 Pelvis', np.eye(4))[3, 2]
-#     pelvis_sk_name = OBLIVION_TO_SKYRIM_BONE_MAP.get('Bip01 Pelvis')
-#     pelvis_sk_z = (sk_skel[pelvis_sk_name][3, 2]
-#                    if pelvis_sk_name and pelvis_sk_name in sk_skel
-#                    else pelvis_ob_z)
-
-#     head_sk_name = OBLIVION_TO_SKYRIM_BONE_MAP.get('Bip01 Head')
-#     head_ob_mat = old_bone_worlds.get('Bip01 Head')
-#     head_sk_present = head_sk_name and head_sk_name in sk_skel
-
-#     if head_ob_mat is not None and head_sk_present:
-#         head_ob_z = head_ob_mat[3, 2]
-#         head_sk_z = sk_skel[head_sk_name][3, 2]
-#         ob_height = head_ob_z - pelvis_ob_z
-#         sk_height = head_sk_z - pelvis_sk_z
-#         # Both heights must be positive; if not, skeleton data is degenerate.
-#         if ob_height > 1.0 and sk_height > 1.0:
-#             z_scale = sk_height / ob_height
-#         else:
-#             z_scale = 1.0
-#     else:
-#         z_scale = 1.0
-
-#     if abs(z_scale - 1.0) <= 0.001:
-#         return
-
-#     for block, is_prn, prn_bone_name in skinned_geoms:
-#         if is_prn:
-#             continue
-
-#         geom_data = block.data
-#         if geom_data is None or geom_data.num_vertices == 0:
-#             continue
-
-#         num_verts = geom_data.num_vertices
-
-#         try:
-#             G = m44_to_np(block.get_transform(skel_root))
-#         except (ValueError, RuntimeError):
-#             G = np.eye(4)
-#         G_rot = G[:3, :3]
-#         G_trans = G[3, :3]
-#         G_is_identity = np.allclose(G, np.eye(4), atol=1e-6)
-
-#         verts = np.zeros((num_verts, 3), dtype=np.float64)
-#         for vi in range(num_verts):
-#             v = geom_data.vertices[vi]
-#             verts[vi] = [v.x, v.y, v.z]
-
-#         if G_is_identity:
-#             verts_world = verts.copy()
-#         else:
-#             verts_world = verts @ G_rot + G_trans
-
-#         z_relative = verts_world[:, 2] - pelvis_ob_z
-#         verts_world[:, 2] = pelvis_ob_z + z_relative * z_scale
-
-#         if G_is_identity:
-#             new_verts = verts_world
-#         else:
-#             G_rot_inv = np.linalg.inv(G_rot)
-#             new_verts = (verts_world - G_trans) @ G_rot_inv
-
-#         for vi in range(num_verts):
-#             geom_data.vertices[vi].x = float(new_verts[vi, 0])
-#             geom_data.vertices[vi].y = float(new_verts[vi, 1])
-#             geom_data.vertices[vi].z = float(new_verts[vi, 2])
-
-#         try:
-#             geom_data.update_tangent_space()
-#         except Exception:
-#             pass
-
 # ---------------------------------------------------------------------------
 # Main retarget entry point
 # ---------------------------------------------------------------------------
+
+def _prn_rigid_bone(skin, skin_data):
+    """The bone name when this skin is a PRN-attached rigid piece, else None.
+
+    One bone with an identity bind transform is the shape nif_converter's
+    _add_prn_skin builds; such a piece skips FK deformation entirely.
+    See: docs/commentary/asset_convert_armor.md#prn-attached-rigid-pieces
+    """
+    if skin.num_bones != 1 or skin_data.num_bones < 1:
+        return None
+    st = skin_data.bone_list[0].skin_transform
+    identity = (
+        abs(st.rotation.m_11 - 1.0) < 0.001
+        and abs(st.rotation.m_22 - 1.0) < 0.001
+        and abs(st.rotation.m_33 - 1.0) < 0.001
+        and abs(st.translation.x) < 0.001
+        and abs(st.translation.y) < 0.001
+        and abs(st.translation.z) < 0.001
+    )
+    if not identity or skin.bones[0] is None:
+        return None
+    return get_block_name(skin.bones[0])
+
+
+def _collect_skin_targets(data):
+    """Scan for (skeleton root, deformable bone nodes, skinned geometries).
+
+    Each geometry is (block, is_prn, prn_bone_name); PRN pieces contribute
+    no bone nodes because they are never FK-deformed.
+    """
+    skel_root = None
+    bone_nodes = set()
+    skinned_geoms = []
+    for root in data.roots:
+        if root is None:
+            continue
+        for block in root.tree():
+            if not isinstance(block, (NifFormat.NiTriShape, NifFormat.NiTriStrips)):
+                continue
+            skin = getattr(block, 'skin_instance', None)
+            skin_data = getattr(skin, 'data', None) if skin else None
+            if skin is None or skin_data is None:
+                continue
+            if skin.skeleton_root is not None:
+                skel_root = skin.skeleton_root
+            prn_bone_name = _prn_rigid_bone(skin, skin_data)
+            skinned_geoms.append((block, prn_bone_name is not None, prn_bone_name))
+            if prn_bone_name is not None:
+                continue
+            for i in range(skin.num_bones):
+                if skin.bones[i] is not None:
+                    bone_nodes.add(skin.bones[i])
+    return skel_root, bone_nodes, skinned_geoms
+
 
 def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None,
                             allow_wrap: bool = True, weight: int = 0,
@@ -1150,53 +1144,12 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
     female = '/f/' in src_lower
 
     sk_skel = load_skeleton(SKEL_SKYRIM_FEMALE if female else SKEL_SKYRIM_MALE)
-    ob_skel = load_skeleton(SKEL_OBLIVION)
+    ob_skel = _source_skeleton(data)
     if not sk_skel or not ob_skel:
         return 0
+    src_map = bone_map_for(ob_skel)
 
-    # Collect skeleton root, bone nodes, and skinned geometries
-    skel_root = None
-    bone_nodes = set()
-    skinned_geoms = []
-
-    for root in data.roots:
-        if root is None:
-            continue
-        for block in root.tree():
-            if not isinstance(block, (NifFormat.NiTriShape, NifFormat.NiTriStrips)):
-                continue
-            skin = getattr(block, 'skin_instance', None)
-            if skin is None:
-                continue
-            skin_data = skin.data
-            if skin_data is None:
-                continue
-            if skin.skeleton_root is not None:
-                skel_root = skin.skeleton_root
-
-            # Detect PRN-attached rigid armor (1 bone, identity bind)
-            is_prn = False
-            prn_bone_name = None
-            if skin.num_bones == 1 and skin_data.num_bones >= 1:
-                st = skin_data.bone_list[0].skin_transform
-                is_prn = (
-                    abs(st.rotation.m_11 - 1.0) < 0.001
-                    and abs(st.rotation.m_22 - 1.0) < 0.001
-                    and abs(st.rotation.m_33 - 1.0) < 0.001
-                    and abs(st.translation.x) < 0.001
-                    and abs(st.translation.y) < 0.001
-                    and abs(st.translation.z) < 0.001
-                )
-                if is_prn and skin.bones[0] is not None:
-                    prn_bone_name = get_block_name(skin.bones[0])
-
-            skinned_geoms.append((block, is_prn, prn_bone_name))
-
-            if not is_prn:
-                for i in range(skin.num_bones):
-                    if skin.bones[i] is not None:
-                        bone_nodes.add(skin.bones[i])
-
+    skel_root, bone_nodes, skinned_geoms = _collect_skin_targets(data)
     if not skel_root or not skinned_geoms:
         return 0
 
@@ -1221,14 +1174,15 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
             if _wrap_field is not None:
                 wrapped = deform_geoms_wrap(skinned_geoms, skel_root,
                                             _wrap_field, female,
-                                            weight=weight, race=race)
+                                            weight=weight, race=race,
+                                            src_skel=ob_skel)
         except Exception as e:
             import traceback
             traceback.print_exc()
             print(f'      [WRAP] wrap deform failed ({e}) — falling back to FK')
             wrapped = 0
     if not wrapped:
-        bone_deltas = load_animation_deltas()
+        bone_deltas = load_animation_deltas(ob_skel)
         if bone_deltas:
             deform_vertices_animation_fk(skinned_geoms, skel_root, bone_deltas)
 
@@ -1238,7 +1192,7 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
             skin = block.skin_instance
             bone_node = skin.bones[0]
             if bone_node is not None:
-                sk_name, W_sk = _resolve_sk_target(prn_bone_name, sk_skel)
+                sk_name, W_sk = _resolve_sk_target(prn_bone_name, sk_skel, src_map)
                 if sk_name is not None:
                     _np_to_nif_node(bone_node, W_sk)
 
@@ -1255,7 +1209,7 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
 
     for bone in sorted(bone_nodes, key=_depth):
         name = get_block_name(bone)
-        sk_name, W_sk = _resolve_sk_target(name, sk_skel)
+        sk_name, W_sk = _resolve_sk_target(name, sk_skel, src_map)
         if sk_name is None:
             continue
 
@@ -1282,7 +1236,7 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
             if prn_out is not None:
                 prn_out.add(id(block))
             if prn_bone_name:
-                sk_name, W_sk = _resolve_sk_target(prn_bone_name, sk_skel)
+                sk_name, W_sk = _resolve_sk_target(prn_bone_name, sk_skel, src_map)
                 if sk_name is not None:
                     # is an offset WITHIN the piece, not a second attachment
                     # point.  So the bone position belongs on every shape

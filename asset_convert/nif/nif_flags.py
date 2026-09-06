@@ -12,6 +12,9 @@ body-slot tables.
 #: Standard Skyrim NiAVObject flags (SelectiveUpdate bits 1-3).
 NIF_FLAGS = 14
 
+#: NiAVObject "hidden" bit; means the same thing in TES4, FO3/FNV and Skyrim.
+NIF_FLAG_HIDDEN = 0x0001
+
 #: Static objects with collision: complex + havok.
 BSX_FLAGS_STATIC = 0x82
 

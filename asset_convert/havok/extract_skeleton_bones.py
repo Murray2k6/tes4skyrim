@@ -13,6 +13,7 @@ Usage:
 
 Output:
     asset_convert/generated/skeleton_bones_oblivion.json
+    asset_convert/generated/skeleton_bones_falloutnv.json
     asset_convert/generated/skeleton_bones_skyrim_male.json
     asset_convert/generated/skeleton_bones_skyrim_female.json
 """
@@ -26,8 +27,14 @@ from asset_convert import paths
 from pyffi.formats.nif import NifFormat
 
 
-OBLIVION_SKELETON = os.path.join(str(paths.REPO), 'export', 'Oblivion.esm', 'meshes',
-                                 'characters', '_male', 'skeleton.nif')
+def source_skeleton(plugin: str) -> str:
+    """The exported human skeleton NIF for one source plugin."""
+    return os.path.join(str(paths.REPO), 'export', plugin, 'meshes',
+                        'characters', '_male', 'skeleton.nif')
+
+
+OBLIVION_SKELETON = source_skeleton('Oblivion.esm')
+FALLOUT_SKELETON = source_skeleton('FalloutNV.esm')
 # Vanilla Skyrim skeletons: auto-extracted from the SSE BSAs (skyrim_assets)
 SKYRIM_SKELETON_MALE = ('meshes\\actors\\character\\character assets\\'
                         'skeleton.nif')
@@ -104,46 +111,28 @@ def _translation_from_m44(m):
     return m[3][0], m[3][1], m[3][2]
 
 
-def main():
-    out_dir = os.path.join(str(paths.REPO), 'asset_convert', 'generated')
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Oblivion skeleton
-    print(f"Reading Oblivion skeleton: {OBLIVION_SKELETON}")
-    ob_bones = extract_skeleton(OBLIVION_SKELETON)
-    save_json(ob_bones, os.path.join(out_dir, 'skeleton_bones_oblivion.json'))
-    print(f"  Sample bones:")
-    for name in ['Bip01', 'Bip01 Pelvis', 'Bip01 Spine2', 'Bip01 Head',
-                  'Bip01 R Clavicle', 'Bip01 L Thigh']:
-        if name in ob_bones:
-            t = _translation_from_m44(ob_bones[name])
+def _emit(out_dir, label, source, out_name, samples=()):
+    """Extract one skeleton, save its JSON and print a few sample bones."""
+    print(f"{label}: {source}")
+    bones = extract_skeleton(source)
+    save_json(bones, os.path.join(out_dir, out_name))
+    for name in samples:
+        if name in bones:
+            t = _translation_from_m44(bones[name])
             print(f"    {name}: t=({t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f})")
+    return bones
 
-    # Skyrim male skeleton
-    print(f"\nReading Skyrim male skeleton: {SKYRIM_SKELETON_MALE}")
-    sk_male = extract_skeleton(SKYRIM_SKELETON_MALE)
-    save_json(sk_male, os.path.join(out_dir, 'skeleton_bones_skyrim_male.json'))
-    print(f"  Sample bones:")
-    for name in ['NPC Root [Root]', 'NPC Pelvis [Pelv]', 'NPC Spine2 [Spn2]',
-                  'NPC Head [Head]', 'NPC R Clavicle [RClv]', 'NPC L Thigh [LThg]']:
-        if name in sk_male:
-            t = _translation_from_m44(sk_male[name])
-            print(f"    {name}: t=({t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f})")
 
-    # Skyrim female skeleton
-    print(f"\nReading Skyrim female skeleton: {SKYRIM_SKELETON_FEMALE}")
-    sk_female = extract_skeleton(SKYRIM_SKELETON_FEMALE)
-    save_json(sk_female, os.path.join(out_dir, 'skeleton_bones_skyrim_female.json'))
-    print(f"  Sample bones:")
-    for name in ['NPC Root [Root]', 'NPC Pelvis [Pelv]', 'NPC Spine2 [Spn2]',
-                  'NPC Head [Head]']:
-        if name in sk_female:
-            t = _translation_from_m44(sk_female[name])
-            print(f"    {name}: t=({t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f})")
+_OB_SAMPLES = ('Bip01', 'Bip01 Pelvis', 'Bip01 Spine2', 'Bip01 Head',
+               'Bip01 R Clavicle', 'Bip01 L Thigh')
+_SK_SAMPLES = ('NPC Root [Root]', 'NPC Pelvis [Pelv]', 'NPC Spine2 [Spn2]',
+               'NPC Head [Head]', 'NPC R Clavicle [RClv]', 'NPC L Thigh [LThg]')
 
-    # Print mapping comparison
+
+def _print_comparison(ob_bones, sk_male):
+    """Print each mapped bone's Oblivion vs Skyrim world translation."""
     from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
-    print("\n--- Bone position comparison (Oblivion → Skyrim male) ---")
+    print("--- Bone position comparison (Oblivion -> Skyrim male) ---")
     for ob_name, sk_name in sorted(OBLIVION_TO_SKYRIM_BONE_MAP.items()):
         ob = ob_bones.get(ob_name)
         sk = sk_male.get(sk_name)
@@ -158,6 +147,22 @@ def main():
         elif ob and not sk:
             print(f"  {ob_name:30s} -> {sk_name:30s}  ** MISSING in Skyrim **")
 
+
+def main():
+    out_dir = os.path.join(str(paths.REPO), 'asset_convert', 'generated')
+    os.makedirs(out_dir, exist_ok=True)
+
+    ob_bones = _emit(out_dir, 'Reading Oblivion skeleton', OBLIVION_SKELETON,
+                     'skeleton_bones_oblivion.json', _OB_SAMPLES)
+    if os.path.isfile(FALLOUT_SKELETON):
+        _emit(out_dir, 'Reading FO3/FNV skeleton', FALLOUT_SKELETON,
+              'skeleton_bones_falloutnv.json', _OB_SAMPLES)
+    sk_male = _emit(out_dir, 'Reading Skyrim male skeleton',
+                    SKYRIM_SKELETON_MALE, 'skeleton_bones_skyrim_male.json',
+                    _SK_SAMPLES)
+    _emit(out_dir, 'Reading Skyrim female skeleton', SKYRIM_SKELETON_FEMALE,
+          'skeleton_bones_skyrim_female.json', _SK_SAMPLES[:4])
+    _print_comparison(ob_bones, sk_male)
 
 
 if __name__ == '__main__':

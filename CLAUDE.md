@@ -119,6 +119,7 @@ caching, skipped record types, the export text format, and the directory layout.
 - If the hook triggers for old debt, don't try to get around it as fast as possible or line golf. Take the time to examine the entire surrounding file and fix it properly. You have the time. If you need to separate out a file, pull out the RIGHT thing, not necessaryily the thing you are working on.
 - Docstrings should contain real and important function information. Story content only and always belongs in a see: tag. See tags should ALWAYS have an anchor.
 - Duplicated code is a big no-no. Check if something has been built first and if it has either point to that code instead or pull it out into a shared function
+- Avoid the chicken and egg problem when updating files. For example, adding an import without also adding its call in the same write will trigger the hook and prevent the write
 
 ### <a id="regression-read-the-commits"></a>🛑 IF IT IS A REGRESSION, READ THE COMMITS
 

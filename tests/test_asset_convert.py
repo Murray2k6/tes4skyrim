@@ -2047,7 +2047,7 @@ class TestShieldVsArmorClassification:
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat as NF
         import numpy as np
-        from asset_convert.nif.nif_converter import shield_attach_transform
+        from asset_convert.character.equipment_rig import shield_attach_transform
 
         src = EXPORT_MESHES / _SHIELD_SAMPLE
         if not src.exists():
@@ -4734,3 +4734,68 @@ class TestMorrowindLegacyNodes:
                 checked += 1
             offset += size
         assert checked, 'no NiFloatData emitted - test is stale'
+
+
+class TestDismemberGoreCaps:
+    """See docs/commentary/asset_convert_falloutnv.md#dismemberment-gore-caps."""
+
+    @staticmethod
+    def _shape(body_parts):
+        """A NiTriShape with a dismember skin partitioned as `body_parts`."""
+        from pyffi.formats.nif import NifFormat
+        shape = NifFormat.NiTriShape()
+        shape.flags = 14
+        skin = NifFormat.BSDismemberSkinInstance()
+        skin.num_partitions = len(body_parts)
+        skin.partitions.update_size()
+        for part, bp in zip(skin.partitions, body_parts):
+            part.body_part = bp
+        shape.skin_instance = skin
+        return shape
+
+    def _data(self, *shapes):
+        """A NifFormat.Data whose single root parents `shapes`."""
+        from pyffi.formats.nif import NifFormat
+        data = NifFormat.Data()
+        root = NifFormat.NiNode()
+        root.num_children = len(shapes)
+        root.children.update_size()
+        for i, shape in enumerate(shapes):
+            root.children[i] = shape
+        data.roots = [root]
+        return data
+
+    def test_cap_shapes_are_hidden_and_body_shapes_are_not(self):
+        """Section/torso caps get the hidden bit; body partitions stay visible."""
+        from asset_convert.character.dismember_falloutnv import hide_dismember_caps
+        limbcaps = self._shape([103, 107, 110, 105])
+        bodycaps = self._shape([203, 207])
+        body = self._shape([0, 5000, 3000])
+        assert hide_dismember_caps(self._data(limbcaps, bodycaps, body)) == 2
+        assert int(limbcaps.flags) & 1 and int(bodycaps.flags) & 1
+        assert not int(body.flags) & 1
+
+    def test_torso_sections_never_count_as_caps(self):
+        """BP_TORSOSECTION_* (1000+) are visible torso and are left alone."""
+        from asset_convert.character.dismember_falloutnv import hide_dismember_caps
+        upper = self._shape([1, 1000])
+        assert hide_dismember_caps(self._data(upper)) == 0
+        assert int(upper.flags) == 14
+
+
+class TestFalloutBoneAliases:
+    """See docs/commentary/asset_convert_falloutnv.md#fnv-body-fitting."""
+
+    def test_fallout_bones_alias_to_the_oblivion_bone_with_the_same_target(self):
+        """Each FNV-only bone maps to the Oblivion bone sharing its Skyrim target."""
+        from asset_convert.character.skyrim_overrides_falloutnv import oblivion_alias_map
+        alias = oblivion_alias_map({'Bip01 L Thumb1': None, 'Bip01 L ForeTwist': None})
+        assert alias['Bip01 L ForeTwist'] == 'Bip01 L ForearmTwist'
+        assert alias['Bip01 L Thumb1'] == 'Bip01 L Finger0'
+        assert alias['Bip01 LPauldron'] == 'Bip01 L Clavicle'
+
+    def test_oblivion_skeleton_needs_no_aliases(self):
+        """An Oblivion skeleton, or none at all, yields an empty alias map."""
+        from asset_convert.character.skyrim_overrides_falloutnv import oblivion_alias_map
+        assert oblivion_alias_map({'Bip01 L ForearmTwist': None}) == {}
+        assert oblivion_alias_map(None) == {}

@@ -125,6 +125,7 @@ from asset_convert.character.skyrim_overrides import (
     WEAPON_INV_MARKER_ROT_Z,
     WEAPON_INV_MARKER_ZOOM,
 )
+from asset_convert.character.dismember_falloutnv import hide_dismember_caps
 from asset_convert.collision.collision import (bake_node_transform_into_body, convert_all_collisions,
                         hoist_collision, remove_empty_collision_nodes)
 from asset_convert.collision.collision_constraints import (enforce_ragdoll_tree,
@@ -1202,6 +1203,7 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
     }
 
     _run_source_fixups(data, stats)
+    stats['gore_caps_hidden'] = hide_dismember_caps(data)
 
     nif_basename = os.path.basename(src_path).lower()
     _is_gnd = is_ground_model(nif_basename)

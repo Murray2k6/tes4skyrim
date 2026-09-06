@@ -56,6 +56,7 @@ import numpy as np
 from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
 from asset_convert import paths
+from asset_convert.character.skyrim_overrides_falloutnv import oblivion_alias_map
 
 try:
     from pyffi.formats.nif import NifFormat
@@ -396,16 +397,17 @@ def geom_triangles(block) -> np.ndarray:
     return np.zeros((0, 3), dtype=np.int64)
 
 
-def _geom_bone_weights(block) -> dict:
-    """{bone_name: (indices, weights)} from NiSkinData."""
+def _geom_bone_weights(block, alias: dict = None) -> dict:
+    """{bone_name: (indices, weights)} from NiSkinData, names passed through `alias`."""
     skin = block.skin_instance
     sd = skin.data
     out: dict = {}
+    alias = alias or {}
     for bi in range(min(skin.num_bones, sd.num_bones)):
         bone = skin.bones[bi]
         if bone is None:
             continue
-        name = block_name(bone)
+        name = alias.get(block_name(bone), block_name(bone))
         be = sd.bone_list[bi]
         idx = np.fromiter((vw.index for vw in be.vertex_weights),
                           dtype=np.int64, count=be.num_vertices)
@@ -1186,17 +1188,16 @@ def _blended_clearance(field, pts, verts_surf, tri_normals, tree,
 
 
 def deform_geoms_wrap(skinned_geoms, skel_root, field, female: bool,
-                      weight: int = 0, race=None) -> int:
+                      weight: int = 0, race=None, src_skel: dict = None) -> int:
     """FK deform + exact body-fit correction for all non-PRN skinned geoms.
 
     Drop-in replacement for skin_retarget's FK Phase B: runs the standard FK
     animation deform first (smooth base), then cancels its measured error
     against the Skyrim body via the wrap correction field.  `weight` selects
-    the _0 (thin) or _1 (heavy) Skyrim body target.  `race` selects a
-    beast head pack for the head-gear correction below
-    (head_fit.BEAST_RACES): a SKINNED hood needs the same per-race fit
-    a rigid Prn one does, or it sits inside the khajiit/argonian skull
-    exactly as the rigid path did.
+    the _0 (thin) or _1 (heavy) Skyrim body target.  `race` selects a beast
+    head pack for the head-gear correction (head_fit.BEAST_RACES).
+    `src_skel`, the source rest skeleton, selects the pose-delta cache.
+    See: docs/commentary/asset_convert_falloutnv.md#fnv-body-fitting
 
     ALL blocks are solved as ONE system — a single cross-block weld, one
     correction query, one deficit diffusion graph.  Per-block solving split
@@ -1206,7 +1207,7 @@ def deform_geoms_wrap(skinned_geoms, skel_root, field, female: bool,
     from asset_convert.character.skin_retarget import (deform_vertices_animation_fk,
                                 load_animation_deltas, load_skeleton,
                                 SKEL_OBLIVION, m44_to_np)
-    bone_deltas = load_animation_deltas()
+    bone_deltas, alias = load_animation_deltas(src_skel), oblivion_alias_map(src_skel)
     if not bone_deltas:
         return 0    # wrap needs the FK base; fall back entirely
 
@@ -1261,10 +1262,7 @@ def deform_geoms_wrap(skinned_geoms, skel_root, field, female: bool,
                          dtype=np.float64)
         vw = verts if G_id else verts @ G[:3, :3] + G[3, :3]
 
-        # per-vertex skin-weight bone centroid (region gate) + head-gear
-        # weight fraction (helmets: the field has no head surface, so
-        # head-weighted verts keep the plain FK result)
-        bones_w = _geom_bone_weights(block)
+        bones_w = _geom_bone_weights(block, alias)
         abc = np.zeros((nv, 3), dtype=np.float64)
         absum = np.zeros(nv)
         head_w = np.zeros(nv)

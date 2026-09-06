@@ -130,35 +130,38 @@ _QUAD_ENUM_MAP = {'left': 'FootFront', 'right': 'FootFront',
                   'backleft': 'FootBack', 'backright': 'FootBack'}
 
 
-def parse_kf_events(text_keys, enum_map=None) -> dict:
-    """Oblivion .kf text keys → translated Skyrim event lists.
+def _classify_key(t: float, k: str, enum_map: dict,
+                  sounds: list, feet: list, hits: list) -> None:
+    """Route one text key onto the sound, footfall or hit list."""
+    low = k.lower()
+    if low.startswith('sound:'):
+        edid = k.split(':', 1)[1].strip()
+        if edid:
+            sounds.append((t, edid))
+    elif low.startswith('enum:'):
+        tag = enum_map.get(low.split(':', 1)[1].replace(' ', ''))
+        if tag:
+            feet.append((t, tag))
+    elif low == 'hit':
+        hits.append(t)
 
-    Returns {'sounds': [(t, SOUN EditorID)], 'feet': [(t, foot event)],
-    'hits': [t]}:
-      * 'Sound: <SOUN EDID>'  — Oblivion plays the sound directly; Skyrim's
-        equivalent is a SoundPlay.<SNDR EDID> event (see event_annotations).
-      * 'Enum: Left/Right/BackLeft/BackRight' — Oblivion's authored footfall
-        moments (they fire CSDT foot slots 0-3); translated via enum_map to
-        the engine's own footstep events. AUTHORED times beat any synthesis.
-      * 'Hit' — the damage frame (weaponSwing/preHitFrame/HitFrame contract).
-    Anything else ('start'/'end', 'Enum: Attack', ...) is Oblivion-internal
-    and dropped.
+
+def parse_kf_events(text_keys, enum_map=None) -> dict:
+    """TES4 .kf text keys → {'sounds': [(t, SOUN EDID)], 'feet': [(t, event)],
+    'hits': [t]}.
+
+    'Sound: <EDID>' becomes a SoundPlay.<SNDR EDID> event (event_annotations);
+    'Enum: Left/Right/BackLeft/BackRight' are the authored footfalls, mapped
+    through enum_map and preferred over synthesis; 'Hit' is the damage frame.
+    Anything else is TES4-internal and dropped.  ONE FO3/FNV value holds
+    SEVERAL newline-separated keys, so each value is split before classifying.
+    See: docs/commentary/asset_convert_falloutnv.md#multi-line-text-keys
     """
     enum_map = enum_map or _QUAD_ENUM_MAP
     sounds, feet, hits = [], [], []
     for t, s in text_keys:
-        k = s.strip()
-        low = k.lower()
-        if low.startswith('sound:'):
-            edid = k.split(':', 1)[1].strip()
-            if edid:
-                sounds.append((float(t), edid))
-        elif low.startswith('enum:'):
-            tag = enum_map.get(low.split(':', 1)[1].replace(' ', ''))
-            if tag:
-                feet.append((float(t), tag))
-        elif low == 'hit':
-            hits.append(float(t))
+        for k in s.splitlines():
+            _classify_key(float(t), k.strip(), enum_map, sounds, feet, hits)
     return {'sounds': sorted(sounds), 'feet': sorted(feet),
             'hits': sorted(hits)}
 
