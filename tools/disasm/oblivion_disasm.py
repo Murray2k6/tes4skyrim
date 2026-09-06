@@ -5,7 +5,7 @@ plus a symbolic x87 FPU simulator.
 Why this exists: Oblivion.exe statically links SpeedTreeRT 4.x with symbols
 intact, so the REAL procedural-tree algorithm (branch counts, placement, the
 bend integrator, the RNG) is readable.  That is the ground truth for
-`asset_convert/spt_generator.py` — the billboard renders are a 2-D projection
+`asset_convert/speedtree/spt_generator.py` — the billboard renders are a 2-D projection
 the generator was already fitted to, so they cannot reveal a 3-D error.
 See docs/commentary/asset_convert_speedtree.md.
 

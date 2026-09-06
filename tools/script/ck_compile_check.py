@@ -26,7 +26,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from subprocess_flags import windows_cmd  # noqa: E402
+from subprocess_flags import windows_cmd
 
 SSE = r'C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition'
 CK = os.path.join(SSE, 'Papyrus Compiler', 'PapyrusCompiler.exe')

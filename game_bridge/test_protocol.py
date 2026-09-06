@@ -20,10 +20,10 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import win32file  # noqa: E402  (pywin32)
-import win32pipe  # noqa: E402
+import win32file
+import win32pipe
 
-from tools.live.game_bridge import Bridge, BridgeError  # noqa: E402
+from tools.live.game_bridge import Bridge, BridgeError
 
 PIPE = r"\\.\pipe\tes_game_bridge_test"
 

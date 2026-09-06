@@ -128,7 +128,7 @@ def _has_imported_mods() -> bool:
     Data-directory plugins never needs it, so its absence must not abort them.
     """
     try:
-        from asset_convert import source_registry
+        from asset_convert.sources import source_registry
         return bool(source_registry.plugins(SCRIPT_DIR / 'export'))
     except Exception:
         return False
@@ -203,7 +203,7 @@ def _ffmpeg() -> 'Missing | None':
     checkout rather than a missing user install -- same as the other bundled
     exes.  PATH is still searched as a fallback, so a user who deleted the
     bundled copy but has their own ffmpeg keeps working."""
-    from asset_convert.audio_converter import find_ffmpeg
+    from asset_convert.audio.audio_converter import find_ffmpeg
     if find_ffmpeg():
         return None
     return Missing(
@@ -219,7 +219,7 @@ def _ffmpeg() -> 'Missing | None':
 
 
 def _xwmaencode() -> 'Missing | None':
-    from asset_convert.audio_converter import find_xwmaencode
+    from asset_convert.audio.audio_converter import find_xwmaencode
     if find_xwmaencode():
         return None
     return Missing(
@@ -233,7 +233,7 @@ def _xwmaencode() -> 'Missing | None':
 
 
 def _lipgenerator() -> 'Missing | None':
-    from asset_convert.audio_converter import find_lipgenerator
+    from asset_convert.audio.audio_converter import find_lipgenerator
     if find_lipgenerator():
         return None
     return Missing(
@@ -288,11 +288,6 @@ def _papyrus_headers() -> 'Missing | None':
 
 # ---------------------------------------------------------------------------
 #  Phase requirements
-# ---------------------------------------------------------------------------
-#
-# Keyed by the `do_*` phase name convert.py uses. Each value is a list of
-# zero-argument callables returning a Missing (or None when satisfied); they
-# run lazily so a phase that is not selected costs nothing.
 
 _REQUIREMENTS = {
     'export': [],

@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import terrain_lod
+from asset_convert.lod import terrain_lod
 
 
 VERTS = terrain_lod.VERTS_SIDE

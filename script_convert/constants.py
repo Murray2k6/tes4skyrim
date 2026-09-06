@@ -2209,7 +2209,7 @@ SERVICE_MENU_CALL = {
 # ===========================================================================
 
 #: Moved to resolve.py; re-exported so the docs/ §5 boundary is unchanged.
-from script_convert.resolve import (  # noqa: E402,F401
+from script_convert.resolve import (  # noqa: E402
     resolve_property_formid, _digit_stripped_formid,
 )
 

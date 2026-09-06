@@ -15,12 +15,12 @@ import collections
 import sys
 
 sys.path.insert(0, '.')
-from tes5_import.text_reader import (parse_export_directory,       # noqa: E402
+from tes5_import.text_reader import (parse_export_directory,
                                      group_records_by_type,
                                      set_formid_index_offset,
                                      get_int, get_formid)
-from tes5_import import pack_converter as pc                       # noqa: E402
-from tes5_import.pack_indexes import (build_pack_indexes,          # noqa: E402
+from tes5_import import pack_converter as pc
+from tes5_import.pack_indexes import (build_pack_indexes,
                                       PLACEABLE_BASE_SIGS)
 
 T4_NAMES = {
@@ -61,7 +61,7 @@ def main():
             continue
         try:
             inp = pc._choose(rec, ctx, get_formid(rec, 'FormID'))
-        except Exception as exc:                     # noqa: BLE001
+        except Exception as exc:
             rows[(ptype, f'ERROR {exc}')] += 1
             continue
         key = (ptype, inp.t.edid)

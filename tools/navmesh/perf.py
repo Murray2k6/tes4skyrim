@@ -28,26 +28,16 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from asset_convert import collision_extract as ce  # noqa: E402
-from tes5_import.navmesh import (  # noqa: E402
+from asset_convert.collision import collision_extract as ce
+from tes5_import.navmesh import (
     build, corridor, corridor_clean, corridor_doors, corridor_grow,
     corridor_union, world,
 )
-from tools.navmesh.probe import load_cell  # noqa: E402
+from tools.navmesh.probe import load_cell
 
 
 # ---------------------------------------------------------------------------
 # Stage timing
-#
-# Stages are wrapped at the module boundaries the corridor build calls, so each
-# number is true wall-clock inclusive of everything that stage does.  Callers do
-# `from . import corridor_union` (etc.) and look attributes up at call time, so
-# patching the module attribute is enough.  Whatever is left over appears as
-# "(other)" -- recovered by subtraction so no time goes silently unattributed.
-#
-# NOTE the nesting: build_union_mesh CONTAINS _split_plan_overlaps and friends,
-# so those rows double-count against it.  Read the sub-rows to locate a hotspot
-# inside the union and the union row for its share of the whole build.
 # ---------------------------------------------------------------------------
 
 _ACC = {}

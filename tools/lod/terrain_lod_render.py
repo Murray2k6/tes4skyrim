@@ -22,9 +22,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
-from asset_convert import terrain_lod as TL
-from asset_convert import terrain_lod_textures as TLT
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from asset_convert.lod import terrain_lod as TL
+from asset_convert.lod import terrain_lod_textures as TLT
 
 
 def hillshade(h: np.ndarray, az=315.0, alt=45.0) -> np.ndarray:
@@ -98,7 +99,7 @@ def main():
     tex_root = esm.parent / 'textures'
 
     print(f"Parsing LAND from {esm} (worldspace {args.worldspace})...")
-    lands, cell_water, default_wh = TL._parse_land_records(esm, args.worldspace)
+    lands, cell_water, default_wh = TL.parse_land_records(esm, args.worldspace)
     print(f"  {len(lands)} LAND cells; "
           f"{sum(1 for hw, _ in cell_water.values() if hw)} water cells")
     if not lands:

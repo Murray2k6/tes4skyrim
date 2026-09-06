@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from tools.disasm.skyrim_disasm import Binary, LiveBinary, DEFAULT_EXE  # noqa: E402
+from tools.disasm.skyrim_disasm import Binary, LiveBinary, DEFAULT_EXE
 
 
 def find_strings(binary, name: str) -> list:

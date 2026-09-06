@@ -57,7 +57,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from tools.disasm.skyrim_disasm import LiveBinary  # noqa: E402
+from tools.disasm.skyrim_disasm import LiveBinary
 
 
 class DialogueReader:

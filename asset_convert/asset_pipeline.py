@@ -19,9 +19,15 @@ import os
 import shutil
 from pathlib import Path
 
-from . import (bsa_extract, grass_profile, hair_pipeline, landscape_normals,
-               luminance_textures, nif_converter, spt_converter, texture_prune,
-               wearable_plan)
+from asset_convert.sources import bsa_extract
+from asset_convert.nif import grass_profile
+from asset_convert.character import hair_pipeline
+from asset_convert.texture import landscape_normals
+from asset_convert.texture import luminance_textures
+from asset_convert.nif import nif_batch
+from asset_convert.speedtree import spt_converter
+from asset_convert.texture import texture_prune
+from asset_convert.character import wearable_plan
 
 
 # Shared-folder resolution lives in output_layout (one module, three
@@ -30,7 +36,7 @@ from . import (bsa_extract, grass_profile, hair_pipeline, landscape_normals,
 # an imported mod both collapse to `export/<plugin>/`, the layout this module
 # has always used.
 from output_layout import (asset_root as _asset_root,
-                           record_dir as _record_dir,
+                           record_dir as record_dir,
                            plugin_out_root as _plugin_out_root)
 
 
@@ -115,12 +121,12 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         mesh_subdirs: Optional list of root mesh subfolders to include (e.g.
                       ['architecture', 'clutter']). None means all subfolders.
         parallax:     Carry Oblivion's parallax across as Skyrim height maps.
-                      Off by default — see asset_convert/parallax.py; the
+                      Off by default — see asset_convert/texture/parallax.py; the
                       output needs Community Shaders or ENB.
         textures_only: Read and analyse the meshes, ship none of them; only the
                       textures (with their `_p` height maps) go to output.  For
                       PGPatcher, which patches meshes across the player's whole
-                      load order — see nif_converter.batch_convert.
+                      load order — see nif_batch.batch_convert.
 
     Returns a dict with keys: 'mesh_conversion', 'textures_copied', 'other_copied'.
     """
@@ -131,7 +137,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
     # meshes/textures come from the group folder while the record dump stays
     # per plugin (source_registry.asset_root / record_dir).
     asset_dir = _asset_root(extract_dir, source_name)
-    rec_dir = _record_dir(extract_dir, source_name)
+    rec_dir = record_dir(extract_dir, source_name)
 
     stats = {
         'mesh_conversion': {},
@@ -159,7 +165,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         plan = wearable_plan.build_plan(rec_dir)
         print(f"  Wearable variant plan: {len(plan)} meshes referenced by "
               f"ARMO/CLOT")
-        stats['mesh_conversion'] = nif_converter.batch_convert(
+        stats['mesh_conversion'] = nif_batch.batch_convert(
             str(mesh_src), output_dir=str(mesh_dst),
             fix_textures=True, remap_skeleton=None,
             subdir_filter=mesh_subdirs,
@@ -195,17 +201,6 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         print(f"  No meshes found at {mesh_src}")
         stats['mesh_conversion'] = {'converted': 0, 'skipped': 0, 'errors': 0}
 
-    # -----------------------------------------------------------------------
-    # Grass models — GRAS NIFs (from the export's GRAS.txt) get the vanilla
-    # grass shader profile and a copy under meshes\landscape\grass\, the
-    # location every working GRAS record uses (see grass_profile module doc).
-    # -----------------------------------------------------------------------
-    # -----------------------------------------------------------------------
-    # Hair — meshes\characters\ is in nif_converter.SKIP_PATHS, and hair could
-    # not be un-skipped into the batch anyway: one Oblivion HAIR record becomes
-    # several Skyrim meshes, because the per-NPC hair length (NPC_.LNAM) has no
-    # Skyrim equivalent and is baked in per variant.  See hair_pipeline.
-    # -----------------------------------------------------------------------
     if mesh_src.exists() and not textures_only:
         stats['hair'] = hair_pipeline.run(rec_dir, plugin_dir / 'meshes')
 
@@ -251,12 +246,6 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         stats['landscape_normals_fixed'] = fixed
         print(f"  Landscape normals: {checked} checked, {fixed} DXT1->DXT5 fixed")
 
-        # Every REMAINING normal map without a usable specular mask gets a
-        # constant one, and the shared stand-in normal is written for shapes
-        # whose own normal does not exist.  The mesh stage now writes a
-        # UNIFORM specular_strength of 1.0, so the modulation has to live here
-        # -- see nif_converter._SPEC_STRENGTH for why that trade is worth
-        # making.  Landscape is excluded: just handled, with a dimmer value.
         n_checked, n_fixed, n_kinds = landscape_normals.normalize_specular_alpha(
             tex_dst, skip=(os.sep + 'landscape' + os.sep,))
         # AFTER the sweep: the stand-in is a constant alpha by design, so a
@@ -274,7 +263,7 @@ def convert_meshes(source_file, extract_dir='export', output_dir='output',
         # use for that channel any more, and DXT1 is half the size.  Keyed on
         # the `_p` file the mesh stage wrote, so this is a no-op unless
         # --parallax ran.  After the copy, for the same reason as above.
-        from . import parallax as _parallax
+        from asset_convert.texture import parallax as _parallax
         _n, _skip, _kept, _saved = _parallax.strip_diffuse_alpha(
             tex_dst, keep=stats.get('mesh_conversion', {}).get(
                 'alpha_opacity_diffuse', ()))
@@ -295,7 +284,7 @@ def convert_speedtrees(source_file, extract_dir='export', output_dir='output',
     `use_engine` (ON by default) takes branches from Oblivion's own SpeedTree
     code via the committed native harness; the Python generator is the
     per-tree FALLBACK when no Oblivion.exe is configured, the harness is
-    missing, or a dump fails.  See asset_convert/spt_engine_geom.py.
+    missing, or a dump fails.  See asset_convert/speedtree/spt_engine_geom.py.
     """
     extract_dir = Path(extract_dir)
     output_dir = Path(output_dir)
@@ -310,7 +299,7 @@ def convert_speedtrees(source_file, extract_dir='export', output_dir='output',
     # from the export header rather than a fixed list -- the chain differs per
     # plugin (Valenwood: Oblivion, Tamriel, Anequina).
     master_tree_dirs = []
-    header = _record_dir(extract_dir, source_name) / '_HEADER.txt'
+    header = record_dir(extract_dir, source_name) / '_HEADER.txt'
     if header.is_file():
         for line in open(header, encoding='utf-8', errors='replace'):
             if line.startswith('Master['):
@@ -323,7 +312,7 @@ def convert_speedtrees(source_file, extract_dir='export', output_dir='output',
         # tree textures ship via the generic texture copy (textures/tes4/trees/)
         spt_stats['spt_conversion'] = spt_converter.convert_spt_directory(
             spt_src, spt_dst,
-            export_dir=_record_dir(extract_dir, source_name),
+            export_dir=record_dir(extract_dir, source_name),
             master_tree_dirs=master_tree_dirs, use_engine=use_engine)
     else:
         print(f"  No trees/ directory found at {spt_src}")
@@ -344,7 +333,7 @@ def convert_sounds(source_file, extract_dir='export', output_dir='output',
     Returns:
         dict with keys: converted, copied, failed, total.
     """
-    from .audio_converter import convert_sounds as _ac_convert
+    from asset_convert.audio.audio_converter import convert_sounds as _ac_convert
     return _ac_convert(source_file, extract_dir=extract_dir,
                        output_dir=output_dir, ffmpeg_path=ffmpeg_path)
 

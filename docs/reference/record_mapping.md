@@ -264,8 +264,8 @@ inherited value wins.
 ## Hair conversion
 
 Oblivion hair is CONVERTED, not substituted with a vanilla Skyrim hairstyle.
-`convert_HAIR` -> HDPT (Type 3), `asset_convert/hair_pipeline.py` for the
-meshes, `asset_convert/facegen_tri.py` for the `.tri` codec,
+`convert_HAIR` -> HDPT (Type 3), `asset_convert/character/hair_pipeline.py` for the
+meshes, `asset_convert/character/facegen_tri.py` for the `.tri` codec,
 `tes5_import/hair_variants.py` for the plan both sides share.
 
 ### Why one HAIR becomes several HDPTs
@@ -338,7 +338,7 @@ bakes each length, then routes the result through `convert_nif(..., hair=True)`
 `BSDismemberSkinInstance` in **slot 131** bound to `NPC Head [Head]`, exactly
 as vanilla Skyrim hair does.
 
-**Head gear is fitted by `asset_convert/head_fit.py` (v3) — a smooth
+**Head gear is fitted by `asset_convert/character/head_fit.py` (v3) — a smooth
 scalp-to-scalp displacement field, sampled per vertex.** Built once per
 gender/race: for every OB head vertex, where the matching SK skin point is
 (nearest-point init over the identity carrier — no scale, ever — relaxed by

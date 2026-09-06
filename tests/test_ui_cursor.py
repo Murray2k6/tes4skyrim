@@ -1,4 +1,4 @@
-"""Tests for the menu-cursor reskin (asset_convert/ui_cursor.py).
+"""Tests for the menu-cursor reskin (asset_convert/ui/ui_cursor.py).
 
 Hermetic: the movie and the texture are synthesised here, so nothing needs
 Oblivion or Skyrim installed. The synthetic movie carries the SAME character id
@@ -14,8 +14,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from asset_convert import swf
-from asset_convert import ui_cursor
+from asset_convert.ui import swf
+from asset_convert.ui import ui_cursor
 
 
 # ---------------------------------------------------------------------------

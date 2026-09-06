@@ -19,7 +19,8 @@ import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), '..'))
 
-from asset_convert import pyffi_monkey_patch  # noqa: F401  (clock patch)
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
 from pyffi.formats.nif import NifFormat
 
 SKYRIM_LAYERS = {

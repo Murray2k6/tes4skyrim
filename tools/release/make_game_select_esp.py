@@ -40,7 +40,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from subprocess_flags import windows_cmd  # noqa: E402
+from subprocess_flags import windows_cmd
 
 from tes5_import.writer import (pack_record, pack_subrecord, pack_tes4_header,
                                 pack_top_group, pack_string_subrecord,
@@ -65,9 +65,6 @@ FID_QUST              = 0x01000820
 
 # --- Vanilla Skyrim.esm forms we override or reference -----------------------
 # MQ101 "Unbound", the opening. We OVERRIDE this record: the only point where a
-# new game can be diverted cleanly is its stage-0 fragment, which runs before
-# the cart ride starts. A separate quest that stops MQ101 afterwards leaves the
-# player bound and mid-scene (see TESGameSelectMQ101.psc).
 FID_MQ101 = 0x0003372B
 # Skyrim's own empty interior holding cell and the XMarker inside it. Reusing
 # these means no cell authoring, and the player waits somewhere genuinely blank

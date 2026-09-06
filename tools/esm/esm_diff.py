@@ -42,14 +42,14 @@ def _iter_top_groups(mm):
         pos += size
 
 
-def _iter_records(mm, start, end):
+def iter_records(mm, start, end):
     """Recursively yield (sig, formid, record_bytes) for every record in a group."""
     pos = start + GROUP_HEADER_SIZE
     while pos + RECORD_HEADER_SIZE <= end:
         tag = mm[pos:pos + 4]
         size = struct.unpack_from('<I', mm, pos + 4)[0]
         if tag == b'GRUP':
-            yield from _iter_records(mm, pos, pos + size)
+            yield from iter_records(mm, pos, pos + size)
             pos += size
         else:
             total = RECORD_HEADER_SIZE + size
@@ -62,7 +62,7 @@ def _record_index(mm, start, end):
     """{(sig, fid): sha1-of-bytes} plus a Counter of duplicate keys."""
     index = {}
     dupes = Counter()
-    for sig, fid, blob in _iter_records(mm, start, end):
+    for sig, fid, blob in iter_records(mm, start, end):
         key = (sig, fid)
         if key in index:
             dupes[key] += 1

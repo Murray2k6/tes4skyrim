@@ -25,30 +25,14 @@ from tools.release.make_game_select_esp import (BUTTONS, FID_MESG, FID_QUST, FID
                                         FUNC_GET_GLOBAL_VALUE, SCRIPT_NAME,
                                         MQ101_SCRIPT_NAME, build_plugin,
                                         _skip_script_entry)
+from tes5_import.tes5_reader import records
 
 
 def _parse(data):
-    """Split a built plugin into {(type, formid): [(subtype, payload), ...]}."""
-    records = {}
-    pos = 0
-    while pos + 24 <= len(data):
-        tag = data[pos:pos + 4]
-        size = struct.unpack_from('<I', data, pos + 4)[0]
-        if tag == b'GRUP':
-            pos += 24          # descend into the group's contents
-            continue
-        fid = struct.unpack_from('<I', data, pos + 12)[0]
-        body = data[pos + 24:pos + 24 + size]
-        subs = []
-        p = 0
-        while p + 6 <= len(body):
-            stype = body[p:p + 4].decode('ascii')
-            slen = struct.unpack_from('<H', body, p + 4)[0]
-            subs.append((stype, body[p + 6:p + 6 + slen]))
-            p += 6 + slen
-        records[(tag.decode('ascii'), fid)] = subs
-        pos += 24 + size
-    return records
+    """{(type, formid): [(subtype, payload), ...]}, TES4 header included."""
+    return {(rec.sig.decode('ascii'), rec.form_id):
+            [(t.decode('ascii'), d) for t, d in rec.subs()]
+            for rec in records(data, span=(0, len(data)))}
 
 
 @pytest.fixture(scope='module')

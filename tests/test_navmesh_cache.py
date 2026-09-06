@@ -20,11 +20,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import asset_convert.collision_extract as ce  # noqa: E402
-from tes5_import import import_main as im  # noqa: E402
-from tes5_import.pgrd_to_navm import _geom_hash  # noqa: E402
-from tools.navmesh import navmesh_cache as nc  # noqa: E402
-from tools.navmesh import navmesh_cache_hook as hook  # noqa: E402
+import asset_convert.collision.collision_extract as ce
+from tes5_import import import_main as im
+from tes5_import.navmesh import pool as navm_pool
+from tes5_import.pgrd_to_navm import _geom_hash
+from tools.navmesh import navmesh_cache as nc
+from tools.navmesh import navmesh_cache_hook as hook
 from tools.navmesh import navmesh_adopt as adopt
 from tes5_import import navm_verify
 from tes5_import.pgrd_to_navm import geom_equal, geom_quantize
@@ -65,28 +66,28 @@ def test_tag_ignores_collision_mtime(tmp_path, monkeypatch):
     """
     col = tmp_path / 'collision_cache.bin'
     col.write_bytes(b'collision-payload')
-    first = im._navmesh_geom_cache(str(col))
+    first = navm_pool.navmesh_geom_cache(str(col))
     assert first is not None
     st = os.stat(col)
     os.utime(col, (st.st_atime, st.st_mtime + 3600))
-    assert im._navmesh_geom_cache(str(col))[1] == first[1]
+    assert navm_pool.navmesh_geom_cache(str(col))[1] == first[1]
 
 
 def test_tag_tracks_navmesh_sources(tmp_path):
     """Editing a navmesh source must change the tag (self-invalidation)."""
     col = tmp_path / 'collision_cache.bin'
     col.write_bytes(b'x')
-    before = im._navmesh_geom_cache(str(col))[1]
+    before = navm_pool.navmesh_geom_cache(str(col))[1]
     src = os.path.join(REPO, 'tes5_import', 'navmesh', 'params.py')
     original = open(src, 'rb').read()
     try:
         with open(src, 'ab') as fh:
             fh.write(b'\n# cache-tag probe\n')
-        assert im._navmesh_geom_cache(str(col))[1] != before
+        assert navm_pool.navmesh_geom_cache(str(col))[1] != before
     finally:
         with open(src, 'wb') as fh:
             fh.write(original)
-    assert im._navmesh_geom_cache(str(col))[1] == before
+    assert navm_pool.navmesh_geom_cache(str(col))[1] == before
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +178,7 @@ def test_content_hash_ignores_key_order(monkeypatch):
 def test_gate_watches_every_tag_source():
     """Every file feeding the tag must be gated, or a push ships a dead cache.
 
-    import_main._navmesh_geom_cache hashes tes5_import/navmesh/*.py plus
+    navmesh.pool.navmesh_geom_cache hashes tes5_import/navmesh/*.py plus
     pgrd_to_navm.py; the hook's NAVMESH_PATHS must cover exactly those.
     """
     watched = set(hook.NAVMESH_PATHS)
@@ -190,11 +191,15 @@ def test_gate_watches_every_tag_source():
 
 
 def test_gate_covers_cache_defining_modules():
-    """import_main and collision_extract change caching without feeding the tag."""
-    assert '_navmesh_geom_cache' in hook.NAVMESH_FUNCS['tes5_import/import_main.py']
-    assert '_gather_navm_jobs' in hook.NAVMESH_FUNCS['tes5_import/import_main.py']
+    """collision_extract changes what gets cached without feeding the tag.
+
+    The navmesh package feeds the tag directly, so it is gated by path; only
+    collision_extract needs per-function gating.
+    """
+    assert 'tes5_import/navmesh/' in hook.NAVMESH_PATHS
     assert 'collision_digest' in \
-        hook.NAVMESH_FUNCS['asset_convert/collision_extract.py']
+        hook.NAVMESH_FUNCS['asset_convert/collision/collision_extract.py']
+    assert 'tes5_import/import_main.py' not in hook.NAVMESH_FUNCS
 
 
 def test_gate_ignores_post_cache_stitching():
@@ -211,17 +216,17 @@ def test_gate_matches_expected_paths():
 def test_stamp_written_only_by_a_real_build(tmp_path):
     """Computing the tag must NOT certify the cache.
 
-    _navmesh_geom_cache is called by tools that merely want to know the tag; if
+    navmesh_geom_cache is called by tools that merely want to know the tag; if
     it stamped CACHE_TAG, reading the tag would make a stale cache look freshly
     built and the gate would wave it through.
     """
     col = tmp_path / 'collision_cache.bin'
     col.write_bytes(b'payload')
-    geom = im._navmesh_geom_cache(str(col))
+    geom = navm_pool.navmesh_geom_cache(str(col))
     stamp = os.path.join(geom[0], 'CACHE_TAG')
     assert not os.path.exists(stamp), 'reading the tag must not stamp'
 
-    im._stamp_navmesh_cache_tag(geom)
+    navm_pool.stamp_navmesh_cache_tag(geom)
     assert open(stamp).read().strip() == geom[1]
 
 
@@ -1177,3 +1182,38 @@ def test_prepare_is_a_noop_without_a_cache():
     jobs = [_job('interior', 0)]
     navm_verify.prepare(jobs, None)
     assert not any(j.get('verify') for j in jobs)
+
+
+class _StubWriter:
+    """Hands out one fixed NAVM FormID."""
+
+    def derive_formid(self, *_a):
+        """A stable id; nothing here writes a plugin."""
+        return 0x01000800
+
+
+def test_worker_context_is_initialized_before_any_rebuild(monkeypatch):
+    """precompute_navmeshes must init the worker BEFORE navm_verify.prepare.
+
+    prepare() rebuilds sampled cells in the PARENT, and run_job reads globals
+    only init_worker sets.  Initializing after it (as the import did) left
+    _BASE_MODEL_BY_FID empty, so every REFR resolved to no mesh, the cell
+    voxelized bare terrain, and a good cache reported MISMATCH.
+    """
+    calls = []
+    monkeypatch.setattr(navm_pool, 'precompute_fallout_navmeshes',
+                        lambda *a, **k: None)
+    monkeypatch.setattr(navm_pool, 'gather_navm_jobs',
+                        lambda *a, **k: [_job('interior', 0)])
+    monkeypatch.setattr(navm_pool, 'navmesh_geom_cache', lambda *a: None)
+    monkeypatch.setattr(navm_pool, 'navm_worker_count', lambda n: 1)
+    monkeypatch.setattr(navm_verify, 'init_context',
+                        lambda *a, **k: calls.append('init'))
+    monkeypatch.setattr(navm_verify, 'prepare',
+                        lambda *a, **k: calls.append('prepare'))
+    monkeypatch.setattr(navm_pool, '_run_inline', lambda jobs: {})
+    monkeypatch.setattr(navm_pool, 'get_formid_index_offset', lambda: 0)
+    monkeypatch.setattr(navm_pool, 'get_injected_formids', lambda: {})
+
+    navm_pool.precompute_navmeshes({}, _StubWriter(), {}, set())
+    assert calls == ['init', 'prepare']

@@ -66,16 +66,16 @@ OB_SKEL_JSON = os.path.join(GENERATED_DIR, "skeleton_bones_oblivion.json")
 # ---------------------------------------------------------------------------
 # Import module under test
 # ---------------------------------------------------------------------------
-from asset_convert.skin_retarget import (
-    _load_skeleton,
-    _skin_transform_to_np,
-    _m44_to_np,
-    _write_skin_transform,
-    _get_block_name,
+from asset_convert.character.skin_retarget import (
+    load_skeleton,
+    skin_transform_to_np,
+    m44_to_np,
+    write_skin_transform,
+    get_block_name,
     build_bone_mapping,
     retarget_skin_to_skyrim,
 )
-from asset_convert.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
+from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
 
 
 # ---------------------------------------------------------------------------
@@ -109,20 +109,20 @@ def _check_mbw_identity(data, tol=0.001):
     Returns list of (geom_name, bone_name, error) for failures."""
     failures = []
     for blk, skin, sd, skel_root in _get_skinned_shapes(data):
-        M = _skin_transform_to_np(sd.skin_transform)
-        gname = _get_block_name(blk)
+        M = skin_transform_to_np(sd.skin_transform)
+        gname = get_block_name(blk)
         for i in range(sd.num_bones):
             if i >= skin.num_bones or skin.bones[i] is None:
                 continue
-            B = _skin_transform_to_np(sd.bone_list[i].skin_transform)
+            B = skin_transform_to_np(sd.bone_list[i].skin_transform)
             try:
-                W = _m44_to_np(skin.bones[i].get_transform(skel_root))
+                W = m44_to_np(skin.bones[i].get_transform(skel_root))
             except Exception:
                 continue
             MBW = M @ B @ W
             err = np.linalg.norm(MBW - np.eye(4))
             if err > tol:
-                bname = _get_block_name(skin.bones[i])
+                bname = get_block_name(skin.bones[i])
                 failures.append((gname, bname, err))
     return failures
 
@@ -131,7 +131,7 @@ def _get_all_vertex_positions(data):
     """Return {geom_name: (N,3) array} for all skinned shapes."""
     result = {}
     for blk, skin, sd, sr in _get_skinned_shapes(data):
-        name = _get_block_name(blk)
+        name = get_block_name(blk)
         nv = blk.data.num_vertices
         verts = np.array([[v.x, v.y, v.z] for v in blk.data.vertices[:nv]],
                          dtype=np.float64)
@@ -142,7 +142,7 @@ def _get_all_vertex_positions(data):
 def _load_sk_skeleton():
     """Load Skyrim male skeleton from JSON."""
     from pathlib import Path
-    return _load_skeleton(Path(SK_SKEL_JSON))
+    return load_skeleton(Path(SK_SKEL_JSON))
 
 
 def get_skinned_verts_from_path(nif_path):
@@ -166,9 +166,9 @@ class TestMatrixHelpers:
         st.translation.x = 10.0; st.translation.y = -20.0; st.translation.z = 30.0
         st.scale = 1.0
 
-        M = _skin_transform_to_np(st)
+        M = skin_transform_to_np(st)
         st2 = NifFormat.SkinTransform()
-        _write_skin_transform(st2, M)
+        write_skin_transform(st2, M)
 
         np.testing.assert_allclose(st2.rotation.m_11, 0.5, atol=1e-6)
         np.testing.assert_allclose(st2.translation.x, 10.0, atol=1e-6)
@@ -178,8 +178,8 @@ class TestMatrixHelpers:
         """Identity matrix roundtrips through SkinTransform."""
         M = np.eye(4, dtype=np.float64)
         st = NifFormat.SkinTransform()
-        _write_skin_transform(st, M)
-        M2 = _skin_transform_to_np(st)
+        write_skin_transform(st, M)
+        M2 = skin_transform_to_np(st)
         np.testing.assert_allclose(M2, np.eye(4), atol=1e-12)
 
 
@@ -192,7 +192,7 @@ class TestSkeletonLoading:
     @pytest.mark.skipif(not os.path.exists(OB_SKEL_JSON), reason="No OB skeleton JSON")
     def test_ob_skeleton_has_core_bones(self):
         from pathlib import Path
-        sk = _load_skeleton(Path(OB_SKEL_JSON))
+        sk = load_skeleton(Path(OB_SKEL_JSON))
         for bone in ["Bip01 Pelvis", "Bip01 Spine", "Bip01 L UpperArm",
                       "Bip01 R UpperArm", "Bip01 L Thigh", "Bip01 R Thigh"]:
             assert bone in sk, f"Missing OB bone: {bone}"
@@ -217,7 +217,7 @@ class TestSkeletonLoading:
     def test_ob_pelvis_height(self):
         """Oblivion pelvis Z ≈ 67.4 (known reference value)."""
         from pathlib import Path
-        sk = _load_skeleton(Path(OB_SKEL_JSON))
+        sk = load_skeleton(Path(OB_SKEL_JSON))
         pelvis = sk["Bip01 Pelvis"]
         z = pelvis[3, 2]
         assert 63 < z < 72, f"OB Pelvis Z={z}, expected ~67.4"
@@ -226,7 +226,7 @@ class TestSkeletonLoading:
     def test_ob_bip01_has_rz90_rotation(self):
         """Oblivion Bip01 root has Rz(+90°) convention rotation."""
         from pathlib import Path
-        sk = _load_skeleton(Path(OB_SKEL_JSON))
+        sk = load_skeleton(Path(OB_SKEL_JSON))
         # Look for Bip01 itself or COM (root-ish bone)
         if "Bip01" in sk:
             W = sk["Bip01"]
@@ -262,7 +262,7 @@ class TestBoneMapping:
     )
     def test_bone_map_has_essentials(self):
         from pathlib import Path
-        ob = _load_skeleton(Path(OB_SKEL_JSON))
+        ob = load_skeleton(Path(OB_SKEL_JSON))
         sk = _load_sk_skeleton()
         mapping = build_bone_mapping(ob, sk)
         # Must include pelvis, spine, arms, legs
@@ -275,7 +275,7 @@ class TestBoneMapping:
     )
     def test_all_mapped_bones_exist_in_both_skeletons(self):
         from pathlib import Path
-        ob = _load_skeleton(Path(OB_SKEL_JSON))
+        ob = load_skeleton(Path(OB_SKEL_JSON))
         sk = _load_sk_skeleton()
         mapping = build_bone_mapping(ob, sk)
         for ob_name, sk_name in mapping.items():
@@ -354,7 +354,7 @@ class TestVertexDeformation:
 
     def _convert_and_get_verts(self, src_path):
         """Run full converter and return vertex arrays from output."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         dst = os.path.join(BASE, "temp", f"test_deform_{os.path.basename(src_path)}")
         result = convert_nif(src_path, dst)
         assert result["converted"], f"Conversion failed"
@@ -448,7 +448,7 @@ class TestBonePositionAccuracy:
 
     def _convert_and_check_bones(self, src_path, sk_skel):
         """Run full converter and verify bone positions match SK skeleton."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         dst = os.path.join(BASE, "temp", f"test_bonepos_{os.path.basename(src_path)}")
         result = convert_nif(src_path, dst)
         assert result["converted"], f"Conversion failed: {result.get('error')}"
@@ -460,11 +460,11 @@ class TestBonePositionAccuracy:
             for i in range(skin.num_bones):
                 if skin.bones[i] is None:
                     continue
-                bone_name = _get_block_name(skin.bones[i])
+                bone_name = get_block_name(skin.bones[i])
                 if bone_name not in sk_skel:
                     continue
                 try:
-                    W = _m44_to_np(skin.bones[i].get_transform(skel_root))
+                    W = m44_to_np(skin.bones[i].get_transform(skel_root))
                 except Exception:
                     continue
                 sk_pos = sk_skel[bone_name][3, :3]
@@ -505,7 +505,7 @@ class TestMBWRawRetarget:
     
     Note: retarget expects bones already renamed to Skyrim names.
     Source NIFs have Oblivion names, so bones won't match SK skeleton.
-    But _manual_update_bind_position still guarantees M@B@W = I from
+    But manual_update_bind_position still guarantees M@B@W = I from
     whatever the current NiNode transforms are.
     """
 
@@ -546,7 +546,7 @@ class TestBoneDistancePreservation:
     )
     def test_cuirass_bone_distances(self):
         """After retarget, bone distances should match Skyrim skeleton distances."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         sk = _load_sk_skeleton()
 
         dst = os.path.join(BASE, "temp", "test_bonedist_cuirass.nif")
@@ -559,11 +559,11 @@ class TestBoneDistancePreservation:
             for i in range(skin.num_bones):
                 if skin.bones[i] is None:
                     continue
-                name = _get_block_name(skin.bones[i])
+                name = get_block_name(skin.bones[i])
                 if name not in sk:
                     continue
                 try:
-                    W = _m44_to_np(skin.bones[i].get_transform(skel_root))
+                    W = m44_to_np(skin.bones[i].get_transform(skel_root))
                     nif_bones[name] = W[3, :3]
                 except Exception:
                     pass
@@ -614,13 +614,13 @@ class TestEdgeLengthPreservation:
             if hasattr(blk.data, 'triangles'):
                 for t in blk.data.triangles:
                     tris.append((t.v_1, t.v_2, t.v_3))
-            results.append((_get_block_name(blk), np.array(tris), verts))
+            results.append((get_block_name(blk), np.array(tris), verts))
         return results
 
     @pytest.mark.skipif(not os.path.exists(IRON_CUIRASS_SRC), reason="Need source cuirass")
     def test_cuirass_edge_lengths(self):
         """Edge lengths in cuirass should be approximately preserved."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         src_data = _load_nif(IRON_CUIRASS_SRC)
         dst_path = os.path.join(BASE, "temp", "test_edgelen_cuirass.nif")
         convert_nif(IRON_CUIRASS_SRC, dst_path)
@@ -676,7 +676,7 @@ class TestEdgeLengthPreservation:
     @pytest.mark.skipif(not os.path.exists(IRON_BOOTS_SRC), reason="Need source boots")
     def test_boots_edge_lengths(self):
         """Edge lengths in boots should be well-preserved (minimal deformation)."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         src_data = _load_nif(IRON_BOOTS_SRC)
         dst_path = os.path.join(BASE, "temp", "test_edgelen_boots.nif")
         convert_nif(IRON_BOOTS_SRC, dst_path)
@@ -732,7 +732,7 @@ class TestVertexBbox:
         """Cuirass Z should span chest area — arms now at sides (lower Z)."""
         data = _load_nif(IRON_CUIRASS_OUT)
         for blk, skin, sd, sr in _get_skinned_shapes(data):
-            name = _get_block_name(blk)
+            name = get_block_name(blk)
             nv = blk.data.num_vertices
             if nv == 0:
                 continue
@@ -779,7 +779,7 @@ class TestFullConverterIntegration:
     @pytest.mark.skipif(not os.path.exists(IRON_CUIRASS_SRC), reason="Need source cuirass")
     def test_convert_cuirass_succeeds(self):
         """Full converter pipeline should succeed on cuirass."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         dst = os.path.join(BASE, "temp", "test_convert_cuirass.nif")
         result = convert_nif(IRON_CUIRASS_SRC, dst)
         assert result["converted"], f"Conversion failed: {result.get('error')}"
@@ -794,11 +794,11 @@ class TestFullConverterIntegration:
     @pytest.mark.skipif(not os.path.exists(IRON_CUIRASS_SRC), reason="Need source cuirass")
     def test_converter_preserves_vertex_count(self):
         """Vertex count should be preserved through conversion."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         src_data = _load_nif(IRON_CUIRASS_SRC)
         src_counts = {}
         for blk, _, _, _ in _get_skinned_shapes(src_data):
-            name = _get_block_name(blk)
+            name = get_block_name(blk)
             src_counts[name] = blk.data.num_vertices
 
         dst = os.path.join(BASE, "temp", "test_convert_cuirass_vcount.nif")
@@ -807,7 +807,7 @@ class TestFullConverterIntegration:
         
         dst_counts = {}
         for blk, _, _, _ in _get_skinned_shapes(dst_data):
-            name = _get_block_name(blk)
+            name = get_block_name(blk)
             dst_counts[name] = blk.data.num_vertices
 
         # At least some geometries should match (skip body splice blocks)
@@ -827,7 +827,7 @@ class TestFullConverterIntegration:
     )
     def test_converter_bones_at_skyrim_positions(self):
         """After full conversion, bones should be at Skyrim skeleton positions."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         sk = _load_sk_skeleton()
         dst = os.path.join(BASE, "temp", "test_convert_cuirass_bones.nif")
         convert_nif(IRON_CUIRASS_SRC, dst)
@@ -838,11 +838,11 @@ class TestFullConverterIntegration:
             for i in range(skin.num_bones):
                 if skin.bones[i] is None:
                     continue
-                bone_name = _get_block_name(skin.bones[i])
+                bone_name = get_block_name(skin.bones[i])
                 if bone_name not in sk:
                     continue
                 try:
-                    W = _m44_to_np(skin.bones[i].get_transform(skel_root))
+                    W = m44_to_np(skin.bones[i].get_transform(skel_root))
                 except Exception:
                     continue
                 sk_pos = sk[bone_name][3, :3]
@@ -866,7 +866,7 @@ class TestSkinPartition:
         data = _load_nif(IRON_CUIRASS_OUT)
         for blk, skin, sd, sr in _get_skinned_shapes(data):
             assert skin.skin_partition is not None, \
-                f"{_get_block_name(blk)}: missing NiSkinPartition"
+                f"{get_block_name(blk)}: missing NiSkinPartition"
 
     @pytest.mark.skipif(not os.path.exists(IRON_CUIRASS_OUT), reason="Need converted cuirass")
     def test_cuirass_partition_has_triangles(self):
@@ -879,7 +879,7 @@ class TestSkinPartition:
                 part = skin.skin_partition.skin_partition_blocks[pi]
                 # Skyrim uses triangles, not strips
                 assert part.num_strips == 0, \
-                    f"{_get_block_name(blk)} partition {pi}: has strips"
+                    f"{get_block_name(blk)} partition {pi}: has strips"
 
 
 # ============================================================================
@@ -912,7 +912,7 @@ class TestBSDismemberSkin:
             if isinstance(skin, NifFormat.BSDismemberSkinInstance):
                 found_dismember = True
                 assert skin.num_partitions > 0, \
-                    f"{_get_block_name(blk)}: 0 dismember partitions"
+                    f"{get_block_name(blk)}: 0 dismember partitions"
         assert found_dismember, "No BSDismemberSkinInstance found"
 
 
@@ -939,7 +939,7 @@ class TestMeshContinuity:
         """Return {block_name: np.ndarray (V, 3)} for all skinned shapes."""
         result = {}
         for blk, skin, sd, sr in _get_skinned_shapes(data):
-            name = _get_block_name(blk)
+            name = get_block_name(blk)
             nv = blk.data.num_vertices
             if nv == 0:
                 continue
@@ -980,7 +980,7 @@ class TestMeshContinuity:
 
     def _check_holes(self, src_path, dst_path):
         """Return list of hole descriptions (empty = no holes)."""
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         result = convert_nif(src_path, dst_path)
         assert result["converted"], f"Conversion failed: {result.get('error')}"
 
@@ -1059,22 +1059,13 @@ class TestMeshContinuity:
 
 # ---------------------------------------------------------------------------
 # PRN-attached rigid armor: authored node offset + biped slot
-# ---------------------------------------------------------------------------
-# Regression for the Morroblivion Armun-An Bonemold Helm, which sat ~3.3 units
-# behind the skull.  Two independent defects, both fixed:
-#   1. retarget OVERWROTE the geometry node's translation with the Skyrim bone
-#      position, discarding the offset the mesh was authored with (Armun-An's
-#      geometry node carries y=+2.8567).  A PRN piece is rigid-skinned with an
-#      IDENTITY bind, so that node transform is the ONLY thing positioning it.
-#   2. the partition body_part came from the geometry NAME ('ArmunAn'), which
-#      matched the 'arm' keyword and tagged a helmet as torso armour (slot 32).
 def test_get_body_parts_for_bone_head_is_hair_slot():
     """A piece rigid-skinned to the head bone claims the hair slot, not torso."""
-    from asset_convert.skin_retarget import _get_body_parts_for_bone
-    assert _get_body_parts_for_bone('Bip01 Head', 1) == [131]
-    assert _get_body_parts_for_bone('NPC Head [Head]', 2) == [131, 131]
+    from asset_convert.character.skin_retarget import get_body_parts_for_bone
+    assert get_body_parts_for_bone('Bip01 Head', 1) == [131]
+    assert get_body_parts_for_bone('NPC Head [Head]', 2) == [131, 131]
     # A bone that implies nothing defers to the geometry-name lookup.
-    assert _get_body_parts_for_bone('Bip01 Spine2', 1) is None
+    assert get_body_parts_for_bone('Bip01 Spine2', 1) is None
 
 
 def test_headwear_geometry_keywords_beat_arm():
@@ -1085,12 +1076,12 @@ def test_headwear_geometry_keywords_beat_arm():
     last resort, reached only for meshes no ARMO/CLOT record names — anything
     a record wears is slotted from its BMDT flags instead.
     """
-    from asset_convert.skin_retarget import _get_body_parts_for_geometry
-    assert _get_body_parts_for_geometry('helm1', 1) == [131]
-    assert _get_body_parts_for_geometry('visor', 1) == [131]
-    assert _get_body_parts_for_geometry('greave', 1) == [44]
+    from asset_convert.character.skin_retarget import get_body_parts_for_geometry
+    assert get_body_parts_for_geometry('helm1', 1) == [131]
+    assert get_body_parts_for_geometry('visor', 1) == [131]
+    assert get_body_parts_for_geometry('greave', 1) == [44]
     # Artwork names match nothing and get the torso default.
-    assert _get_body_parts_for_geometry('Plane02', 1) == [32]
+    assert get_body_parts_for_geometry('Plane02', 1) == [32]
 
 
 def test_biped_bit_meanings_match_xedit():
@@ -1100,7 +1091,7 @@ def test_biped_bit_meanings_match_xedit():
     Getting 8 wrong put the Amulet of Kings on the torso slot.  Ring 36 and
     amulet 40 are measured from vanilla goldring_1.nif / amulet.nif.
     """
-    from asset_convert.wearable_plan import body_part_for_flags
+    from asset_convert.character.wearable_plan import body_part_for_flags
     assert body_part_for_flags(1 << 6) == 36    # Right Ring
     assert body_part_for_flags(1 << 7) == 36    # Left Ring
     assert body_part_for_flags(1 << 8) == 40    # Amulet
@@ -1115,7 +1106,7 @@ def test_authored_biped_flags_decide_the_slot():
     heuristics: 'towersheild.nif' (misspelled) escaped the shield check, and
     'ArmunAn' matched the 'arm' keyword and tagged a helmet as torso armour.
     """
-    from asset_convert.wearable_plan import body_part_for_flags
+    from asset_convert.character.wearable_plan import body_part_for_flags
     assert body_part_for_flags(0x0002) == 131   # bit 1 Head  -> hair slot
     assert body_part_for_flags(0x0004) == 32    # bit 2 UpperBody
     assert body_part_for_flags(0x0010) == 33    # bit 4 Hand
@@ -1133,7 +1124,7 @@ def test_bake_block_transform_folds_offset_into_verts():
     the origin, 'default' at x=-1.6) rendered as a centred half plus a shifted
     half once the bone position was ADDED to each shape's own translation.
     """
-    from asset_convert.skin_retarget import _bake_block_transform
+    from asset_convert.character.skin_retarget import bake_block_transform
     shape = NifFormat.NiTriShape()
     shape.translation.x, shape.translation.y, shape.translation.z = -1.6, 0.0, 0.0
     data_blk = NifFormat.NiTriShapeData()
@@ -1145,7 +1136,7 @@ def test_bake_block_transform_folds_offset_into_verts():
     data_blk.vertices[0].z = 4.0
     shape.data = data_blk
 
-    _bake_block_transform(shape)
+    bake_block_transform(shape)
 
     # The -1.6 now lives in the vertex, and the node no longer carries a scale
     # or rotation of its own -- it is free to hold the bone position verbatim.
@@ -1205,7 +1196,7 @@ class TestLocalForWorld:
         return W
 
     def test_local_composes_back_to_target(self):
-        from asset_convert.skin_retarget import local_for_world
+        from asset_convert.character.skin_retarget import local_for_world
         P, W = self._parent(), self._target()
         local = local_for_world(W, P)
         np.testing.assert_allclose(local @ P, W, atol=1e-9)
@@ -1226,7 +1217,7 @@ class TestLocalForWorld:
 
         This is the branch that hid the bug for months -- it must stay exact.
         """
-        from asset_convert.skin_retarget import local_for_world
+        from asset_convert.character.skin_retarget import local_for_world
         W = self._target()
         np.testing.assert_allclose(local_for_world(W, np.eye(4)), W, atol=1e-12)
 
@@ -1236,7 +1227,7 @@ class TestLocalForWorld:
         The shipped bug compounded down exactly such a chain (85.87 -> 162.78
         -> 275.97 units), so the guard walks a chain rather than one joint.
         """
-        from asset_convert.skin_retarget import local_for_world
+        from asset_convert.character.skin_retarget import local_for_world
         P = self._parent()
         world = P
         for step in range(3):

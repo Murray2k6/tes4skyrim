@@ -1,0 +1,1741 @@
+"""Terrain LOD generation for TES4→TES5 worldspaces.
+
+Reads LAND records (VHGT heights, VCLR vertex colors, ATXT/VTXT texture layers)
+from the converted ESM and produces:
+  meshes/terrain/<WRLD>/<WRLD>.<level>.<tx>.<ty>.btr   — heightmap NIF per tile
+  textures/terrain/<WRLD>/<WRLD>.<level>.<tx>.<ty>.dds  — per-tile diffuse (DXT1)
+  textures/terrain/<WRLD>/<WRLD>.<level>.<tx>.<ty>_n.dds — per-tile normal (flat)
+
+LOD levels generated: 4, 8, 16 (cells per tile side).
+Each tile covers level×level cells.
+
+Vertex layout per tile: (level*32+1) × (level*32+1) vertices.
+Each cell contributes exactly 33 verts per side (32 intervals), sharing the
+boundary vertex with its neighbor, so a level-N tile has N*32+1 verts per side.
+Local step = CELL_SIZE / (level*32) so that level verts × step = CELL_SIZE.
+Heights are in Skyrim units (1 unit ≈ 1.4 cm).  Cell size = 4096 units.
+"""
+
+import io
+import math
+import mmap
+import struct
+import sys
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import numpy as np
+
+from worker_budget import worker_count
+
+# Apply all PyFFI patches (time.clock fix, nif.xml condition fixes) before import
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from asset_convert.lod.terrain_lod_falloutnv import edid_keyed_lod_tiles, resolve_edid_keyed
+from output_layout import assets_for
+from asset_convert.texture.dds_codec import (
+    TEX_SIZE,
+    write_dds_dxt1,
+    write_normal_dds,
+)
+from tes5_import.tes5_reader import (GRP_TOP,
+                                     GRP_WORLD_CHILDREN,
+                                     header_end, read_group,
+                                     read_record, records, walk)
+
+try:
+    from pyffi.formats.nif import NifFormat
+    _PYFFI = True
+except ImportError:
+    _PYFFI = False
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+CELL_SIZE   = 4096.0   # Skyrim units per cell
+VERTS_SIDE  = 33       # vertices per cell side in TES5 LAND records (32 intervals)
+DELTA_SCALE = 8.0      # each int8 delta = 8 Skyrim units of height
+
+# ---------------------------------------------------------------------------
+# Plugin byte cache
+_RAW_CACHE_KEY = None
+_RAW_CACHE_BUF = None
+
+
+def _plugin_bytes(esm_path: Path) -> bytes:
+    """Read a plugin's bytes, reusing the last file read (keyed on mtime+size)."""
+    global _RAW_CACHE_KEY, _RAW_CACHE_BUF
+    esm_path = Path(esm_path)
+    try:
+        st = esm_path.stat()
+        key = (str(esm_path).lower(), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return esm_path.read_bytes()
+    if key == _RAW_CACHE_KEY and _RAW_CACHE_BUF is not None:
+        return _RAW_CACHE_BUF
+    # Drop the old buffer BEFORE reading the new one so the two never coexist.
+    _RAW_CACHE_KEY = None
+    _RAW_CACHE_BUF = None
+    buf = esm_path.read_bytes()
+    _RAW_CACHE_KEY = key
+    _RAW_CACHE_BUF = buf
+    return buf
+
+
+def _drop_plugin_bytes():
+    """Release the cached plugin buffer (call before spawning worker pools)."""
+    global _RAW_CACHE_KEY, _RAW_CACHE_BUF
+    _RAW_CACHE_KEY = None
+    _RAW_CACHE_BUF = None
+    _WRLD_FID_CACHE.clear()
+
+
+# (path, mtime, size, edid) -> raw WRLD FormID or None. `find_worldspace_fid`
+# is a full linear scan of the plugin, and `parse_land_records` ran it twice
+# for the same (file, edid) on every worldspace: once to resolve the defining
+# plugin's id, then again inside `scan_land_file`. Measured 0.64 s of the 2.36 s
+# parse on Oblivion.esm. Cleared with the byte cache so a rebuilt plugin cannot
+# serve a stale id.
+_WRLD_FID_CACHE: dict = {}
+
+
+def _worldspace_fid_cached(esm_path: Path, raw: bytes, edid: str):
+    """`find_worldspace_fid` memoised per (plugin file, worldspace EditorID)."""
+    try:
+        st = Path(esm_path).stat()
+        key = (str(esm_path).lower(), st.st_mtime_ns, st.st_size, edid)
+    except OSError:
+        return find_worldspace_fid(raw, len(raw), edid)
+    if key in _WRLD_FID_CACHE:
+        return _WRLD_FID_CACHE[key]
+    val = find_worldspace_fid(raw, len(raw), edid)
+    _WRLD_FID_CACHE[key] = val
+    return val
+
+LOD_LEVELS  = [4, 8, 16, 32]
+
+# Diffuse DDS size per LOD level.  A level-N tile spans N cells; it is only ever
+# viewed at distance, so per-cell texel density can stay low.  The old flat
+# 1024/2048 gave every one of the ~960 LOD4 tiles a 683KB diffuse + 1.4MB normal
+# => 3GB.  Scaling with level (roughly constant texels/cell) keeps quality where
+# it's seen and cuts the total ~8x.
+TEX_SIZE_BY_LEVEL = {4: 256, 8: 512, 16: 1024, 32: 2048}
+
+# Normal maps carry far less perceptible detail than diffuse at LOD distance,
+# so bake them at half the diffuse resolution (BC5 is 2x DXT1 per texel, so this
+# is the single biggest size win).
+NORMAL_SIZE_DIVISOR = 2
+
+# ---------------------------------------------------------------------------
+# LAND record parsing
+# ---------------------------------------------------------------------------
+
+def find_worldspace_fid(raw: bytes, n: int, edid: str):
+    """FormID of the WRLD named `edid`, or None.
+
+    Scoped to the top-level WRLD block, which holds every WRLD in the file,
+    and skips each worldspace's children -- so it never touches the ~1.17M
+    cell records behind them.  `n` is accepted for call compatibility.
+    """
+    for rec in records(raw, b'WRLD'):
+        if rec.string(b'EDID') == edid:
+            return rec.form_id
+    return None
+
+
+def detect_terrain_worldspaces(esm_path: Path, include_children: bool = False):
+    """ROOT worldspaces in an ESM, largest first.
+
+    Filenames don't tell us the worldspace EditorID (Oblivion.esm's worldspace
+    is 'TES4Tamriel'; Nehrim.esm's is 'NehrimWorldspace', not 'Nehrim'), so the
+    WRLD records have to be read.
+
+    Child worldspaces (those with a WNAM 'Parent Worldspace') render using their
+    parent's terrain LOD grid — e.g. AnvilWorld/BravilWorld sit inside the
+    Tamriel LOD — so generating separate LOD for them is wrong and they are
+    excluded by default. Pass include_children=True to list every worldspace.
+
+    Reads ONLY the top-level WRLD block: the WRLD records themselves and the
+    size of each one's child group. It deliberately does NOT walk into cell
+    children to count LAND records. That count was pure ranking information,
+    and paying for it meant stepping through 1.17 MILLION records in Python —
+    0.42s for Oblivion.esm and ~1.6s across a load order, which is a visible
+    UI stall. A worldspace with no terrain simply produces no tiles, so there
+    was never anything to gate on. Reading the headers alone is ~0.001s.
+
+    Returns [(size_hint, wrld_fid, edid), ...] sorted largest-first, where
+    size_hint is the byte size of the worldspace's child group — a monotonic
+    stand-in for "how much is in it", used only for display order.
+    """
+    fh = open(esm_path, 'rb')
+    try:
+        try:
+            raw = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+        except (ValueError, OSError):
+            raw = fh.read()      # empty file, or a filesystem that won't map
+        try:
+            return _scan_wrld_block(raw, include_children)
+        finally:
+            if isinstance(raw, mmap.mmap):
+                raw.close()
+    finally:
+        fh.close()
+
+
+def _top_wrld_group(raw):
+    """The top-level GRUP labelled 'WRLD', or None.
+
+    Every WRLD record in a file lives inside it, so nothing else need be read.
+    """
+    p = header_end(raw)
+    while p + 24 <= len(raw):
+        group = read_group(raw, p)
+        if group is None or group.end <= p:
+            return None
+        if group.type == GRP_TOP and group.label_sig == b'WRLD':
+            return group
+        p = group.end
+    return None
+
+
+def _scan_wrld_block(raw, include_children: bool):
+    """The WRLD-block reader behind `detect_terrain_worldspaces`."""
+    if len(raw) < 24:
+        return []
+
+    edid_by_fid: dict = {}
+    parent_by_fid: dict = {}
+    size_by_fid: dict = {}
+
+    block = _top_wrld_group(raw)
+    if block is None:
+        return []
+
+    q, cur = block.start + 24, None
+    while q + 24 <= block.end:
+        group = read_group(raw, q)
+        if group is not None:
+            if group.end <= q:
+                break
+            if group.type == GRP_WORLD_CHILDREN:
+                owner = group.label_fid or cur
+                if owner is not None:
+                    size_by_fid[owner] = (size_by_fid.get(owner, 0)
+                                          + group.end - group.start)
+            q = group.end
+            continue
+        rec, nxt = read_record(raw, q, block.end)
+        if rec is None:
+            break
+        if rec.sig == b'WRLD':
+            edid = rec.string(b'EDID')
+            if edid:
+                edid_by_fid[rec.form_id] = edid
+            wnam = rec.sub(b'WNAM')
+            if wnam and len(wnam) >= 4:
+                parent_by_fid[rec.form_id] = struct.unpack_from('<I', wnam)[0]
+            cur = rec.form_id
+        q = nxt
+
+    ranked = []
+    for fid in edid_by_fid:
+        parent = parent_by_fid.get(fid, 0)
+        if parent and not include_children:
+            continue   # child worldspace -> uses the parent's LOD grid
+        ranked.append((size_by_fid.get(fid, 0), fid,
+                       edid_by_fid.get(fid, f'{fid:08X}')))
+    ranked.sort(key=lambda t: (-t[0], t[2].lower()))
+    return ranked
+
+
+def _master_record_dir(export_dir, master: str):
+    """Where `master`'s records live, given any plugin's record folder.
+
+    Masters used to resolve as `export_dir.parent / master`. That holds only
+    while every plugin owns a top-level folder; an imported mod's plugins are
+    nested inside their mod's folder, making `.parent` the mod rather than the
+    export root.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    d = _Path(export_dir).parent
+    root = d
+    for cand in (d, d.parent):
+        if cand and (cand / 'sources.json').is_file():
+            root = cand
+            break
+    try:
+        from output_layout import record_dir as _rd
+        got = _rd(root, master)
+        if _os.path.isdir(got):
+            return got
+    except ImportError:
+        pass
+    return root / master
+
+
+def master_names(export_dir: Path):
+    """The TES4 master file names listed in an export's _HEADER.txt."""
+    header = Path(export_dir) / '_HEADER.txt'
+    if not header.is_file():
+        return []
+    names = []
+    for line in header.read_text(encoding='utf-8', errors='replace').splitlines():
+        if line.startswith('Master['):
+            _, _, val = line.partition('=')
+            val = val.strip()
+            if val:
+                names.append(val)
+    return names
+
+
+def _scan_cell_coords(esm_path: Path, coords: dict):
+    """Collect {cell FormID -> (x, y)} from every CELL carrying XCLC.
+
+    Keys are NORMALISED load-order-wide FormIDs. Every caller accumulates
+    several files into one `coords` dict, and a raw id is meaningful only inside
+    the file it came from — the index byte indexes THAT file's master list. Two
+    plugins' 02s routinely name unrelated records, so raw keys let one plugin's
+    cell silently inherit another's grid coordinates.
+    """
+    from asset_convert.lod.esm_scan import formid_remap_table
+    gmap = formid_remap_table(Path(esm_path))
+    for rec in records(esm_path.read_bytes(), b'CELL'):
+        xclc = rec.sub(b'XCLC')
+        if xclc and len(xclc) >= 8:
+            fid = gmap[rec.form_id >> 24] | (rec.form_id & 0x00FFFFFF)
+            coords[fid] = struct.unpack_from('<2i', xclc)
+
+
+def lod_capable_worldspaces(export_dir: Path, out_root: Path = None,
+                            plugin: str = None):
+    """Every worldspace a plugin should get distant LOD for.
+
+    The authority is the SOURCE GAME's own shipped LOD assets. Whoever built
+    the plugin decided which worldspaces are seen from a distance and baked
+    LOD for exactly those; that judgement is authored data, and it is better
+    than anything we can infer. Measured over the whole load order: of the 20
+    worldspaces with shipped LOD, every single one also contains LOD-flagged
+    references, so the list has no false positives at all.
+
+    Inferring it instead was tried and is worse in both directions. Deriving
+    the set from the converted ESM's WRLD records offers every worldspace that
+    merely HAS terrain, which pulls in Bethesda's debug worlds (TestGatekeeper,
+    TestShambles, CubeWorldspace ...) -- they bake no object tiles, and
+    `generate_lod` returning False for them dragged an otherwise clean
+    84-worldspace run down to "create_lod: FAILED for all plugins". Filtering
+    THAT list back down needs a full reference scan of every ESM, which is
+    seconds of work to reconstruct a fact the export already states for free.
+
+    A plugin shipping no LOD assets is not a plugin whose worldspaces were
+    missed. City worldspaces are folded into their parent's LOD grid (a WNAM
+    parent, which `detect_terrain_worldspaces` already excludes), and an ESP
+    that extends a master's landmass ships LOD for the MASTER's worldspace:
+    ElsweyrPelletine.esp supplies TES4Tamriel tiles, not tiles of its own.
+
+    `out_root` is accepted for call compatibility and used only to tell a
+    missing conversion apart from a missing export in the reason text.
+
+    Returns (worldspaces, reason); `reason` is None unless nothing qualified.
+    A reason is a WARNING for the caller to surface, not an error: the usual
+    cause is a deleted or never-run export.
+    """
+    export_dir = Path(export_dir)
+    # The messages below tell the user to re-run `convert.py -f <name>`, so it
+    # must be the PLUGIN. A single-plugin imported mod keeps its records in the
+    # mod's folder, whose name is the mod label and not a valid -f argument.
+    name = plugin or export_dir.name
+
+    if not export_dir.is_dir():
+        return [], (f"{name}: no export folder — run the Export stage "
+                    f"(convert.py -f {name} --export-only).")
+
+    try:
+        shipped = shipped_lod_worldspaces(export_dir) or []
+    except Exception as exc:
+        return [], f"{name}: could not read the export's LOD assets ({exc})."
+
+    if shipped:
+        return shipped, None
+
+    # No shipped LOD. Distinguish "this plugin genuinely has none" from "the
+    # assets that would have told us were deleted", because the two look
+    # identical from here and only one of them is the user's problem.
+    _assets = assets_for(export_dir)
+    lod_dirs = [_assets / 'meshes' / 'landscape' / 'lod',
+                _assets / 'textures' / 'landscapelod' / 'generated']
+    if not any(d.is_dir() for d in lod_dirs):
+        return [], (f"{name}: the export has no landscape-LOD folders. If you "
+                    f"deleted them, re-run the Extract stage "
+                    f"(convert.py -f {name} --extract-only); otherwise this "
+                    f"plugin simply ships no distant LOD of its own.")
+    return [], (f"{name}: ships no distant LOD of its own — its worldspaces "
+                f"are covered by whichever plugin does (a city world renders "
+                f"on its parent's LOD grid).")
+
+
+def worldspace_edids(export_dir):
+    """{FormID: EditorID} from this export's WRLD.txt and every master's.
+
+    Masters are scanned too, and resolved through the registry rather than as
+    sibling directories.
+
+    See: docs/commentary/asset_convert_terrain.md#why-the-wrld-scan-includes-masters
+    """
+    edid_by_fid = {}
+
+    def _scan(directory):
+        """Fold one record directory's WRLD EditorIDs into the map."""
+        wrld_txt = directory / 'WRLD.txt'
+        if not wrld_txt.is_file():
+            return
+        cur_fid = None
+        for line in wrld_txt.read_text(encoding='utf-8',
+                                       errors='replace').splitlines():
+            if line.startswith('FormID='):
+                try:
+                    cur_fid = int(line[7:].strip(), 16)
+                except ValueError:
+                    cur_fid = None
+            elif line.startswith('EditorID=') and cur_fid is not None:
+                edid_by_fid.setdefault(cur_fid, line[9:].strip())
+
+    _scan(export_dir)
+    for master in master_names(export_dir):
+        _scan(_master_record_dir(export_dir, master))
+    return edid_by_fid
+
+
+def shipped_lod_worldspaces(export_dir: Path):
+    """Return the worldspace EditorIDs the SOURCE game shipped distant-LOD for.
+
+    Oblivion/Nehrim generate distant LOD offline and ship it as assets keyed by
+    the worldspace's *decimal* FormID:
+        meshes\\landscape\\lod\\<formid>.<x>.<y>.<level>.nif   (object LOD)
+        textures\\landscapelod\\generated\\<formid>.*.dds       (LOD textures)
+    (Oblivion also ships DistantLOD\\<edid>_<x>_<y>.lod terrain files, but the
+    extract step drops those; the mesh/texture prefixes are an equivalent, and
+    already-extracted, signal.)
+
+    We treat "the source shipped LOD for it" as the authority on which
+    worldspaces deserve LOD — that is exactly the vanilla set and it naturally
+    excludes child worldspaces (Anvil/Bravil/… inside Tamriel, whose overlay
+    LAND records never got their own LOD).
+
+    Scans the extract dir's LOD folders for the decimal-FormID prefixes, maps
+    them back to EditorIDs via the export's WRLD.txt, and returns
+        [(edid, tes4_formid), ...]  sorted by descending shipped-tile count.
+    """
+    export_dir = Path(export_dir)
+
+    # 1. Collect decimal FormID prefixes from shipped LOD assets.
+    from collections import Counter
+    counts = Counter()
+    for sub in ('meshes/landscape/lod', 'textures/landscapelod/generated'):
+        d = export_dir / sub
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            head = f.name.split('.', 1)[0]
+            if head.isdigit():
+                counts[int(head)] += 1
+    by_edid = edid_keyed_lod_tiles(export_dir)
+    if not counts and not by_edid:
+        return []
+
+    edid_by_fid = worldspace_edids(export_dir)
+
+    # The importer renames Oblivion's 'Tamriel' worldspace to 'TES4Tamriel'
+    # (tes5_import/record_types/world.py) so it doesn't override Skyrim's
+    # Tamriel. LOD generation looks worldspaces up by EDID in the CONVERTED
+    # ESM, so return the post-rename name to match.
+    def _converted_edid(name):
+        return 'TES4Tamriel' if name == 'Tamriel' else name
+
+    result = [(_converted_edid(edid_by_fid.get(fid, f'{fid:08X}')), fid)
+              for fid in counts]
+    result.sort(key=lambda t: -counts[t[1]])
+    return result + resolve_edid_keyed(by_edid, edid_by_fid, _converted_edid,
+                                        {fid for _e, fid in result})
+
+
+def parse_land_records(esm_path: Path, worldspace_edid: str = 'TES4Tamriel',
+                        overlay_paths=None):
+    """Parse LAND + CELL water data for one worldspace from the output ESM.
+
+    `overlay_paths` are plugins to apply ON TOP, in load order. Everything is
+    keyed by grid coordinate, so a later file's LAND for a cell simply replaces
+    the earlier one — which is exactly override semantics. This is what lets an
+    override plugin's regraded terrain reach LOD: DLCBattlehornCastle rewrites
+    VHGT on 10 Tamriel cells, and reading only the master left distant terrain
+    showing the ORIGINAL ground while the loaded cells showed the new ground.
+
+    Returns (lands, cell_water, default_water_height):
+      lands:      (cell_x, cell_y) -> {heights: ndarray(33,33 float32),
+                                       colors:  ndarray(33,33,3 uint8),
+                                       layers:  BTXT/ATXT/VTXT dict}
+      cell_water: (cell_x, cell_y) -> (has_water: bool, height: float or None)
+                  height is the cell XCLW override; None = use worldspace default
+      default_water_height: WRLD DNAM default water height (0.0 if absent)
+    """
+    lands = {}
+    cell_water = {}
+    wrld_water = {'default': None}
+    cell_coords = {}       # cell FormID -> (x, y), shared across load order
+
+    # The worldspace's FormID, taken from the file that DEFINES it. Overlays are
+    # scoped with this rather than their own lookup, because an override plugin
+    # routinely edits a master's worldspace while shipping no WRLD record — and
+    # the unscoped fallback would then sweep in every OTHER worldspace it
+    # carries. That is not hypothetical: it put all 5,796 of Morrowind_ob's
+    # Vvardenfell cells into Cyrodiil's heightmap.
+    # Normalised into the load-order-wide space, because it is handed to the
+    # OVERLAY scans to compare against THEIR ids. A raw id from one file means
+    # nothing in another.
+    try:
+        from asset_convert.lod.esm_scan import formid_remap_table
+        _base_raw = _plugin_bytes(Path(esm_path))
+        _raw_fid = _worldspace_fid_cached(Path(esm_path), _base_raw,
+                                          worldspace_edid)
+        del _base_raw
+        if _raw_fid is None:
+            base_wrld_fid = None
+        else:
+            _bmap = formid_remap_table(Path(esm_path))
+            base_wrld_fid = _bmap[_raw_fid >> 24] | (_raw_fid & 0x00FFFFFF)
+    except OSError:
+        base_wrld_fid = None
+
+    for _i, _path in enumerate([esm_path] + list(overlay_paths or [])):
+        scan_land_file(Path(_path), worldspace_edid, lands, cell_water,
+                        wrld_water, cell_coords,
+                        # Only the base file may fall back to "take everything";
+                        # for an overlay that fallback is the corruption above.
+                        allow_unscoped=(_i == 0),
+                        known_wrld_fid=base_wrld_fid)
+    default_wh = (wrld_water['default']
+                  if wrld_water['default'] is not None else 0.0)
+    return lands, cell_water, default_wh
+
+
+def scan_land_file(esm_path: Path, worldspace_edid: str,
+                    lands: dict, cell_water: dict, wrld_water: dict,
+                    cell_coords: dict, count_only: bool = False,
+                    allow_unscoped: bool = True, known_wrld_fid=None):
+    """Scan one plugin's LAND/CELL/WRLD data into the shared accumulators.
+
+    `known_wrld_fid` scopes the scan to a worldspace an override edits without
+    defining; `allow_unscoped` decides whether an unresolvable worldspace takes
+    every LAND record (True, for the defining file) or none (False, mandatory
+    for overlays).  Every FormID is normalised into the load-order-wide space
+    first, since the accumulators are shared across the whole stack.
+    See: docs/commentary/asset_convert_terrain.md#land-scan-scoping
+    """
+    raw = _plugin_bytes(Path(esm_path))
+    n   = len(raw)
+
+    from asset_convert.lod.esm_scan import formid_remap_table
+    _gmap = formid_remap_table(Path(esm_path))
+
+    def g(fid: int) -> int:
+        return _gmap[fid >> 24] | (fid & 0x00FFFFFF)
+
+    # We need CELL grid coords alongside each LAND.
+    # Strategy: track current CELL grid coords via a lightweight group scanner.
+    # Group type 6  = cell children group (label = cell FormID).
+    # Group type 1  = world children group (label = parent WRLD FormID).
+    # We only collect LAND records that belong to the target worldspace.
+
+    # Find target worldspace FormID first (fast linear scan).
+    #
+    # Normalised, like everything else keyed here — and `known_wrld_fid` is
+    # ALREADY normalised, because it comes from a DIFFERENT file (the one that
+    # defines the worldspace). Comparing it against this file's raw ids is
+    # exactly the cross-file mistake the normalisation exists to prevent.
+    _found = _worldspace_fid_cached(esm_path, raw, worldspace_edid)
+    target_wrld_fid = None if _found is None else g(_found)
+    if target_wrld_fid is not None:
+        print(f"  Filtering to worldspace '{worldspace_edid}' (FormID={target_wrld_fid:#010x})")
+    elif known_wrld_fid is not None:
+        # This file overrides the worldspace without shipping its WRLD record.
+        # Its edits live under a type-1 GRUP labelled with the DEFINING file's
+        # FormID, so scoping on that is exact — and still excludes every other
+        # worldspace the plugin carries.
+        target_wrld_fid = known_wrld_fid
+        print(f"  Scoping {esm_path.name} to '{worldspace_edid}' via the "
+              f"defining plugin (FormID={target_wrld_fid:#010x})")
+    elif allow_unscoped:
+        print(f"  WARNING: Worldspace '{worldspace_edid}' not found — collecting all LAND records")
+    else:
+        print(f"  '{worldspace_edid}' not defined by {esm_path.name} and no "
+              f"FormID known; taking no LAND from it")
+        return
+
+    def prune(group, _stack) -> bool:
+        """Skip a type-1 GRUP belonging to a worldspace we do not want."""
+        return (target_wrld_fid is not None
+                and group.type == GRP_WORLD_CHILDREN
+                and g(group.label_fid) != target_wrld_fid)
+
+    def scoped(stack) -> bool:
+        """True when this record sits in the worldspace being collected."""
+        if target_wrld_fid is None:
+            return True
+        wrld = stack.worldspace
+        return wrld is not None and g(wrld) == target_wrld_fid
+
+    for rec, stack in walk(raw, b'CELL', b'WRLD', b'LAND', prune=prune):
+        fid = g(rec.form_id)
+        if rec.sig == b'CELL':
+            _take_cell(rec, fid, cell_coords,
+                       cell_water if scoped(stack) else None)
+        elif rec.sig == b'WRLD':
+            if target_wrld_fid is not None and fid == target_wrld_fid:
+                dnam = rec.sub(b'DNAM')
+                if dnam and len(dnam) >= 8:
+                    wrld_water['default'] = struct.unpack_from('<f', dnam, 4)[0]
+        elif rec.sig == b'LAND' and scoped(stack):
+            cell = stack.cell
+            coords = cell_coords.get(None if cell is None else g(cell))
+            if coords is not None:
+                _take_land(rec, coords, lands, count_only, allow_unscoped)
+
+
+def _take_cell(rec, fid: int, cell_coords: dict, cell_water) -> None:
+    """Learn a CELL's grid coords, and its water when `cell_water` is given.
+
+    An OVERRIDE's CELL carries only the fields its author changed, so XCLC is
+    usually absent and its coords are the master's, learned earlier in load
+    order; one saying nothing about water keeps what the master established.
+    `cell_water` is None outside the target worldspace, where the coords are
+    still worth learning.
+    """
+    xclc = rec.sub(b'XCLC')
+    if xclc and len(xclc) >= 8:
+        coords = struct.unpack_from('<2i', xclc)
+        cell_coords[fid] = coords
+    else:
+        coords = cell_coords.get(fid)
+    if coords is None or cell_water is None:
+        return
+    data = rec.sub(b'DATA')
+    if data is None and coords in cell_water:
+        return
+    flags = 0
+    if data:
+        flags = data[0] | (data[1] << 8 if len(data) >= 2 else 0)
+    wh = None
+    xclw = rec.sub(b'XCLW')
+    if xclw and len(xclw) >= 4:
+        v = struct.unpack_from('<f', xclw)[0]
+        if -1e9 < v < 1e9:
+            wh = v
+    cell_water[coords] = (bool(flags & 0x02), wh)
+
+
+def _take_land(rec, coords, lands: dict, count_only: bool,
+               allow_unscoped: bool) -> None:
+    """Decode one LAND into `lands`, or erase the cell it deletes.
+
+    An OVERLAY's LAND with no VHGT is the author DELETING that cell's terrain;
+    skipping it left the MASTER's heightmap in the dict, so distant terrain
+    kept rendering ground the plugin removed.  That fires for overlays only.
+    With `count_only` the VHGT presence check keeps the count matching what a
+    real parse would store.
+    """
+    if count_only:
+        if rec.sub(b'VHGT') is not None:
+            lands[coords] = True
+        return
+    land = _decode_land(rec.body, lambda b, t: rec.sub(t.encode()))
+    if land is not None:
+        lands[coords] = land
+    elif not allow_unscoped:
+        lands.pop(coords, None)
+
+
+def _decode_land(body, _sub):
+    """Decode VHGT → heights (33×33), VCLR → colors (33×33,3)."""
+    vhgt = _sub(body, 'VHGT')
+    if vhgt is None or len(vhgt) < 4 + VERTS_SIDE * VERTS_SIDE:
+        return None
+
+    # VHGT format (UESP wiki / xEdit confirmed):
+    #   Offset: float — starting accumulator value in "delta units"
+    #   delta[row][col]: int8 — cumulative delta; row start comes from delta[row][0]
+    #
+    # Accumulation (all in delta units, i.e. 1 unit = DELTA_SCALE game units):
+    #   current = Offset
+    #   for row 0..32:
+    #       current += delta[row][0]       ← first column updates the accumulator
+    #       row_start = current
+    #       for col 1..32:
+    #           current += delta[row][col]
+    #           h[row][col] = current * DELTA_SCALE
+    #       h[row][0] = row_start * DELTA_SCALE
+    #
+    # xEdit confirms: to shift terrain by ShiftZ game units,
+    #   Offset += ShiftZ / DELTA_SCALE  → Offset is in delta units.
+    vhgt_offset = struct.unpack_from('<f', vhgt, 0)[0]
+    deltas = np.frombuffer(vhgt[4:4 + VERTS_SIDE*VERTS_SIDE], dtype=np.int8
+                           ).reshape(VERTS_SIDE, VERTS_SIDE)
+
+    # Vectorised form of the two nested accumulations described above.  The
+    # scalar version ran 33x33 = 1,089 Python iterations per LAND record, and
+    # Tamriel has tens of thousands of them — it dominated the SERIAL LAND
+    # parse that runs before the terrain-LOD tile pool starts (~18x faster
+    # here).
+    #
+    # Both accumulations are plain prefix sums, and they are done in INT32:
+    #   row starts   = cumsum(delta[:, 0])        (down column 0)
+    #   within a row = row_start + cumsum(...)    (across, seeded at column 0)
+    # The deltas are int8, so integer prefix sums are EXACT — there is no
+    # accumulation-order rounding to reproduce, which a float32 cumsum could
+    # not have matched against the scalar loop's mixed float32/Python-float
+    # accumulator anyway.  The single float conversion happens at the end, so
+    # each height is (offset + integer) * DELTA_SCALE computed once.
+    steps = deltas.astype(np.int32)
+    steps[:, 0] = np.cumsum(steps[:, 0])          # row starts, exact
+    np.cumsum(steps, axis=1, out=steps)           # across, seeded by column 0
+    heights = ((steps + np.float32(vhgt_offset)) * DELTA_SCALE
+               ).astype(np.float32)
+
+    vclr = _sub(body, 'VCLR')
+    if vclr and len(vclr) >= VERTS_SIDE * VERTS_SIDE * 3:
+        colors = np.frombuffer(vclr[:VERTS_SIDE*VERTS_SIDE*3], dtype=np.uint8
+                               ).reshape(VERTS_SIDE, VERTS_SIDE, 3).copy()
+    else:
+        colors = np.full((VERTS_SIDE, VERTS_SIDE, 3), 128, dtype=np.uint8)
+
+    # Full per-quadrant texture layer structure (BTXT/ATXT/VTXT) for the
+    # diffuse compositor.  decode_land_layers takes the raw record body.
+    from asset_convert.lod.terrain_lod_textures import decode_land_layers
+    layers = decode_land_layers(body)
+
+    return {'heights': heights, 'colors': colors, 'layers': layers}
+
+
+# ---------------------------------------------------------------------------
+# Tile assembly
+# ---------------------------------------------------------------------------
+
+def _assemble_tile(lands, tile_x, tile_y, level):
+    """Merge level×level cells into a ((level*32+1) × (level*32+1)) height+color grid.
+
+    tile_x, tile_y: SW cell coordinates of this tile.
+
+    Each cell contributes exactly VERTS_SIDE (33) vertices per side with 32
+    intervals.  Adjacent cells share their boundary vertex, so:
+      total verts per side = level * 32 + 1
+
+    Vertex mapping for cell (cx, cy) within the tile:
+      destination column range: [cx*32 .. cx*32+32]  (inclusive both ends)
+      destination row    range: [cy*32 .. cy*32+32]
+
+    Missing cells (world edges, water areas) are filled by edge-extending from
+    the nearest row/column that has real data, preventing flat Z=0 holes.
+
+    Returns (heights ndarray (tv×tv) float32,
+             colors  ndarray (tv×tv×3) uint8)
+    where tv = level*32+1.
+    """
+    tv = level * 32 + 1   # verts per tile side
+
+    # Use NaN as sentinel so we can distinguish "no data" from "height=0"
+    out_h = np.full((tv, tv), np.nan, dtype=np.float32)
+    out_c = np.full((tv, tv, 3), 100, dtype=np.uint8)
+
+    for cy in range(level):
+        for cx in range(level):
+            cell_key = (tile_x + cx, tile_y + cy)
+            land = lands.get(cell_key)
+            if land is None:
+                continue
+            h = land['heights']   # (33,33) float32
+            c = land['colors']    # (33,33,3) uint8
+
+            # Destination start in tile grid (SW = row/col 0, NE = row/col tv-1)
+            dst_x0 = cx * 32
+            dst_y0 = cy * 32
+
+            # Copy all 33×33 source verts into their destination positions.
+            # The boundary column/row (src col 32 / row 32) overlaps with the
+            # next cell's column/row 0; we write it here and the neighbor will
+            # overwrite it with the same value (heights must agree at boundaries).
+            out_h[dst_y0:dst_y0+33, dst_x0:dst_x0+33] = h
+            out_c[dst_y0:dst_y0+33, dst_x0:dst_x0+33] = c
+
+    # Fill NaN regions (missing cells) by edge-extending from nearest real data.
+    # Process row-by-row then column-by-column with forward/backward fill.
+    if np.any(np.isnan(out_h)):
+        fill_missing(out_h, out_c)
+
+    return out_h, out_c
+
+
+def fill_missing(h: np.ndarray, c: np.ndarray):
+    """In-place fill of NaN cells in h (and corresponding rows in c) by
+    edge-extending from the nearest valid row/column.
+
+    Strategy:
+      1. For each column, forward-fill NaN rows downward from the first valid row,
+         then backward-fill upward from the last valid row.
+      2. If an entire column is NaN, copy from the nearest non-NaN column.
+    """
+    tv = h.shape[0]
+    nan = np.isnan(h)
+    if not nan.any():
+        return
+    valid = ~nan
+    rows = np.arange(tv)
+    cols = np.arange(tv)
+
+    # Step 1: per-column forward fill, then backward fill for anything the
+    # forward pass could not reach.  Both are running-extremum scans over the
+    # row axis, so they vectorise across all columns at once — the old
+    # row×column Python loop was ~1.4s on a LOD32 tile.
+    ff = np.maximum.accumulate(np.where(valid, rows[:, None], -1), axis=0)
+    bf = np.minimum.accumulate(np.where(valid, rows[:, None], tv)[::-1],
+                               axis=0)[::-1]
+    src_row = np.where(ff >= 0, ff, bf)
+
+    col_has = valid.any(axis=0)
+    fill = nan & col_has[None, :]          # columns with at least one real value
+    if fill.any():
+        src_row = np.clip(src_row, 0, tv - 1)
+        h[fill] = h[src_row, cols[None, :]][fill]
+        c[fill] = c[src_row, cols[None, :]][fill]
+
+    # Step 2: columns that are entirely NaN take the nearest valid column
+    # (ties go left, matching the old left-then-right search).
+    if not col_has.all():
+        valid_cols = np.where(col_has)[0]
+        if len(valid_cols):
+            nearest = valid_cols[np.abs(cols[:, None]
+                                        - valid_cols[None, :]).argmin(axis=1)]
+            empty = ~col_has
+            h[:, empty] = h[:, nearest[empty]]
+            c[:, empty] = c[:, nearest[empty]]
+
+    # Fallback: any remaining NaN → 0
+    nan_mask = np.isnan(h)
+    if nan_mask.any():
+        h[nan_mask] = 0.0
+
+
+# ---------------------------------------------------------------------------
+# LOD water (vanilla-style)
+# ---------------------------------------------------------------------------
+
+def _cell_water_height(cell_water, key, default_wh):
+    """Water height for a cell, or None if the cell has no water."""
+    cw = cell_water.get(key)
+    if cw is None or not cw[0]:
+        return None
+    return cw[1] if cw[1] is not None else default_wh
+
+
+def _tile_water_quads(lands, cell_water, tile_x, tile_y, level, default_wh):
+    """Return [(cx, cy, water_height_world), ...] for cells in this tile that
+    need a LOD water quad (cell has water and its terrain dips below the water
+    surface), matching how vanilla terrain LOD only carries water quads where
+    water is actually visible.  cx/cy are cell offsets within the tile."""
+    quads = []
+    for cx in range(level):
+        for cy in range(level):
+            key = (tile_x + cx, tile_y + cy)
+            wh = _cell_water_height(cell_water, key, default_wh)
+            if wh is None:
+                continue
+            land = lands.get(key)
+            if land is not None and float(land['heights'].min()) >= wh:
+                continue   # terrain entirely above water in this cell
+            quads.append((cx, cy, wh))
+    return quads
+
+
+# ---------------------------------------------------------------------------
+# DDS writing (DXT1 via PIL/Pillow or pure-Python fallback)
+# ---------------------------------------------------------------------------
+
+def _build_water_node(water_quads, level: int):
+    """Build the vanilla-style LOD water node for a tile.
+
+    Vanilla .btr structure (verified against Skyrim.esm terrain meshes):
+      root "chunk" child[1] = BSMultiBoundNode named "WATER" (scale 1) holding
+      one shape with an independent flat quad per water cell:
+        * LOD4:  BSSegmentedTriShape with EXACTLY 16 segments — a fixed 4x4
+          grid over the tile (1 cell per segment at LOD4), column-major
+          (segment index = sx*4 + sy).  Segments let the engine hide the quad
+          for cells that are loaded at full detail.  Per-segment binary layout
+          (nif.xml BSGeometrySegmentData, PyFFI's BSSegment fields are
+          misaligned over the same 9 bytes):
+            flags(byte)=0 | start_index(uint, tri-POINTS, 0 when empty)
+            | num_primitives(uint)
+          Through PyFFI's fields: internal_index = start_index << 8, and
+          num_primitives=2 lands exactly on the bsseg_water bit (2 << 8).
+        * LOD8/16/32: plain NiTriShape (no segments — these tiles never
+          overlap the loaded-cell area).
+      The shape has NO shader property, no UVs, no normals: the engine
+      attaches the worldspace LOD water shader itself (WRLD NAM3).  That is
+      also why NAM3 must point at a valid WATR record — a null one CTDs.
+      Quad verts are local 0..4096 like the land (x scale=level), Z = water
+      height / level.  Quads are unshared (4 verts each) so per-cell heights
+      can differ.
+    """
+    cell_local = CELL_SIZE / level
+    scale = float(level)
+
+    quad_map = {(cx, cy): wh for cx, cy, wh in water_quads}
+    span = max(1, level // 4)   # cells per segment side (4x4 segment grid)
+
+    ordered = []                # quads in segment order, column-major
+    seg_num_prims = [0] * 16
+    seg_start = [0] * 16
+    for sx in range(4):
+        for sy in range(4):
+            seg = sx * 4 + sy
+            n_before = len(ordered)
+            for cx in range(sx * span, (sx + 1) * span):
+                for cy in range(sy * span, (sy + 1) * span):
+                    wh = quad_map.get((cx, cy))
+                    if wh is not None:
+                        ordered.append((cx, cy, wh))
+            count = len(ordered) - n_before
+            seg_num_prims[seg] = count * 2
+            # start_index in triangle points; vanilla stores 0 for empty segments
+            seg_start[seg] = n_before * 6 if count else 0
+
+    verts = []
+    tris = []
+    for cx, cy, wh in ordered:
+        x0 = cx * cell_local
+        y0 = cy * cell_local
+        z = wh / scale
+        b = len(verts)
+        verts += [(x0, y0, z), (x0 + cell_local, y0, z),
+                  (x0, y0 + cell_local, z), (x0 + cell_local, y0 + cell_local, z)]
+        tris += [(b, b + 1, b + 2), (b + 1, b + 3, b + 2)]
+
+    # ---- geometry data ----
+    shapedata = NifFormat.NiTriShapeData()
+    shapedata.has_vertices = True
+    shapedata.has_normals = False
+    shapedata.num_uv_sets = 0
+    shapedata.has_uv = False
+    shapedata.num_vertices = len(verts)
+    shapedata.vertices.update_size()
+    for i, (x, y, z) in enumerate(verts):
+        shapedata.vertices[i].x = x
+        shapedata.vertices[i].y = y
+        shapedata.vertices[i].z = z
+    shapedata.num_triangles = len(tris)
+    shapedata.num_triangle_points = len(tris) * 3
+    shapedata.has_triangles = True
+    shapedata.triangles.update_size()
+    for i, (a, b, c) in enumerate(tris):
+        shapedata.triangles[i].v_1 = a
+        shapedata.triangles[i].v_2 = b
+        shapedata.triangles[i].v_3 = c
+
+    # Bounding sphere in LOCAL coords (vanilla: bbox centre, corner radius)
+    va = np.array(verts, dtype=np.float64)
+    lo = va.min(axis=0)
+    hi = va.max(axis=0)
+    ctr = (lo + hi) / 2.0
+    shapedata.center.x, shapedata.center.y, shapedata.center.z = ctr
+    shapedata.radius = float(np.linalg.norm((hi - lo) / 2.0))
+
+    if level == 4:
+        shape = NifFormat.BSSegmentedTriShape()
+        shape.num_segments = 16
+        shape.segment.update_size()
+        for i in range(16):
+            seg = shape.segment[i]
+            # True layout: flags byte (0) | start uint | num_prims uint.
+            # PyFFI's misaligned view: internal_index covers flags+start[0:3],
+            # its 'flags' bitstruct covers start[3]+num_prims[0:3].
+            seg.internal_index = (seg_start[i] << 8) & 0xFFFFFFFF
+            seg.flags.bsseg_water = 1 if seg_num_prims[i] else 0
+            seg.unknown_byte_1 = 0
+    else:
+        shape = NifFormat.NiTriShape()
+    shape.name = b''
+    shape.flags = 14
+    shape.scale = scale
+    shape.data = shapedata
+
+    # ---- WATER BSMultiBoundNode ----
+    whs = [wh for _, _, wh in ordered]
+    aabb = NifFormat.BSMultiBoundAABB()
+    # XY: bbox of the quads in WORLD units relative to the tile origin.
+    aabb.position.x = float(ctr[0] * scale)
+    aabb.position.y = float(ctr[1] * scale)
+    aabb.extent.x = float((hi[0] - lo[0]) / 2.0 * scale)
+    aabb.extent.y = float((hi[1] - lo[1]) / 2.0 * scale)
+    # Z: vanilla spans [min height, max(max height, 0)].
+    z_lo = min(whs)
+    z_hi = max(max(whs), 0.0)
+    aabb.position.z = (z_lo + z_hi) / 2.0
+    aabb.extent.z = (z_hi - z_lo) / 2.0
+
+    multi_bound = NifFormat.BSMultiBound()
+    multi_bound.data = aabb
+
+    wnode = NifFormat.BSMultiBoundNode()
+    wnode.name = b'WATER'
+    wnode.flags = 14
+    wnode.multi_bound = multi_bound
+    wnode.num_children = 1
+    wnode.children.update_size()
+    wnode.children[0] = shape
+    return wnode
+
+
+def _build_terrain_nif(heights: np.ndarray, tile_x: int, tile_y: int,
+                       level: int, edid: str, output_dir: Path,
+                       water_quads=None) -> bytes:
+    """Build a .btr NIF for a terrain tile and return bytes.
+
+    Vertex layout matches vanilla Skyrim terrain LOD:
+      - BSMultiBoundNode root named "chunk" (required for Skyrim LOD culling)
+      - NiTriShape child named "Land" with scale=level
+      - All levels: 33×33 = 1089 verts at local step=128 (matches vanilla ~1056 vert count)
+      - heights input is the full-res (level*32+1)² grid
+      - Z = world_height / scale  (vertex_z × scale = world_Z in game units)
+      - No normals; 1 UV set (all zero) — LOD landscape shader uses world-space texturing
+      - Bounding sphere and AABB position use world-space Z
+    """
+    if not _PYFFI:
+        raise RuntimeError("pyffi not available")
+
+    nif_data = NifFormat.Data()
+    nif_data.version        = 0x14020007   # 20.2.0.7
+    nif_data.user_version   = 12           # Skyrim
+    nif_data.user_version_2 = 83           # Skyrim LE
+    nif_data.header.endian_type = 1        # little-endian
+
+    # ------------------------------------------------------------------ #
+    # Geometry
+    # ------------------------------------------------------------------ #
+    # All levels: subsample to 33×33 (1089 verts).
+    #   Vanilla Skyrim LE LOD4 uses ~1056 verts (decimated), so 33×33 is
+    #   comparable and avoids rendering issues from oversized meshes.
+    #   LOD8+ full-res (257²=66049) also overflows uint16.
+    src_tv = level * 32 + 1
+    assert heights.shape == (src_tv, src_tv), \
+        f"Expected heights shape ({src_tv},{src_tv}), got {heights.shape}"
+
+    # Subsample to 33×33: stride=level samples indices 0,level,2*level,...,32*level
+    # Local tile spans CELL_SIZE = 4096 units; step = 4096/32 = 128
+    tv   = 33
+    step = CELL_SIZE / (tv - 1)    # 4096/32 = 128 local units/step
+    h33  = heights[::level, ::level]   # stride=level → 33×33
+
+    N = tv * tv
+
+    # Triangles: wind so the front face points UP (+Z).  The terrain is a top
+    # surface; with X=col, Y=row and Z up, i0->i1->i2 is CCW seen from +Z (front
+    # face up).  The previous i0->i2->i1 order was CW = back-facing, so the land
+    # rendered only from below / looked transparent from above.
+    tris = []
+    for row in range(tv - 1):
+        for col in range(tv - 1):
+            i0 = row * tv + col
+            i1 = i0 + 1
+            i2 = i0 + tv
+            i3 = i2 + 1
+            tris.append((i0, i1, i2))
+            tris.append((i1, i3, i2))
+
+    world_scale = float(level)
+
+    # ---- NiTriShapeData ----
+    shapedata = NifFormat.NiTriShapeData()
+    shapedata.has_vertices = True
+    shapedata.has_normals  = False   # unused in vanilla terrain LOD
+    shapedata.num_uv_sets  = 1       # vanilla BTR has num_uv_sets=1
+    shapedata.has_uv       = True    # must be True for PyFFI to allocate UV array
+    shapedata.num_vertices = N
+    shapedata.vertices.update_size()
+
+    # Use full-res grid for bounding box (accurate Z range), h33 for geometry
+    z_min = float(heights.min())
+    z_max = float(heights.max())
+
+    for row in range(tv):
+        for col in range(tv):
+            i = row * tv + col
+            shapedata.vertices[i].x = col * step
+            shapedata.vertices[i].y = row * step
+            # Z stored pre-divided by scale so vertex_z × scale = world_Z
+            shapedata.vertices[i].z = float(h33[row, col]) / world_scale
+
+    # UV set — the tile texture maps across the whole tile.  Vanilla ground
+    # truth (tamriel.4.0.32.btr): u = x/4096, v = 1 - y/4096 (v=0 at the NORTH
+    # edge, matching the DDS row 0 = north).  All-zero UVs made every triangle
+    # sample a single texel, so each tile rendered as one flat color — the
+    # in-game map became a hard-edged per-tile checkerboard.
+    shapedata.uv_sets.update_size()
+    for row in range(tv):
+        for col in range(tv):
+            i = row * tv + col
+            shapedata.uv_sets[0][i].u = col * step / CELL_SIZE
+            shapedata.uv_sets[0][i].v = 1.0 - (row * step / CELL_SIZE)
+
+    shapedata.num_triangles       = len(tris)
+    shapedata.num_triangle_points = len(tris) * 3
+    shapedata.has_triangles       = True
+    shapedata.triangles.update_size()
+    for i, (a, b, c) in enumerate(tris):
+        shapedata.triangles[i].v_1 = a
+        shapedata.triangles[i].v_2 = b
+        shapedata.triangles[i].v_3 = c
+
+    # Bounding sphere — center and radius in WORLD space (same as AABB).
+    # XY world center = CELL_SIZE/2 × level (tile spans 0..CELL_SIZE in local,
+    # scaled by level gives 0..CELL_SIZE×level in world).
+    z_ctr         = (z_min + z_max) / 2.0
+    xy_world_half = CELL_SIZE / 2.0 * world_scale   # e.g. 2048 * 4 = 8192 for L4
+    z_world_half  = (z_max - z_min) / 2.0 + 500.0   # extra safety margin
+    shapedata.center.x = xy_world_half
+    shapedata.center.y = xy_world_half
+    shapedata.center.z = z_ctr              # world-space Z centre
+    shapedata.radius   = math.sqrt(xy_world_half**2 + xy_world_half**2 + z_world_half**2)
+
+    # ---- Texture set ----
+    tex_base = f'textures\\terrain\\{edid}\\{edid}.{level}.{tile_x}.{tile_y}'
+    texset = NifFormat.BSShaderTextureSet()
+    texset.num_textures = 9
+    texset.textures.update_size()
+    texset.textures[0] = f'Data\\{tex_base}.dds'.encode()
+    texset.textures[1] = f'Data\\{tex_base}_n.dds'.encode()
+
+    # ---- Shader property (landscape LOD) ----
+    shader = NifFormat.BSLightingShaderProperty()
+    shader.skyrim_shader_type = 18  # kLODLandscapeNoise
+    shader.texture_set = texset
+    sf1 = shader.shader_flags_1
+    sf1.slsf_1_model_space_normals = 1
+    sf1.slsf_1_own_emit            = 1
+    sf1.slsf_1_z_buffer_test       = 1
+    sf2 = shader.shader_flags_2
+    sf2.slsf_2_lod_landscape  = 1
+    sf2.slsf_2_z_buffer_write = 1
+    # uv_scale must be (1,1) — pyffi defaults to (0,0) which breaks the LOD shader
+    shader.uv_scale.u = 1.0
+    shader.uv_scale.v = 1.0
+
+    # ---- NiTriShape ----
+    shape = NifFormat.NiTriShape()
+    shape.name  = b'land'
+    shape.flags = 14
+    shape.scale = float(level)
+    shape.data  = shapedata
+    shape.bs_properties[0] = shader
+
+    # ---- BSMultiBoundNode root ----
+    world_half = CELL_SIZE * level / 2.0
+    z_extent   = (z_max - z_min) / 2.0 + 500.0
+
+    aabb = NifFormat.BSMultiBoundAABB()
+    aabb.position.x = world_half
+    aabb.position.y = world_half
+    aabb.position.z = z_ctr
+    aabb.extent.x   = world_half
+    aabb.extent.y   = world_half
+    aabb.extent.z   = z_extent
+
+    multi_bound = NifFormat.BSMultiBound()
+    multi_bound.data = aabb
+
+    root = NifFormat.BSMultiBoundNode()
+    root.name         = b'chunk'
+    root.flags        = 14
+    root.multi_bound  = multi_bound
+
+    # Water: child[1] BSMultiBoundNode "WATER" (vanilla structure).  The engine
+    # textures it with the worldspace LOD water shader (WRLD NAM3).
+    if water_quads:
+        water_node = _build_water_node(water_quads, level)
+        root.num_children = 2
+        root.children.update_size()
+        root.children[0] = shape
+        root.children[1] = water_node
+    else:
+        root.num_children = 1
+        root.children.update_size()
+        root.children[0] = shape
+
+    nif_data.roots = [root]
+
+    buf = io.BytesIO()
+    nif_data.write(buf)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Diffuse tile compositing + heightmap normal maps
+# ---------------------------------------------------------------------------
+
+# Per-cell pixel resolution when compositing the diffuse atlas.  A level-N tile
+# is N cells per side, so the atlas is N*CELL_DIFFUSE_PX per side; clamped to the
+# per-level TEX_SIZE on write.
+CELL_DIFFUSE_PX = 64
+
+
+_EMPTY_LAYERS = {'base': {}, 'alpha': {}}
+
+# Per-cell composited diffuse cache, shared by every tile a worker builds.
+# A cell appears in one tile per LOD level (4 levels), so caching removes most
+# of the ~70,000 composite_cell calls a Tamriel run makes for 14,686 cells.
+# Each entry is CELL_DIFFUSE_PX² × 3 bytes (12 KB at 64px); the cap simply
+# bounds a long-lived worker rather than targeting a memory budget.
+_CELL_IMG_CACHE = {}
+_CELL_IMG_CACHE_MAX = 16384
+
+
+def _composite_tile_diffuse(lands, tile_x, tile_y, level, ltex_map, tex_root,
+                            tile_heights, cell_water, default_wh):
+    """Composite a level-N tile diffuse from its cells' real landscape textures.
+
+    tile_heights is the FILLED tile height grid from _assemble_tile (row 0 =
+    south), used to bake the underwater murk.  Cells with no LAND record get
+    the engine default texture + murk instead of a flat fill color.
+
+    Returns (atlas RGB ndarray, side_px) with image row 0 = north (+Y), so it
+    matches the DDS orientation vanilla terrain LOD uses.
+    """
+    from asset_convert.lod.terrain_lod_textures import composite_cell
+    side = level * CELL_DIFFUSE_PX
+    atlas = np.empty((side, side, 3), dtype=np.uint8)
+    for cy in range(level):
+        for cx in range(level):
+            key = (tile_x + cx, tile_y + cy)
+            land = lands.get(key)
+            layers = land['layers'] if land is not None else _EMPTY_LAYERS
+            colors = land.get('colors') if land is not None else None
+            # 33x33 height patch for this cell from the filled tile grid
+            h33 = tile_heights[cy*32:cy*32+33, cx*32:cx*32+33]
+            wh = _cell_water_height(cell_water, key, default_wh)
+
+            # Every cell is composited once per LOD level even though the
+            # result is identical each time — 14,686 Tamriel cells produce
+            # ~70,000 composites, 4.8x more work than needed.  Cache per cell.
+            # The key includes the height patch and water height (the only
+            # per-tile inputs) so a cell whose edge-filled heights DID depend
+            # on the tile extent still recomputes rather than reusing a
+            # mismatched image.
+            ck = (key, wh, h33.tobytes())
+            img = _CELL_IMG_CACHE.get(ck)
+            if img is None:
+                img = composite_cell(layers, colors,
+                                     ltex_map, tex_root, tile_x + cx, tile_y + cy,
+                                     cell_px=CELL_DIFFUSE_PX, tex_size=128,
+                                     heights=h33, water_height=wh)
+                if len(_CELL_IMG_CACHE) >= _CELL_IMG_CACHE_MAX:
+                    _CELL_IMG_CACHE.clear()
+                _CELL_IMG_CACHE[ck] = img
+            col0 = cx * CELL_DIFFUSE_PX
+            # north (+Y, higher cy) at the TOP of the image
+            row0 = (level - 1 - cy) * CELL_DIFFUSE_PX
+            atlas[row0:row0+CELL_DIFFUSE_PX, col0:col0+CELL_DIFFUSE_PX] = img
+    return atlas, side
+
+
+def _heightmap_normal_rgb(heights: np.ndarray, out_px: int) -> np.ndarray:
+    """Derive a tangent-space normal map (RGB uint8) from a height grid.
+
+    Skyrim terrain-LOD normal maps encode the surface normal so distant terrain
+    is lit; a flat normal leaves the LOD looking unlit.  heights is in game
+    units; we resize to out_px and take the gradient.
+    """
+    from PIL import Image
+    # heights row 0 = SOUTH (LAND convention); the diffuse tile is written with
+    # image row 0 = NORTH, and the normal map shares its UVs — flip to match.
+    hh = np.flipud(np.nan_to_num(heights.astype(np.float32)))
+    im = Image.fromarray(hh).resize((out_px, out_px), Image.BILINEAR)
+    hh = np.asarray(im, dtype=np.float32)
+    # world-space spacing between output samples (game units)
+    span = CELL_SIZE * (heights.shape[0] - 1) / 32.0  # tile world span
+    dpx = span / out_px
+    grow, gx = np.gradient(hh, dpx)
+    # image rows run north→south, so ∂h/∂y_world = -∂h/∂row
+    gy = -grow
+    nz = np.ones_like(gx)
+    nx, ny, nzz = -gx, -gy, nz
+    norm = np.sqrt(nx*nx + ny*ny + nzz*nzz) + 1e-6
+    nx, ny, nzz = nx/norm, ny/norm, nzz/norm
+    rgb = np.stack([(nx*0.5+0.5), (ny*0.5+0.5), (nzz*0.5+0.5)], axis=-1)
+    return np.clip(rgb*255, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Per-tile worker — pool initializer + task function
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Shared-memory `lands`
+_SHM_ALIGN = 4
+
+
+def lands_layout(lands: dict):
+    """Compute the byte layout of `lands` without materialising it.
+
+    Returns (total_size, plan), where plan is a list of
+    `(key, h_off, c_off, base, [(quad, [(fid, off, shape), ...])])`.
+
+    Split from the write so the buffer can be sized exactly and filled DIRECTLY
+    into shared memory. Building a bytearray first would hold a second full
+    copy in the parent — 1.2 GB on Tamriel-with-overlays, at the very moment 29
+    workers are being spawned.
+    """
+    size = 0
+
+    def _reserve(nbytes: int) -> int:
+        nonlocal size
+        off = size
+        size += nbytes
+        if size % _SHM_ALIGN:
+            size += _SHM_ALIGN - size % _SHM_ALIGN
+        return off
+
+    plan = []
+    for key, v in lands.items():
+        h_off = _reserve(VERTS_SIDE * VERTS_SIDE * 4)
+        c_off = _reserve(VERTS_SIDE * VERTS_SIDE * 3)
+        layers = v.get('layers') or {}
+        alpha_plan = []
+        for quad, entries in (layers.get('alpha') or {}).items():
+            packed = []
+            for fid, grid in entries:
+                packed.append((fid, _reserve(grid.size * 4), grid.shape))
+            alpha_plan.append((quad, packed))
+        plan.append((key, h_off, c_off, dict(layers.get('base') or {}),
+                     alpha_plan))
+    return size, plan
+
+
+def write_lands(lands: dict, plan, mv: memoryview):
+    """Fill `mv` from `lands` following `plan`, and build the worker index."""
+    index = {}
+    for key, h_off, c_off, base, alpha_plan in plan:
+        v = lands[key]
+        h = np.ascontiguousarray(v['heights'], dtype=np.float32)
+        mv[h_off:h_off + h.nbytes] = h.view(np.uint8).reshape(-1).data
+        c = np.ascontiguousarray(v['colors'], dtype=np.uint8)
+        mv[c_off:c_off + c.nbytes] = c.reshape(-1).data
+        alpha_idx = {}
+        for quad, packed in alpha_plan:
+            entries = (v.get('layers') or {}).get('alpha', {})[quad]
+            out = []
+            for (fid, off, shape), (_f, grid) in zip(packed, entries):
+                g = np.ascontiguousarray(grid, dtype=np.float32)
+                mv[off:off + g.nbytes] = g.view(np.uint8).reshape(-1).data
+                out.append((fid, off, shape))
+            alpha_idx[quad] = out
+        index[key] = (h_off, c_off, base, alpha_idx)
+    return index
+
+
+def pack_lands(lands: dict):
+    """Pack `lands` into one flat buffer + a picklable index.
+
+    Returns (buffer: bytearray, index: dict). The index holds only offsets and
+    small scalars, so it pickles cheaply to every worker.
+
+    Kept for tests and the single-process path; the pool writes straight into
+    shared memory via `lands_layout` + `write_lands` instead, to avoid holding
+    a second copy in the parent.
+    """
+    buf = bytearray()
+    index = {}
+
+    def _put(arr) -> int:
+        off = len(buf)
+        buf.extend(arr.tobytes())
+        if len(buf) % _SHM_ALIGN:
+            buf.extend(bytes(_SHM_ALIGN - len(buf) % _SHM_ALIGN))
+        return off
+
+    for key, v in lands.items():
+        h_off = _put(np.ascontiguousarray(v['heights'], dtype=np.float32))
+        c_off = _put(np.ascontiguousarray(v['colors'], dtype=np.uint8))
+        layers = v.get('layers') or {}
+        # `decode_land_layers` returns alpha entries as (ltex_fid, grid), sorted
+        # into ATXT layer order with the layer index already dropped — see
+        # terrain_lod_textures.decode_land_layers. The order IS the data, so it
+        # is preserved verbatim here.
+        alpha_idx = {}
+        for quad, entries in (layers.get('alpha') or {}).items():
+            packed = []
+            for fid, grid in entries:
+                packed.append((fid,
+                               _put(np.ascontiguousarray(grid,
+                                                         dtype=np.float32)),
+                               grid.shape))
+            alpha_idx[quad] = packed
+        index[key] = (h_off, c_off, dict(layers.get('base') or {}), alpha_idx)
+    return buf, index
+
+
+def _unpack_cell(mv: memoryview, entry):
+    """Rebuild one cell's dict as numpy VIEWS over the shared buffer."""
+    h_off, c_off, base, alpha_idx = entry
+    heights = np.frombuffer(mv, dtype=np.float32, count=VERTS_SIDE * VERTS_SIDE,
+                            offset=h_off).reshape(VERTS_SIDE, VERTS_SIDE)
+    colors = np.frombuffer(mv, dtype=np.uint8, count=VERTS_SIDE * VERTS_SIDE * 3,
+                           offset=c_off).reshape(VERTS_SIDE, VERTS_SIDE, 3)
+    alpha = {}
+    for quad, entries in alpha_idx.items():
+        out = []
+        for fid, off, shape in entries:
+            n = int(np.prod(shape))
+            out.append((fid,
+                        np.frombuffer(mv, dtype=np.float32, count=n,
+                                      offset=off).reshape(shape)))
+        alpha[quad] = out
+    return {'heights': heights, 'colors': colors,
+            'layers': {'base': base, 'alpha': alpha}}
+
+
+class SharedLands:
+    """dict-like read-only view of the packed `lands`, backed by shared memory.
+
+    Only the cells a worker actually touches are materialised, and each is a
+    set of views over the shared buffer — so the arrays themselves are never
+    copied into the process.
+    """
+
+    __slots__ = ('_mv', '_index', '_cache')
+
+    def __init__(self, mv, index):
+        self._mv = mv
+        self._index = index
+        self._cache = {}
+
+    def __contains__(self, key):
+        return key in self._index
+
+    def __len__(self):
+        return len(self._index)
+
+    def __iter__(self):
+        return iter(self._index)
+
+    def keys(self):
+        return self._index.keys()
+
+    def get(self, key, default=None):
+        if key not in self._index:
+            return default
+        return self[key]
+
+    def __getitem__(self, key):
+        hit = self._cache.get(key)
+        if hit is None:
+            hit = _unpack_cell(self._mv, self._index[key])
+            self._cache[key] = hit
+        return hit
+
+
+# Per-process global set by _worker_init; avoids pickling lands on every task.
+_worker_lands      = None
+# Kept alive for the process lifetime: if the SharedMemory handle is garbage
+# collected the mapping goes with it and every view becomes invalid memory.
+_worker_shm        = None
+_worker_mesh_dir   = None
+_worker_tex_dir    = None
+_worker_ltex_map   = None
+_worker_tex_root   = None
+_worker_cell_water = None
+_worker_default_wh = 0.0
+
+
+def _worker_init(lands, mesh_dir_s, tex_dir_s, ltex_map, tex_root_s,
+                 cell_water, default_wh):
+    """Called once per worker process to stash shared read-only data.
+
+    `lands` is either a plain dict (single-process fallback) or the tuple
+    `(shm_name, nbytes, index)`, in which case the buffer is MAPPED rather than
+    copied — see the SharedLands comment above.
+    """
+    global _worker_lands, _worker_mesh_dir, _worker_tex_dir
+    global _worker_ltex_map, _worker_tex_root
+    global _worker_cell_water, _worker_default_wh, _worker_shm
+    if isinstance(lands, tuple):
+        from multiprocessing import shared_memory
+        shm_name, nbytes, index = lands
+        # Held in a module global for the process lifetime; dropping it would
+        # unmap the block out from under every view built on it.
+        _worker_shm = shared_memory.SharedMemory(name=shm_name)
+        _worker_lands = SharedLands(
+            memoryview(_worker_shm.buf)[:nbytes], index)
+    else:
+        _worker_lands  = lands
+    _worker_mesh_dir   = Path(mesh_dir_s)
+    _worker_tex_dir    = Path(tex_dir_s)
+    _worker_ltex_map   = ltex_map
+    # A list of roots (own output first, then masters'); load_texture_rgb
+    # searches them in order.
+    _worker_tex_root   = ([Path(p) for p in tex_root_s]
+                          if isinstance(tex_root_s, (list, tuple))
+                          else Path(tex_root_s))
+    _worker_cell_water = cell_water
+    _worker_default_wh = default_wh
+
+
+def _process_tile(args):
+    """Worker task for one tile.  lands/dirs come from the process global.
+
+    args: (tile_x, tile_y, level, worldspace_edid)
+    Returns (tag, ok, error_msg).
+    """
+    tile_x, tile_y, level, worldspace_edid = args
+    tag = f'{worldspace_edid}.{level}.{tile_x}.{tile_y}'
+
+    try:
+        heights, colors = _assemble_tile(_worker_lands, tile_x, tile_y, level)
+
+        water_quads = _tile_water_quads(_worker_lands, _worker_cell_water,
+                                        tile_x, tile_y, level, _worker_default_wh)
+
+        output_dir = _worker_mesh_dir.parent.parent.parent
+        nif_bytes  = _build_terrain_nif(heights, tile_x, tile_y, level,
+                                        worldspace_edid, output_dir,
+                                        water_quads=water_quads)
+        (_worker_mesh_dir / f'{tag}.btr').write_bytes(nif_bytes)
+
+        tex_size = TEX_SIZE_BY_LEVEL.get(level, TEX_SIZE)
+
+        # Diffuse: composite real landscape textures per LAND alpha layers.
+        atlas, _side = _composite_tile_diffuse(
+            _worker_lands, tile_x, tile_y, level,
+            _worker_ltex_map, _worker_tex_root,
+            heights, _worker_cell_water, _worker_default_wh)
+        write_dds_dxt1(atlas, _worker_tex_dir / f'{tag}.dds', size=tex_size)
+
+        # Normal map: derive from the tile heightmap so distant terrain is lit.
+        # Baked at half the diffuse resolution (BC5 is 2x DXT1/texel).
+        normal_size = max(64, tex_size // NORMAL_SIZE_DIVISOR)
+        normal_rgb = _heightmap_normal_rgb(heights, normal_size)
+        write_normal_dds(normal_rgb, _worker_tex_dir / f'{tag}_n.dds')
+
+        return tag, True, None
+    except Exception as e:
+        import traceback
+        return tag, False, f"{e}\n{traceback.format_exc()}"
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestration
+# ---------------------------------------------------------------------------
+
+def generate_terrain_lod(esm_path: Path, output_dir: Path,
+                         worldspace_edid: str = 'TES4Tamriel',
+                         overlay_paths=None,
+                         only_cells=None,
+                         extra_texture_roots=None) -> bool:
+    """Generate terrain LOD (.btr + .dds) for all cells in the worldspace.
+
+    Tile generation is parallelised across (cpu_count - 2) processes.
+
+    Args:
+        esm_path:        Path to the converted ESM.
+        output_dir:      Per-plugin output directory (output/Oblivion.esm/).
+        worldspace_edid: EditorID of the worldspace.
+        overlay_paths:   Plugins applied on top of `esm_path` in load order.
+                         An override plugin's own LAND records must be here or
+                         its regraded terrain never reaches LOD.
+        extra_texture_roots: Additional textures/ roots searched when a
+                         landscape texture is not in this plugin's own output.
+                         An override plugin converts none of the master's
+                         landscape textures, so without the master's root here
+                         every diffuse lookup misses and the tiles composite
+                         to flat grey.
+        only_cells:      Restrict output to tiles COVERING these (x, y) cells.
+                         An override plugin regenerates just the tiles its
+                         edits touch; every other tile the master already
+                         built is still correct, so re-baking (and shipping) a
+                         whole worldspace of identical tiles is waste. The
+                         heightmap is still parsed worldspace-wide, because a
+                         tile at the edit's edge composites neighbouring cells.
+
+    Returns True on success.
+    """
+    try:
+        __import__('PIL')
+    except ImportError:
+        print("  ERROR: Pillow not installed — pip install Pillow")
+        return False
+
+    if not _PYFFI:
+        print("  ERROR: pyffi not available")
+        return False
+
+    srcs = ', '.join([esm_path.name] + [Path(p).name
+                                        for p in (overlay_paths or [])])
+    print(f"\n[TerrainLOD] Parsing LAND records from {srcs}...")
+    lands, cell_water, default_wh = parse_land_records(
+        esm_path, worldspace_edid, overlay_paths)
+    if not lands:
+        print("  No LAND records found.")
+        return False
+    n_water = sum(1 for hw, _ in cell_water.values() if hw)
+    print(f"  Found {len(lands)} LAND records; {n_water} water cells "
+          f"(default water height {default_wh}).")
+
+    # Determine cell bounds
+    all_x = [k[0] for k in lands]
+    all_y = [k[1] for k in lands]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    print(f"  Cell range: X=[{min_x},{max_x}] Y=[{min_y},{max_y}]")
+
+    mesh_dir = output_dir / 'meshes' / 'terrain' / worldspace_edid
+    tex_dir  = output_dir / 'textures' / 'terrain' / worldspace_edid
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    tex_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve LTEX FormID -> landscape diffuse/normal .dds for the compositor.
+    # Overlays are merged on top so an LTEX the PLUGIN adds or re-points wins
+    # over the master's, exactly like the LAND records above.
+    from asset_convert.lod.terrain_lod_textures import build_ltex_texture_map
+    ltex_map = build_ltex_texture_map(esm_path)
+    for ov in (overlay_paths or []):
+        ltex_map.update(build_ltex_texture_map(Path(ov)))
+    # Texture lookup roots, searched in order: this plugin's own output first,
+    # then its masters'. The master's root is what makes an override plugin's
+    # tiles composite the REAL landscape instead of flat grey.
+    tex_roots = [output_dir / 'textures']
+    tex_roots += [Path(r) for r in (extra_texture_roots or [])]
+    print(f"  Resolved {len(ltex_map)} LTEX landscape textures "
+          f"across {len(tex_roots)} texture root(s).")
+
+    n_workers = worker_count()
+    print(f"  Using {n_workers} worker process(es).")
+
+    # Build the work list for EVERY level up front and run it through ONE pool.
+    # A pool per level serialised each level's tail: LOD32 has only ~21 tiles
+    # for all of Tamriel but they are by far the most expensive (a level-N tile
+    # composites N² cells), so 29 workers ran 21 tasks and then idled while the
+    # slowest finished.  One pool lets the cheap LOD4 tiles backfill those
+    # stragglers.  Tasks are submitted LONGEST-FIRST (highest level first) —
+    # classic longest-processing-time scheduling, which keeps the expensive
+    # tiles off the critical path at the end of the run.
+    work = []
+    for level in LOD_LEVELS:
+        tx_start = (min_x // level) * level
+        ty_start = (min_y // level) * level
+        tx_end   = ((max_x + level - 1) // level) * level
+        ty_end   = ((max_y + level - 1) // level) * level
+
+        # Only tile coords are passed per-task; lands is sent once via initializer.
+        n_level = 0
+        for ty in range(ty_start, ty_end, level):
+            for tx in range(tx_start, tx_end, level):
+                cells = [(tx + cx, ty + cy)
+                         for cy in range(level) for cx in range(level)]
+                if not any(c in lands for c in cells):
+                    continue
+                # An override plugin ships only the tiles its edits touch. A
+                # tile counts as touched when ANY cell it composites was
+                # changed — an edit at a tile boundary alters the neighbouring
+                # tile's edge too, so testing coverage (not just the edited
+                # cell's own tile) is what keeps the seams matching.
+                if only_cells is not None and not any(c in only_cells
+                                                      for c in cells):
+                    continue
+                work.append((tx, ty, level, worldspace_edid))
+                n_level += 1
+        print(f"  LOD {level}: {n_level} tiles queued")
+
+    if not work:
+        print("  No tiles to generate.")
+        return False
+
+    # Descending level = descending cost.
+    work.sort(key=lambda w: -w[2])
+
+    # Every scan of this plugin is finished; the cached file buffer is hundreds
+    # of MB and must not be resident while the shared block is filled and the
+    # workers spawn. The next worldspace simply re-reads (one read, then hits).
+    _drop_plugin_bytes()
+
+    # Publish `lands` ONCE into shared memory instead of pickling a private
+    # copy into every worker. See the SharedLands comment: the old
+    # `initargs=(lands, ...)` cost ~0.36 GB per worker on Tamriel, so a full
+    # pool held ~10 GB of identical data and the machine swapped.
+    per_level_ok = {}
+    warn_count = 0
+    _shm = None
+    try:
+        if n_workers > 1:
+            from multiprocessing import shared_memory
+            # Size the block first, then fill it DIRECTLY. Packing into a
+            # bytearray and copying would hold a second full copy in the parent
+            # (1.2 GB on Tamriel-with-overlays) exactly while 29 workers spawn.
+            _size, _plan = lands_layout(lands)
+            _shm = shared_memory.SharedMemory(create=True, size=max(_size, 1))
+            _index = write_lands(lands, _plan, memoryview(_shm.buf)[:_size])
+            del _plan
+            print(f"  Shared {_size/1e6:.0f} MB of LAND data across "
+                  f"{n_workers} worker(s) (one copy, not {n_workers}).")
+            lands_arg = (_shm.name, _size, _index)
+            # The parent's own copy is dead once it is in shared memory, and
+            # holding it doubles the footprint for the whole bake. `lands` is
+            # not read again below — the workers go through the shared block.
+            lands = None
+        else:
+            lands_arg = lands
+
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_worker_init,
+            initargs=(lands_arg, str(mesh_dir), str(tex_dir), ltex_map,
+                      [str(r) for r in tex_roots], cell_water, default_wh),
+        ) as pool:
+            # chunksize=1: tiles differ in cost by ~20x, so batching would hand
+            # one worker a run of expensive tiles and undo the ordering above.
+            for (tag, ok, err), item in zip(
+                    pool.map(_process_tile, work, chunksize=1), work):
+                if ok:
+                    per_level_ok[item[2]] = per_level_ok.get(item[2], 0) + 1
+                else:
+                    warn_count += 1
+                    print(f"  WARNING: {tag}: {err}")
+    finally:
+        # Workers are gone by here (the `with` joined them), so the block can be
+        # released. Both calls are needed: close() unmaps this process's view,
+        # unlink() frees the OS-level segment — without it the shared memory
+        # would leak for the lifetime of the run, once per worldspace.
+        if _shm is not None:
+            _shm.close()
+            try:
+                _shm.unlink()
+            except FileNotFoundError:
+                pass
+
+    total_tiles = sum(per_level_ok.values())
+    for level in LOD_LEVELS:
+        print(f"  LOD {level}: {per_level_ok.get(level, 0)} tiles generated")
+    if warn_count:
+        print(f"  {warn_count} tiles failed")
+
+    print(f"[TerrainLOD] Done — {total_tiles} tiles generated.")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Generate terrain LOD for a converted TES5 plugin')
+    parser.add_argument('esm', help='Path to converted ESM/ESP')
+    parser.add_argument('output_dir', help='Plugin output directory')
+    parser.add_argument('--worldspace', default='TES4Tamriel')
+    args = parser.parse_args()
+    generate_terrain_lod(Path(args.esm), Path(args.output_dir), args.worldspace)

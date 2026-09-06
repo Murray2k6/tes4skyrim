@@ -78,8 +78,8 @@ Converted meshes show purple in NifSkope. Of texture references in a 40-mesh
 output sample, **3 resolve and 107 do not**; nearly every diffuse slot is
 `Textures\white.dds`, the neutral fallback.
 
-The cause is the property loop in `_process_geometry`
-([nif_converter.py:1885](../../asset_convert/nif_converter.py#L1885)). It reads
+The cause is the property loop in `process_geometry`
+([nif_converter.py:1885](../../asset_convert/nif/nif_converter.py#L1885)). It reads
 `NiTexturingProperty`, `NiMaterialProperty`, `NiVertexColorProperty`,
 `NiStencilProperty` and `NiAlphaProperty` — but **not**
 `BSShaderPPLightingProperty`, where FO3/FNV keep their `BSShaderTextureSet`. So

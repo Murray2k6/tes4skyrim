@@ -18,9 +18,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import sibling_lod
-from asset_convert.sibling_lod import (dependents_of, worldspace_owner,
-                                       merge_worldspaces, _master_chain)
+from asset_convert.lod import sibling_lod
+from asset_convert.lod.sibling_lod import (dependents_of, worldspace_owner,
+                                       merge_worldspaces, master_chain)
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def masters(monkeypatch):
     def _fake(export_dir):
         return table.get(Path(export_dir).name, [])
 
-    monkeypatch.setattr(sibling_lod, '_master_names', _fake)
+    monkeypatch.setattr(sibling_lod, 'master_names', _fake)
     return table
 
 
@@ -129,15 +129,15 @@ class TestOverlayGate:
         masters['Tamriel.esp'] = ['Oblivion.esm']
         masters['Nehrim.esm'] = []
         names = ['Oblivion.esm', 'Tamriel.esp', 'Nehrim.esm']
-        assert 'Oblivion.esm' in _master_chain('Tamriel.esp', Path('.'), names)
-        assert 'Oblivion.esm' not in _master_chain('Nehrim.esm', Path('.'),
+        assert 'Oblivion.esm' in master_chain('Tamriel.esp', Path('.'), names)
+        assert 'Oblivion.esm' not in master_chain('Nehrim.esm', Path('.'),
                                                    names)
 
     def test_transitive_dependent_is_an_overlay(self, masters):
         masters['Tamriel.esp'] = ['Oblivion.esm']
         masters['Patch.esp'] = ['Tamriel.esp']
         names = ['Oblivion.esm', 'Tamriel.esp', 'Patch.esp']
-        assert 'Oblivion.esm' in _master_chain('Patch.esp', Path('.'), names)
+        assert 'Oblivion.esm' in master_chain('Patch.esp', Path('.'), names)
 
 
 class TestMergeWorldspaces:
@@ -171,7 +171,7 @@ class TestModAddedWorldspacesAreOffered:
     def test_terrain_without_shipped_lod_is_still_offered(self, monkeypatch,
                                                           tmp_path):
         """The reported bug: a mod-added worldspace must appear."""
-        from asset_convert import terrain_lod
+        from asset_convert.lod import terrain_lod
 
         d = tmp_path / 'ElsweyrAnequina.esp'
         d.mkdir()
@@ -194,7 +194,7 @@ class TestModAddedWorldspacesAreOffered:
 
     def test_shipped_ranks_before_generated_and_dedupes(self, monkeypatch,
                                                         tmp_path):
-        from asset_convert import terrain_lod
+        from asset_convert.lod import terrain_lod
 
         d = tmp_path / 'Oblivion.esm'
         d.mkdir()
@@ -222,7 +222,7 @@ class TestModAddedWorldspacesAreOffered:
         diagnostic burden -- it must tell a deleted export apart from a plugin
         that legitimately ships no LOD of its own.
         """
-        from asset_convert import terrain_lod
+        from asset_convert.lod import terrain_lod
 
         d = tmp_path / 'Quest.esp'
         d.mkdir()
@@ -245,7 +245,8 @@ class TestModAddedWorldspacesAreOffered:
     def test_owner_falls_back_to_terrain_when_nobody_shipped(self, shipped,
                                                              tmp_path):
         """The bake must not skip a mod-added worldspace."""
-        from asset_convert import sibling_lod, terrain_lod
+        from asset_convert.lod import sibling_lod
+        from asset_convert.lod import terrain_lod
 
         out = tmp_path / 'out'
         (out / 'Mod.esp').mkdir(parents=True)
@@ -267,15 +268,15 @@ class TestModAddedWorldspacesAreOffered:
                                 tmp_path) == 'Oblivion.esm'
 
     def test_unexported_plugin_says_export(self, tmp_path):
-        from asset_convert.terrain_lod import lod_capable_worldspaces
+        from asset_convert.lod.terrain_lod import lod_capable_worldspaces
         ws, why = lod_capable_worldspaces(tmp_path / 'Ghost.esp')
         assert ws == []
         assert 'no export folder' in why and '--export-only' in why
 
     def test_reason_map_only_covers_empty_plugins(self, monkeypatch, tmp_path):
         """A plugin that resolved worldspaces contributes no reason."""
-        from asset_convert import terrain_lod
-        from asset_convert.sibling_lod import worldspaces_by_plugin_diagnosed
+        from asset_convert.lod import terrain_lod
+        from asset_convert.lod.sibling_lod import worldspaces_by_plugin_diagnosed
 
         def _fake(export_dir, out_root=None, plugin=None):
             # Identify by the PLUGIN argument, not the folder name: a
@@ -290,10 +291,63 @@ class TestModAddedWorldspacesAreOffered:
         assert by == {'Good.esm': ['W1'], 'Bad.esp': []}
         assert list(why) == ['Bad.esp']
 
+    def test_a_plugin_editing_a_qualified_worldspace_joins_it(
+            self, monkeypatch, tmp_path):
+        """Morrowind-native content ships no LOD but fills the same grid.
+
+        Tamriel Rebuilt overrides Morroblivion's WrldMorrowind and ships no
+        Oblivion-format LOD assets, so it contributed nothing and its land had
+        no distant terrain.
+        See: docs/commentary/asset_convert_terrain.md#lod-for-plugins-that-only-edit
+        """
+        from asset_convert.lod import terrain_lod
+        from asset_convert.lod.sibling_lod import worldspaces_by_plugin_diagnosed
+
+        def _fake(export_dir, out_root=None, plugin=None):
+            """Only the Oblivion-format plugin ships LOD assets."""
+            if (plugin or Path(export_dir).name) == 'Morrowind_ob.esm':
+                return [('WrldMorrowind', 0x380000)], None
+            return [], 'TR.esm: ships no distant LOD of its own.'
+
+        monkeypatch.setattr(terrain_lod, 'lod_capable_worldspaces', _fake)
+        monkeypatch.setattr(terrain_lod, 'worldspace_edids',
+                            lambda d: {0x380000: 'WrldMorrowind'})
+        (tmp_path / 'TR.esm').mkdir()
+        (tmp_path / 'TR.esm' / 'CELL.txt').write_text(
+            'ParentWRLD=00380000\n', encoding='utf-8')
+
+        by, why = worldspaces_by_plugin_diagnosed(
+            ['Morrowind_ob.esm', 'TR.esm'], tmp_path)
+
+        assert by['TR.esm'] == ['WrldMorrowind'], (
+            'a plugin adding cells to a qualified worldspace must join it')
+        assert 'TR.esm' not in why, 'it no longer has nothing to offer'
+
+    def test_editing_alone_never_qualifies_a_worldspace(self, monkeypatch,
+                                                        tmp_path):
+        """The rule widens an established grid; it never invents one.
+
+        Otherwise every debug worldspace with terrain comes back, which is the
+        false-positive `lod_capable_worldspaces` exists to avoid.
+        """
+        from asset_convert.lod import terrain_lod
+        from asset_convert.lod.sibling_lod import worldspaces_by_plugin_diagnosed
+
+        monkeypatch.setattr(terrain_lod, 'lod_capable_worldspaces',
+                            lambda d, out_root=None, plugin=None: ([], 'none'))
+        monkeypatch.setattr(terrain_lod, 'worldspace_edids',
+                            lambda d: {0x380000: 'WrldMorrowind'})
+        (tmp_path / 'TR.esm').mkdir()
+        (tmp_path / 'TR.esm' / 'CELL.txt').write_text(
+            'ParentWRLD=00380000\n', encoding='utf-8')
+
+        by, _why = worldspaces_by_plugin_diagnosed(['TR.esm'], tmp_path)
+        assert by['TR.esm'] == []
+
     def test_a_raising_scan_is_reported_not_swallowed(self, monkeypatch,
                                                      tmp_path):
-        from asset_convert import terrain_lod
-        from asset_convert.sibling_lod import worldspaces_by_plugin_diagnosed
+        from asset_convert.lod import terrain_lod
+        from asset_convert.lod.sibling_lod import worldspaces_by_plugin_diagnosed
 
         def _boom(export_dir, out_root=None, plugin=None):
             raise OSError('disk gone')

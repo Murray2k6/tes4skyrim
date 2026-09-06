@@ -26,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tes5_import.navmesh import corridor_clean, params  # noqa: E402
+from tes5_import.navmesh import corridor_clean, params
 
 GRID = 128.0
 CHOKE_MIN_WIDTH = 48.0      # half a doorway

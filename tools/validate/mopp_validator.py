@@ -9,7 +9,7 @@ queries):
   - walks reaching uninitialised 0xCD filler bytes (MOPP_RL leaves these)
   - unknown opcodes (with context bytes for reverse-engineering)
   - MOPP terminal key set != the shape's exact key set (packed: triangle
-    indices; CMS: engine chunk/winding/index decode via asset_convert.cms)
+    indices; CMS: engine chunk/winding/index decode via asset_convert.collision.cms)
   - unreachable tail bytes (reports the true code length)
 
 Opcode table: PyFFI's parse_mopp (reverse-engineered by niftools) extended
@@ -28,10 +28,10 @@ import time
 if not hasattr(time, 'clock'):
     time.clock = time.perf_counter  # PyFFI 2.2.3 uses removed time.clock
 
-# The walker lives in asset_convert.mopp (shared with the conversion
+# The walker lives in asset_convert.collision.mopp (shared with the conversion
 # pipeline's dechunker); this tool is the CLI front-end.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from asset_convert.mopp import walk_mopp  # noqa: E402
+from asset_convert.collision.mopp import walk_mopp
 
 
 def expected_keys(mopp_shape):
@@ -39,7 +39,7 @@ def expected_keys(mopp_shape):
 
     Packed shapes: keys are triangle indices 0..n-1.
     bhkCompressedMeshShape: the engine chunk/winding/index key decode from
-    asset_convert.cms (validated 200/200 against vanilla meshes).
+    asset_convert.collision.cms (validated 200/200 against vanilla meshes).
     Returns None when the key set cannot be derived.
     """
     from pyffi.formats.nif import NifFormat
@@ -52,7 +52,7 @@ def expected_keys(mopp_shape):
             return set(range(data.num_triangles))
     data = getattr(inner, 'data', None)
     if data is not None and type(data).__name__ == 'bhkCompressedMeshShapeData':
-        from asset_convert.cms import predict_keys
+        from asset_convert.collision.cms import predict_keys
         return predict_keys(data)
     return None
 

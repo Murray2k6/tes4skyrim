@@ -9,16 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from asset_convert.nif_converter import (
+from asset_convert.nif.nif_batch import batch_convert
+from asset_convert.nif.nif_converter import (
     OUTPUT_USER_VERSION as _SKY_UV,
     OUTPUT_USER_VERSION_2 as _SKY_UV2,
     OUTPUT_VERSION as _SKY_VERSION,
-    _rewrite_tex_path,
-    batch_convert,
+    rewrite_tex_path,
     convert_nif,
 )
-from asset_convert import wearable_plan
-from asset_convert.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP as BONE_MAP
+from asset_convert.character import wearable_plan
+from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP as BONE_MAP
 
 # Primary Oblivion NIF version (no single constant exported)
 _OBV_VERSION = 0x14000004
@@ -31,22 +31,22 @@ class TestTexturePathRewriting:
     """Test texture path rewriting logic."""
 
     def test_prepend_tes4_to_textures(self):
-        result = _rewrite_tex_path(b'textures\\armor\\iron\\cuirass.dds')
+        result = rewrite_tex_path(b'textures\\armor\\iron\\cuirass.dds')
         assert result == 'Textures\\tes4\\armor\\iron\\cuirass.dds'
 
     def test_already_prefixed_unchanged(self):
-        result = _rewrite_tex_path(b'textures\\tes4\\armor\\iron\\cuirass.dds')
+        result = rewrite_tex_path(b'textures\\tes4\\armor\\iron\\cuirass.dds')
         assert result == 'Textures\\tes4\\armor\\iron\\cuirass.dds'
 
     def test_empty_path_gets_prefix(self):
-        assert _rewrite_tex_path(b'') == 'Textures\\tes4\\'
+        assert rewrite_tex_path(b'') == 'Textures\\tes4\\'
 
     def test_non_texture_path_gets_prefix(self):
-        result = _rewrite_tex_path(b'something\\random.dds')
+        result = rewrite_tex_path(b'something\\random.dds')
         assert result == 'Textures\\tes4\\something\\random.dds'
 
     def test_case_insensitive_prefix(self):
-        result = _rewrite_tex_path(b'Textures\\Armor\\Iron\\Cuirass.dds')
+        result = rewrite_tex_path(b'Textures\\Armor\\Iron\\Cuirass.dds')
         assert 'tes4' in result.lower()
 
     def test_data_prefix_is_stripped(self):
@@ -57,11 +57,11 @@ class TestTexturePathRewriting:
         out under a 'data' folder that does not exist, AND the prune deleted
         the real texture because the key never matched the shipped path.
         """
-        result = _rewrite_tex_path(b'data\\textures\\dwarven\\rock02.dds')
+        result = rewrite_tex_path(b'data\\textures\\dwarven\\rock02.dds')
         assert result == 'Textures\\tes4\\dwarven\\rock02.dds'
 
     def test_data_prefix_with_forward_slashes(self):
-        result = _rewrite_tex_path(b'Data/Textures/dwarven/rock01.dds')
+        result = rewrite_tex_path(b'Data/Textures/dwarven/rock01.dds')
         assert result == 'Textures\\tes4\\dwarven\\rock01.dds'
 
 
@@ -259,41 +259,41 @@ class TestBsaExtract:
     """Test BSA extraction logic."""
 
     def test_should_extract_nif(self):
-        from asset_convert.bsa_extract import _should_extract_file
-        assert _should_extract_file('meshes\\armor\\iron\\cuirass.nif')
-        assert _should_extract_file('meshes\\furniture\\chair.nif')
+        from asset_convert.sources.bsa_extract import should_extract_file
+        assert should_extract_file('meshes\\armor\\iron\\cuirass.nif')
+        assert should_extract_file('meshes\\furniture\\chair.nif')
 
     def test_should_extract_dds(self):
-        from asset_convert.bsa_extract import _should_extract_file
-        assert _should_extract_file('textures\\armor\\iron\\cuirass.dds')
+        from asset_convert.sources.bsa_extract import should_extract_file
+        assert should_extract_file('textures\\armor\\iron\\cuirass.dds')
 
     def test_should_extract_wav(self):
-        from asset_convert.bsa_extract import _should_extract_file
-        assert _should_extract_file('sound\\fx\\explosion.wav')
+        from asset_convert.sources.bsa_extract import should_extract_file
+        assert should_extract_file('sound\\fx\\explosion.wav')
 
     def test_should_skip_lip(self):
-        from asset_convert.bsa_extract import _should_extract_file
-        assert not _should_extract_file('sound\\voice\\test.lip')
+        from asset_convert.sources.bsa_extract import should_extract_file
+        assert not should_extract_file('sound\\voice\\test.lip')
 
     def test_asset_category(self):
-        from asset_convert.bsa_extract import _get_asset_category
-        assert _get_asset_category('meshes\\armor\\test.nif') == 'meshes'
-        assert _get_asset_category('textures\\armor\\test.dds') == 'textures'
-        assert _get_asset_category('sound\\fx\\test.wav') == 'sound'
+        from asset_convert.sources.bsa_extract import get_asset_category
+        assert get_asset_category('meshes\\armor\\test.nif') == 'meshes'
+        assert get_asset_category('textures\\armor\\test.dds') == 'textures'
+        assert get_asset_category('sound\\fx\\test.wav') == 'sound'
 
     def test_manifest_round_trip(self):
-        from asset_convert.bsa_extract import _load_manifest, _save_manifest
+        from asset_convert.sources.bsa_extract import load_manifest, save_manifest
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest = {'extracted_bsas': {
                 'test.bsa': {'size': 12345, 'file_count': 100}
             }}
-            _save_manifest(tmpdir, manifest)
-            loaded = _load_manifest(tmpdir)
+            save_manifest(tmpdir, manifest)
+            loaded = load_manifest(tmpdir)
             assert loaded['extracted_bsas']['test.bsa']['size'] == 12345
             assert loaded['extracted_bsas']['test.bsa']['file_count'] == 100
 
     def test_get_bsa_files(self):
-        from asset_convert.bsa_extract import _get_bsa_files
+        from asset_convert.sources.bsa_extract import get_bsa_files
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create fake BSA files
             (Path(tmpdir) / 'Test - Meshes.bsa').write_bytes(b'BSA\x00')
@@ -301,7 +301,7 @@ class TestBsaExtract:
             (Path(tmpdir) / 'Test.bsa').write_bytes(b'BSA\x00')
             (Path(tmpdir) / 'Other.bsa').write_bytes(b'BSA\x00')
 
-            bsas = _get_bsa_files(tmpdir, 'Test.esm')
+            bsas = get_bsa_files(tmpdir, 'Test.esm')
             names = [b.name for b in bsas]
             assert 'Test - Meshes.bsa' in names
             assert 'Test - Textures.bsa' in names
@@ -324,58 +324,58 @@ class TestBsaPack:
 
     def test_size_limit_under_engine_hard_limit(self):
         """The payload budget must leave headroom for BSA metadata."""
-        from asset_convert.bsa_pack import BSA_HARD_LIMIT, BSA_SIZE_LIMIT
+        from asset_convert.sources.bsa_pack import BSA_HARD_LIMIT, BSA_SIZE_LIMIT
         # 32-bit file-data offsets cap a BSA at exactly 2 GiB.
         assert BSA_HARD_LIMIT == 2_147_483_648
         assert BSA_SIZE_LIMIT < BSA_HARD_LIMIT
 
     def test_no_split_when_content_fits(self):
-        from asset_convert.bsa_pack import _bin_files
-        bins = _bin_files(self._entries(100, 200, 300), limit=1000)
+        from asset_convert.sources.bsa_pack import bin_files
+        bins = bin_files(self._entries(100, 200, 300), limit=1000)
         assert len(bins) == 1
 
     def test_splits_when_over_limit(self):
-        from asset_convert.bsa_pack import _bin_files
-        bins = _bin_files(self._entries(600, 500), limit=1000)
+        from asset_convert.sources.bsa_pack import bin_files
+        bins = bin_files(self._entries(600, 500), limit=1000)
         assert len(bins) == 2
 
     def test_exactly_at_limit_does_not_split(self):
         """A bin filled to exactly the limit is still legal."""
-        from asset_convert.bsa_pack import _bin_files
-        bins = _bin_files(self._entries(600, 400), limit=1000)
+        from asset_convert.sources.bsa_pack import bin_files
+        bins = bin_files(self._entries(600, 400), limit=1000)
         assert len(bins) == 1
 
     def test_no_bin_exceeds_limit(self):
-        from asset_convert.bsa_pack import _bin_files
-        bins = _bin_files(self._entries(*([300] * 10)), limit=1000)
+        from asset_convert.sources.bsa_pack import bin_files
+        bins = bin_files(self._entries(*([300] * 10)), limit=1000)
         assert all(sum(e[2] for e in b) <= 1000 for b in bins)
 
     def test_split_is_lossless(self):
         """Every file must land in exactly one bin — none dropped, none duplicated."""
-        from asset_convert.bsa_pack import _bin_files
+        from asset_convert.sources.bsa_pack import bin_files
         files = self._entries(*([250] * 9))
-        bins = _bin_files(files, limit=1000)
+        bins = bin_files(files, limit=1000)
         packed = [e for b in bins for e in b]
         assert len(packed) == len(files)
         assert {str(e[1]) for e in packed} == {str(e[1]) for e in files}
 
     def test_oversized_single_file_isolated(self):
         """A file bigger than a whole BSA can't be split; it gets its own bin."""
-        from asset_convert.bsa_pack import _bin_files
-        bins = _bin_files(self._entries(100, 5000, 100), limit=1000)
+        from asset_convert.sources.bsa_pack import bin_files
+        bins = bin_files(self._entries(100, 5000, 100), limit=1000)
         big = [b for b in bins if b[0][2] == 5000]
         assert len(big) == 1 and len(big[0]) == 1
 
     def test_empty_input_yields_no_bins(self):
-        from asset_convert.bsa_pack import _bin_files
-        assert _bin_files([], limit=1000) == []
+        from asset_convert.sources.bsa_pack import bin_files
+        assert bin_files([], limit=1000) == []
 
     def test_loader_stem_naming(self):
         """Overflow loaders are <stem>_loader, <stem>_loader_1, ..."""
-        from asset_convert.bsa_pack import _loader_stem
-        assert _loader_stem('Oblivion', 0) == 'Oblivion_loader'
-        assert _loader_stem('Oblivion', 1) == 'Oblivion_loader_1'
-        assert _loader_stem('Oblivion', 2) == 'Oblivion_loader_2'
+        from asset_convert.sources.bsa_pack import loader_stem
+        assert loader_stem('Oblivion', 0) == 'Oblivion_loader'
+        assert loader_stem('Oblivion', 1) == 'Oblivion_loader_1'
+        assert loader_stem('Oblivion', 2) == 'Oblivion_loader_2'
 
     def test_loader_stem_is_plugin_scoped(self):
         """Two plugins must never generate the same loader name.
@@ -385,20 +385,20 @@ class TestBsaPack:
         that overflowed ship identically-named .esl/.bsa files -- installing
         two of them silently overwrote one mod's overflow archives.
         """
-        from asset_convert.bsa_pack import _loader_stem
+        from asset_convert.sources.bsa_pack import loader_stem
         stems = ['Oblivion', 'Morrowind_ob', 'Nehrim',
                  'Morrowind_ob - Chargen and Transport Mod']
         for i in range(3):
-            names = [_loader_stem(s, i) for s in stems]
+            names = [loader_stem(s, i) for s in stems]
             assert len(set(names)) == len(names), f"collision at index {i}: {names}"
         # Every name must still carry its own plugin's stem.
         for s in stems:
-            assert _loader_stem(s, 0).startswith(s)
+            assert loader_stem(s, 0).startswith(s)
 
     def test_loader_esl_is_valid_light_master(self):
         """The dummy ESL must be a record-free TES4 header with ESM+ESL flags."""
         import struct
-        from asset_convert.bsa_pack import write_loader_esl, ESL_FLAG, ESM_FLAG
+        from asset_convert.sources.bsa_pack import write_loader_esl, ESL_FLAG, ESM_FLAG
         with tempfile.TemporaryDirectory() as tmpdir:
             p = Path(tmpdir) / 'Oblivion_loader.esl'
             write_loader_esl(p)
@@ -1608,13 +1608,13 @@ class TestFlameNodeConversion:
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat
-        from asset_convert.nif_flames import _flame_socket_index
+        from asset_convert.nif.nif_flames import flame_socket_index
 
         src = EXPORT_MESHES / rel
         if not src.exists():
             pytest.skip(f'{src} not found')
 
-        assert _flame_socket_index(marker) is None, (
+        assert flame_socket_index(marker) is None, (
             f'{marker} must not resolve to a socket: the engine has no such '
             f'name in its table')
 
@@ -1671,8 +1671,8 @@ class TestFlameNodeConversion:
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat
-        from asset_convert.nif_flames import (_flame_socket_map,
-                                              _flame_socket_index)
+        from asset_convert.nif.nif_flames import (flame_socket_map,
+                                              flame_socket_index)
 
         src = EXPORT_MESHES / rel
         if not src.exists():
@@ -1684,7 +1684,7 @@ class TestFlameNodeConversion:
             data.inspect(f)
             f.seek(0)
             data.read(f)
-        sockets = {_flame_socket_index(bytes(b.name or b''))
+        sockets = {flame_socket_index(bytes(b.name or b''))
                    for b in data.blocks
                    if bytes(getattr(b, 'name', b'') or b'').startswith(
                        b'FlameNode')}
@@ -1692,7 +1692,7 @@ class TestFlameNodeConversion:
             f'{rel}: expected a FlameNode{socket} marker, found {sockets}')
 
         # And the authored table maps it to the flame we expect.
-        table = _flame_socket_map(str(src))
+        table = flame_socket_map(str(src))
         assert table, 'no FlameNode STAT records parsed from the export'
         assert flame in table[socket].encode(), (
             f'FlameNode{socket} -> {table[socket]}, expected {flame!r}')
@@ -2035,7 +2035,7 @@ class TestShieldVsArmorClassification:
     def test_shield_orientation_corrected(self, tmp_path):
         """Converted shield must land in Skyrim SHIELD-bone space like vanilla.
 
-        The root transform comes from _shield_attach_transform(): an exact
+        The root transform comes from shield_attach_transform(): an exact
         mapping from the Oblivion attach frame (Bip01 L ForearmTwist) to the
         Skyrim SHIELD bone frame via anatomically corresponding hand frames.
         Result contract (matches vanilla ironshield.nif: X ≈ ±21, Y ≈ ±22,
@@ -2047,7 +2047,7 @@ class TestShieldVsArmorClassification:
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat as NF
         import numpy as np
-        from asset_convert.nif_converter import _shield_attach_transform
+        from asset_convert.nif.nif_converter import shield_attach_transform
 
         src = EXPORT_MESHES / _SHIELD_SAMPLE
         if not src.exists():
@@ -2069,7 +2069,7 @@ class TestShieldVsArmorClassification:
         inner = root.children[0]
         assert isinstance(inner, NF.NiNode), "Shield inner child must be NiNode"
         # Inner rotation/translation must match the skeleton-derived transform
-        T = _shield_attach_transform()
+        T = shield_attach_transform()
         assert T is not None, "Shield attach transform must be computable from skeleton JSONs"
         ri = inner.rotation
         Rmat = np.array([[ri.m_11, ri.m_12, ri.m_13],
@@ -2273,7 +2273,7 @@ class TestCollisionTargetPointsToRoot:
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat as NF
-        from asset_convert.cms import decode_cms
+        from asset_convert.collision.cms import decode_cms
 
         src = EXPORT_MESHES / rel_path
         if not src.exists():
@@ -2426,7 +2426,7 @@ class TestMoppBuildType:
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat as NF
-        from asset_convert.mopp import walk_mopp
+        from asset_convert.collision.mopp import walk_mopp
 
         src = EXPORT_MESHES / rel_path
         if not src.exists():
@@ -2469,8 +2469,8 @@ class TestMoppBuildType:
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat as NF
-        from asset_convert.mopp import walk_mopp
-        from asset_convert.cms import predict_keys
+        from asset_convert.collision.mopp import walk_mopp
+        from asset_convert.collision.cms import predict_keys
 
         src = EXPORT_MESHES / rel_path
         if not src.exists():
@@ -2834,8 +2834,8 @@ class TestTextureTransformControllerConversion:
         return shape, NifFormat
 
     def _convert(self, shape):
-        from asset_convert.nif_converter import _process_geometry
-        return _process_geometry(shape, fix_textures=True)
+        from asset_convert.nif.nif_converter import process_geometry
+        return process_geometry(shape, fix_textures=True)
 
     def test_v_translate_becomes_v_offset_controller(self):
         """The waterfall case: TT_TRANSLATE_V 0 -> -2.0 must survive as a
@@ -3101,7 +3101,7 @@ def _playing_world_rotations(path):
     """
     import math
     import numpy as np
-    NF, d = _read_nif(path)
+    NF, d = read_nif(path)
     root = d.roots[0]
     parent = {}
 
@@ -3165,7 +3165,7 @@ def _playing_world_rotations(path):
     return out
 
 
-def _read_nif(path):
+def read_nif(path):
     import time
     if not hasattr(time, '_original_clock'):
         time.clock = time.perf_counter
@@ -3188,7 +3188,7 @@ class TestAmbientSequences:
         dst = tmp_path / 'meshes' / 'tes4' / 'arena' / 'arenaspectatorm01.nif'
         dst.parent.mkdir(parents=True)
         convert_nif(str(src), str(dst))
-        NF, d = _read_nif(dst)
+        NF, d = read_nif(dst)
         seqs = {bytes(b.name).decode('latin-1'): b for b in d.blocks
                 if isinstance(b, NF.NiControllerSequence)}
         assert set(seqs) == {'AutoLoop', 'AutoPlay'}, list(seqs)
@@ -3209,7 +3209,7 @@ class TestAmbientSequences:
             pytest.skip(f'{src} not found')
         dst = tmp_path / 'out.nif'
         convert_nif(str(src), str(dst))
-        NF, d = _read_nif(dst)
+        NF, d = read_nif(dst)
         for seq in (b for b in d.blocks if isinstance(b, NF.NiControllerSequence)):
             cb = next(c for c in seq.controlled_blocks if bytes(c.node_name) == b'Bip01')
             it = cb.interpolator
@@ -3227,7 +3227,7 @@ class TestAmbientSequences:
             pytest.skip(f'{src} not found')
         dst = tmp_path / 'out.nif'
         convert_nif(str(src), str(dst))
-        NF, d = _read_nif(dst)
+        NF, d = read_nif(dst)
         for seq in (b for b in d.blocks if isinstance(b, NF.NiControllerSequence)):
             cb = next(c for c in seq.controlled_blocks if bytes(c.node_name) == b'DoorLowerINT01')
             it = cb.interpolator
@@ -3280,7 +3280,7 @@ class TestSharedPropertyFanOut:
             pytest.skip(f'{src} not found')
         dst = tmp_path / 'out.nif'
         convert_nif(str(src), str(dst))
-        NF, d = _read_nif(dst)
+        NF, d = read_nif(dst)
         water = ['Water', 'Water02', 'Water03', 'Water04', 'WaterFoam01',
                  'PalaceWaterL1', 'PalaceWaterR1', 'PalaceWaterL2',
                  'PalaceWaterR02', 'PalaceWaterFoam01']
@@ -3686,9 +3686,9 @@ class TestAnimObjectBehaviorGraph:
         The script calls PlayAnimation("Forward"); the graph must expose a
         'Forward' event routed to a generator whose pSequence is 'Forward'.
         """
-        from asset_convert.hkx_animobject import _behavior_xml
+        from asset_convert.havok.hkx_animobject import behavior_xml
 
-        xml = _behavior_xml('wall', ['Forward', 'Backward'])
+        xml = behavior_xml('wall', ['Forward', 'Backward'])
         for seq in ('Forward', 'Backward'):
             assert f'<hkcstring>{seq}</hkcstring>' in xml, f'{seq} not an event'
             assert f'<hkparam name="pSequence">{seq}</hkparam>' in xml, \
@@ -3704,7 +3704,7 @@ class TestAnimObjectBehaviorGraph:
 
     def test_no_sequences_means_no_graph(self, tmp_path):
         """A static mesh must not get a BGED pointing at a nonexistent graph."""
-        from asset_convert.hkx_animobject import generate_animobject_project
+        from asset_convert.havok.hkx_animobject import generate_animobject_project
 
         assert generate_animobject_project(str(tmp_path), 'a/b.nif', []) == ''
         assert not list(tmp_path.rglob('*.hkx'))
@@ -3724,7 +3724,7 @@ class TestAnimObjectBehaviorGraph:
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat as NF
-        from asset_convert.nif_converter import collect_sequence_names
+        from asset_convert.nif.nif_converter import collect_sequence_names
 
         src = EXPORT_MESHES / 'Dungeons/Chargen/prisoncellgate01.nif'
         if not src.exists():
@@ -3798,12 +3798,12 @@ class TestAnimObjectBehaviorGraph:
         uses into a reference pose whose ROTATION SLOT IS ALL ZEROS.  A zero
         quaternion is not a rotation, so the single bone had no valid bind pose
         and the whole object rendered NOTHING in-game while the behaviour graph
-        loaded without error.  `_fix_identity_quat` patches it to (1,0,0,0);
+        loaded without error.  `fix_identity_quat` patches it to (1,0,0,0);
         Havok's binary quaternion is w-first, unlike the XML's xyzw.
         """
         import struct
-        from asset_convert.hkx_animobject import _skeleton_xml, _fix_identity_quat
-        from asset_convert.hkx_xml import compile_hkx
+        from asset_convert.havok.hkx_animobject import skeleton_xml, fix_identity_quat
+        from asset_convert.havok.hkx_xml import compile_hkx
 
         vanilla = Path('references/Skyrim Animations/meshes/clutter/beehive'
                        '/characterassets/singleboneskeleton.hkx')
@@ -3813,9 +3813,9 @@ class TestAnimObjectBehaviorGraph:
         xml = tmp_path / 's.xml'
         hkx = tmp_path / 's.hkx'
         # Same bone name as vanilla, or the string table differs legitimately.
-        xml.write_text(_skeleton_xml('x_SingleBone'), newline='\n')
+        xml.write_text(skeleton_xml('x_SingleBone'), newline='\n')
         compile_hkx(str(xml), str(hkx))
-        _fix_identity_quat(str(hkx))
+        fix_identity_quat(str(hkx))
 
         got = hkx.read_bytes()
         assert got == vanilla.read_bytes(), \
@@ -3836,13 +3836,13 @@ class TestAnimObjectBehaviorGraph:
         engine bind the graph's identity bind pose onto the object and place it
         far from its authored worldspace position.
         """
-        from asset_convert.hkx_animobject import (_skeleton_xml, _DUMMY_BONE,
+        from asset_convert.havok.hkx_animobject import (skeleton_xml, DUMMY_BONE,
                                                   generate_animobject_project)
         import tempfile
 
-        assert _DUMMY_BONE == 'x_SingleBone'
-        assert f'<hkparam name="name">{_DUMMY_BONE}</hkparam>' in \
-            _skeleton_xml(_DUMMY_BONE)
+        assert DUMMY_BONE == 'x_SingleBone'
+        assert f'<hkparam name="name">{DUMMY_BONE}</hkparam>' in \
+            skeleton_xml(DUMMY_BONE)
 
         # The generator must pass the dummy name, not the model stem.
         out = tempfile.mkdtemp()
@@ -3869,10 +3869,10 @@ class TestAnimObjectBehaviorGraph:
         sets wildcardTransitions=null and gives each state its own array.
         """
         import re
-        from asset_convert.hkx_animobject import _behavior_xml
+        from asset_convert.havok.hkx_animobject import behavior_xml
 
         seqs = ['Forward', 'Backward']
-        xml = _behavior_xml('wall', seqs)
+        xml = behavior_xml('wall', seqs)
 
         # Rest is the last state and plays nothing.
         rest_id = len(seqs)
@@ -3886,7 +3886,7 @@ class TestAnimObjectBehaviorGraph:
         # sequence" is the empty set there, so a state built that way emits
         # transitions=null and can never be re-entered.
         for n in (1, 2, 3):
-            xml_n = _behavior_xml('wall', ['Forward', 'Backward',
+            xml_n = behavior_xml('wall', ['Forward', 'Backward',
                                            'Unequip'][:n])
             states = re.findall(
                 r'class="hkbStateMachineStateInfo".*?'
@@ -3905,10 +3905,10 @@ class TestAnimObjectBehaviorGraph:
         quaternion must also be (0,0,0,1): a 4-wide translation tuple shifts
         w to 0, and a zero quaternion normalizes to NaN.
         """
-        from asset_convert.hkx_animobject import _skeleton_xml
+        from asset_convert.havok.hkx_animobject import skeleton_xml
         import re
 
-        xml = _skeleton_xml('gate')
+        xml = skeleton_xml('gate')
         poses = re.findall(r'<hkparam name="referencePose" numelements="(\d+)"', xml)
         assert poses == ['1'], f'expected exactly one 1-element pose, got {poses}'
 
@@ -3949,14 +3949,14 @@ class TestAnimationBlockLayout:
         PyFFI mismodels the header as 'unknown_short', so 0x0201 IS
         Flags=0x01 (low byte) + Array Size=0x02 (high byte).
         """
-        from asset_convert.nif_converter import _normalize_blend_interpolators
+        from asset_convert.nif.nif_converter import normalize_blend_interpolators
         NF = self._nif()
         root = NF.NiNode()
         ctrl = NF.NiVisController()
         blend = NF.NiBlendBoolInterpolator()
         ctrl.interpolator = blend
         root.controller = ctrl
-        _normalize_blend_interpolators(root)
+        normalize_blend_interpolators(root)
         assert blend.unknown_short & 0x00FF == 1, \
             'Manager Controlled (Flags bit 0) must be set'
         assert blend.unknown_short >> 8 == 2, 'Array Size must be 2'
@@ -3968,7 +3968,7 @@ class TestAnimationBlockLayout:
     def test_normalize_fixes_copied_blend_interpolators(self):
         """The defect also affects blocks COPIED from Oblivion, not just ones we
         synthesize, so the fix has to be a tree-wide pass."""
-        from asset_convert.nif_converter import _normalize_blend_interpolators
+        from asset_convert.nif.nif_converter import normalize_blend_interpolators
         NF = self._nif()
         root = NF.NiNode()
         ctrl = NF.NiVisController()
@@ -3977,16 +3977,16 @@ class TestAnimationBlockLayout:
         ctrl.interpolator = blend
         root.controller = ctrl
 
-        assert _normalize_blend_interpolators(root) == 1
+        assert normalize_blend_interpolators(root) == 1
         assert blend.unknown_short == 0x0201
         # idempotent -- a second pass must find nothing left to fix
-        assert _normalize_blend_interpolators(root) == 0
+        assert normalize_blend_interpolators(root) == 0
 
     @pytest.mark.skip(reason=
         'The wrapper-node SCALE morph swap was REVERTED 2026-08-10: it hard-'
         'freezes Skyrim on the ImperialDungeon05 tripwire (no crash, no log, '
         'process alive but never renders again), while the SAME mesh works in '
-        'Vilverin.  _emulate_morphs is back to the pre-90d04a3 '
+        'Vilverin.  morphs.emulate_morphs is back to the pre-90d04a3 '
         'NiVisController version, so this test asserts a design that is no '
         'longer shipped.  Re-enable it together with a real fix - see '
         'docs/commentary/asset_convert_nif.md "NiGeomMorpherController does not exist '
@@ -4000,17 +4000,17 @@ class TestAnimationBlockLayout:
         visible swap in-game.  The swap is a wrapper-NODE scale animation
         driven by NiTransformController -- the machinery confirmed working
         in-game (CharacterGen secret wall)."""
-        from asset_convert.nif_converter import _BLEND_INTERP_FLAGS_ARRAYSIZE
+        from asset_convert.nif.morphs import BLEND_INTERP_FLAGS_ARRAYSIZE
         import inspect
-        from asset_convert import nif_converter
-        src = inspect.getsource(nif_converter._emulate_morphs)
+        from asset_convert.nif import morphs
+        src = inspect.getsource(morphs.emulate_morphs)
         assert 'NiVisController()' not in src, \
             'morph emulation must not construct NiVisController blocks'
         assert "b'NiVisController'" not in src, \
             'morph emulation must not emit NiVisController sequence entries'
         assert "controller_type = b'NiTransformController'" in src, \
             'morph swap entries must be transform (scale) entries'
-        assert _BLEND_INTERP_FLAGS_ARRAYSIZE == 0x0201
+        assert BLEND_INTERP_FLAGS_ARRAYSIZE == 0x0201
 
     @pytest.mark.skip(reason=
         'Same revert as test_morph_emulation_never_targets_geometry: the '
@@ -4119,14 +4119,14 @@ class TestVoiceFilePrune:
         return root, live, orphan
 
     def test_relocated_folder_is_swept(self, tmp_path):
-        from asset_convert.audio_converter import _prune_stale_voice_files
+        from asset_convert.audio.audio_converter import prune_stale_voice_files
         root, live, orphan = self._tree(tmp_path)
         keep = live / 'quest_topic_00aafa93_1.fuz'
         keep.write_bytes(b'x')
         dead = orphan / '_topic_00aafa93_1.fuz'
         dead.write_bytes(b'x')
 
-        removed = _prune_stale_voice_files(
+        removed = prune_stale_voice_files(
             {live.resolve()}, {keep.resolve()}, {root})
 
         assert keep.exists(), 'intended file must survive'
@@ -4134,22 +4134,22 @@ class TestVoiceFilePrune:
         assert [f.name for f in removed] == ['_topic_00aafa93_1.fuz']
 
     def test_non_voice_files_are_never_touched(self, tmp_path):
-        from asset_convert.audio_converter import _prune_stale_voice_files
+        from asset_convert.audio.audio_converter import prune_stale_voice_files
         root, live, orphan = self._tree(tmp_path)
         other = orphan / 'readme.txt'
         other.write_bytes(b'x')
 
-        _prune_stale_voice_files(set(), set(), {root})
+        prune_stale_voice_files(set(), set(), {root})
 
         assert other.exists(), 'non-voice content must never be removed'
 
     def test_without_plugin_roots_behaviour_is_unchanged(self, tmp_path):
-        from asset_convert.audio_converter import _prune_stale_voice_files
+        from asset_convert.audio.audio_converter import prune_stale_voice_files
         _root, _live, orphan = self._tree(tmp_path)
         dead = orphan / '_topic_00aafa93_1.fuz'
         dead.write_bytes(b'x')
 
-        removed = _prune_stale_voice_files(set(), set())
+        removed = prune_stale_voice_files(set(), set())
 
         assert dead.exists() and not removed
 
@@ -4174,7 +4174,7 @@ class TestLODSettingsCoversTheTerrain:
     """
 
     def _read(self, sw_x, sw_y, ne_x, ne_y):
-        from asset_convert.lod_gen import write_lod_settings
+        from asset_convert.lod.lod_gen import write_lod_settings
         tmp = Path(tempfile.mkdtemp())
         write_lod_settings('W', sw_x, sw_y, ne_x, ne_y, tmp)
         raw = (tmp / 'LODSettings' / 'W.lod').read_bytes()
@@ -4252,7 +4252,8 @@ class TestMTTCTargetsStayInSyncWithControlledBlocks:
         import time
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
-        from asset_convert import nif_converter as nc, sse_nif
+        from asset_convert.nif import nif_converter as nc
+        from asset_convert.nif import sse_nif
         src = EXPORT_MESHES / self.MESH
         if not src.exists():
             pytest.skip(f'{self.MESH} not exported')
@@ -4331,7 +4332,8 @@ class TestGraphMeshesShipNoEmptyTextKeys:
         import time
         if not hasattr(time, '_original_clock'):
             time.clock = time.perf_counter
-        from asset_convert import nif_converter as nc, sse_nif
+        from asset_convert.nif import nif_converter as nc
+        from asset_convert.nif import sse_nif
         from pyffi.formats.nif import NifFormat
         src = EXPORT_MESHES / mesh
         if not src.exists():
@@ -4375,11 +4377,11 @@ class TestCollisionWindingRepair:
 
     def _repair(self, tris, normals, enabled, visual=None, groups=None):
         import os as _os
-        from asset_convert import collision as C
+        from asset_convert.collision import collision_winding as W
         prev = _os.environ.get("TESCONV_COLLISION_WINDING_FIX")
         _os.environ["TESCONV_COLLISION_WINDING_FIX"] = "1" if enabled else "0"
         try:
-            return C._repair_inverted_floors(tris, visual, groups, normals)
+            return W.repair_inverted_floors(tris, visual, groups, normals)
         finally:
             if prev is None:
                 _os.environ.pop("TESCONV_COLLISION_WINDING_FIX", None)
@@ -4399,8 +4401,8 @@ class TestCollisionWindingRepair:
         normals = [(0.0, 0.0, 1.0)] * len(tris)   # authored: faces UP
         out, n = self._repair(tris, normals, enabled=False)
         assert n == len(tris), 'authored-normal repair must run ungated'
-        from asset_convert import collision as C
-        assert all(C._face_normal(t)[2] > 0 for t in out)
+        from asset_convert.collision import collision_winding as W
+        assert all(W.face_normal(t)[2] > 0 for t in out)
 
     def test_correct_winding_is_left_alone(self):
         """Zero false positives on a mesh that already agrees with itself."""
@@ -4434,13 +4436,13 @@ class TestCollisionWindingRepair:
         pointing at none of them (mageguilddesk01: |n| = 0.31); trusting it
         rewound 9 correct faces.
         """
-        from asset_convert import collision as C
+        from asset_convert.collision import collision as C
         assert C._AUTHORED_NORMAL_MIN_LEN > 0.9
 
     def test_normals_track_shape_tri_soup_ordering(self):
         """_shape_tri_normals must align 1:1 with _shape_tri_soup or normals
         bind to the wrong triangles."""
-        from asset_convert import collision as C
+        from asset_convert.collision import collision as C
         from pyffi.formats.nif import NifFormat
         src = EXPORT_MESHES / 'rocks' / 'seisland' / 'seisland.nif'
         if not src.exists():
@@ -4491,7 +4493,7 @@ class TestLuminanceGlowMapsBecomeRGB:
     def test_l8_glow_map_expands_to_grey_rgb(self, tmp_path):
         import shutil as _sh
         import struct as _st
-        from asset_convert import luminance_textures as lt
+        from asset_convert.texture import luminance_textures as lt
 
         dst = tmp_path / 'candle_g.dds'
         _sh.copy2(self.SRC, str(dst))

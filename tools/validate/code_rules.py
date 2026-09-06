@@ -312,7 +312,7 @@ def rule_sites(path: Path, text: str = None, with_tools: bool = True,
 def _specific_hints(key: str, found: list) -> list:
     """Fixes for the CAUSES actually present, printed under the general remedy.
 
-    One rule fires for causes with different cures -- a `# noqa: E402` and a
+    One rule fires for causes with different cures -- a `
     paragraph of narration are both `stray-comments`, and "move it into a
     docstring" is wrong for the first.  Matching on the site detail lets the
     report name the real fix instead of the commonest one.

@@ -1,6 +1,6 @@
 """CLI for rendering Oblivion-style tree billboards in bulk.
 
-The rendering itself lives in `asset_convert/tree_billboard.py`, because the
+The rendering itself lives in `asset_convert/lod/tree_billboard.py`, because the
 LOD pipeline calls it directly: `lod_far_gen._far_nif_worker` renders a missing
 billboard on the spot so no tree ever reaches the geometry simplifier.  This
 wrapper exists for ad-hoc runs — filling in a whole load order up front, or
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from subprocess_flags import configure_multiprocessing
 from worker_budget import worker_count
 from asset_convert.game_paths import win_join
-from asset_convert.tree_billboard import (BILLBOARD_DIR, BS, render_billboard,
+from asset_convert.lod.tree_billboard import (BILLBOARD_DIR, BS, render_billboard,
                                           write_dds_rgba)
 
 configure_multiprocessing()
@@ -31,8 +31,8 @@ configure_multiprocessing()
 
 def tree_models(plugin_dirs):
     """{model_rel: owning output dir} for every placed TREE-type base."""
-    from asset_convert import lod_gen as G
-    from asset_convert.lod_far_gen import is_tree_model
+    from asset_convert.lod import lod_gen as G
+    from asset_convert.lod.lod_far_gen import is_tree_model
     found = {}
     for base in plugin_dirs:
         # Every plugin in the tree, not just the first: a directory can hold

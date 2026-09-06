@@ -51,19 +51,19 @@ Why the SHIPPED code is the way it is. Named after the code it explains; opens w
 
 | Doc | Covers |
 |---|---|
-| [asset_convert_animation.md](commentary/asset_convert_animation.md) | asset_convert/hkx_anim.py — animation and behaviour graphs |
-| [asset_convert_armor.md](commentary/asset_convert_armor.md) | asset_convert/body_wrap.py — worn armor, skin and fitting |
-| [asset_convert_audio.md](commentary/asset_convert_audio.md) | asset_convert/audio_converter.py - sound and music |
-| [asset_convert_collision.md](commentary/asset_convert_collision.md) | asset_convert/collision.py — Havok collision |
-| [asset_convert_creature.md](commentary/asset_convert_creature.md) | asset_convert/creature_pipeline.py - creature conversion |
-| [asset_convert_facegen.md](commentary/asset_convert_facegen.md) | asset_convert/facegen_tri.py - faces, skin tone and tints |
-| [asset_convert_mod_ingest.md](commentary/asset_convert_mod_ingest.md) | asset_convert/mod_ingest.py - mod archive ingest |
-| [asset_convert_nif.md](commentary/asset_convert_nif.md) | asset_convert/nif_converter.py — NIF conversion |
-| [asset_convert_shader.md](commentary/asset_convert_shader.md) | asset_convert/nif_converter.py - shader values |
-| [asset_convert_speedtree.md](commentary/asset_convert_speedtree.md) | asset_convert/spt_generator.py - SpeedTree conversion |
-| [asset_convert_terrain.md](commentary/asset_convert_terrain.md) | asset_convert/terrain_lod.py — terrain, LOD and grass |
-| [asset_convert_texture.md](commentary/asset_convert_texture.md) | asset_convert/parallax.py — textures, shaders and parallax |
-| [asset_convert_ui.md](commentary/asset_convert_ui.md) | asset_convert/ui_menus.py - Oblivion UI in Skyrim |
+| [asset_convert_animation.md](commentary/asset_convert_animation.md) | asset_convert/havok/hkx_anim.py — animation and behaviour graphs |
+| [asset_convert_armor.md](commentary/asset_convert_armor.md) | asset_convert/character/body_wrap.py — worn armor, skin and fitting |
+| [asset_convert_audio.md](commentary/asset_convert_audio.md) | asset_convert/audio/audio_converter.py - sound and music |
+| [asset_convert_collision.md](commentary/asset_convert_collision.md) | asset_convert/collision/collision.py — Havok collision |
+| [asset_convert_creature.md](commentary/asset_convert_creature.md) | asset_convert/havok/creature_pipeline.py - creature conversion |
+| [asset_convert_facegen.md](commentary/asset_convert_facegen.md) | asset_convert/character/facegen_tri.py - faces, skin tone and tints |
+| [asset_convert_mod_ingest.md](commentary/asset_convert_mod_ingest.md) | asset_convert/sources/mod_ingest.py - mod archive ingest |
+| [asset_convert_nif.md](commentary/asset_convert_nif.md) | asset_convert/nif/nif_converter.py — NIF conversion |
+| [asset_convert_shader.md](commentary/asset_convert_shader.md) | asset_convert/nif/nif_converter.py - shader values |
+| [asset_convert_speedtree.md](commentary/asset_convert_speedtree.md) | asset_convert/speedtree/spt_generator.py - SpeedTree conversion |
+| [asset_convert_terrain.md](commentary/asset_convert_terrain.md) | asset_convert/lod/terrain_lod.py — terrain, LOD and grass |
+| [asset_convert_texture.md](commentary/asset_convert_texture.md) | asset_convert/texture/parallax.py — textures, shaders and parallax |
+| [asset_convert_ui.md](commentary/asset_convert_ui.md) | asset_convert/ui/ui_menus.py - Oblivion UI in Skyrim |
 | [ck_exe_disassembly.md](commentary/ck_exe_disassembly.md) | tools/disasm/ - CreationKit.exe as a source |
 | [ck_navmesh_generation.md](commentary/ck_navmesh_generation.md) | tools/navmesh/ - how the CK generates navmesh |
 | [ck_reference_init_hang.md](commentary/ck_reference_init_hang.md) | tes5_import/writer.py - the CK reference-init hang |
@@ -73,6 +73,7 @@ Why the SHIPPED code is the way it is. Named after the code it explains; opens w
 | [performance.md](commentary/performance.md) | the whole pipeline - performance and parallelism |
 | [script_convert.md](commentary/script_convert.md) | script_convert/ - TES4 script to Papyrus |
 | [tes4_export_falloutnv.md](commentary/tes4_export_falloutnv.md) | tes4_export/record_types/falloutnv.py - FO3/FNV export deltas |
+| [tes4_export_morrowind.md](commentary/tes4_export_morrowind.md) | tes4_export/tes3_reader.py, export_morrowind.py - TES3 export and Morroblivion compatibility |
 | [tes5_import_dialogue.md](commentary/tes5_import_dialogue.md) | tes5_import/dialog_converter.py - dialogue and voice |
 | [tes5_import_landscape.md](commentary/tes5_import_landscape.md) | tes5_import/record_types/region.py - REGN, LSCR and WATR |
 | [tes5_import_magic.md](commentary/tes5_import_magic.md) | tes5_import/record_types/magic.py - magic conversion |
@@ -112,3 +113,4 @@ A dated sweep over a corpus, with counts. Frozen once written; a re-audit is a N
 ## `assets/`
 
 Non-prose files. `banner.png` and `favicon.ico` are loaded at RUNTIME by `gui.py`.
+| [preexisting_test_failures.md](audits/preexisting_test_failures.md) | 50 tests failing on clean `master`, and why |

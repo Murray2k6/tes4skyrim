@@ -1,6 +1,6 @@
-# asset_convert/creature_pipeline.py - creature conversion
+# asset_convert/havok/creature_pipeline.py - creature conversion
 
-**Code:** `asset_convert/collision.py`, `asset_convert/hkx_ragdoll.py`, `asset_convert/animation_data.py`, `tes5_import/creature_races.py`
+**Code:** `asset_convert/collision/collision.py`, `asset_convert/havok/hkx_ragdoll.py`, `asset_convert/havok/animation_data.py`, `tes5_import/creature_races.py`
 
 ## Contents
 
@@ -154,7 +154,7 @@ output.
 | pynifly hkx codec (VENDORED) | `external/pynifly_hkx/` (from PyNifly 27.4.0; format docs remain at `references/PyNifly-27.4.0/docs/hkx_*.md`) | hk_2010 packfile READER (validator) + hkaSplineCompressedAnimation COMPRESSOR (used by hkx_anim.py). Its binary WRITER is bypassed — output crashes real Havok deserializers. Zero Oblivion support — Oblivion side stays on PyFFI. |
 | hkxcmd.exe (VENDORED) | `external/hkxcmd/hkxcmd.exe` | XML↔binary hkx compiler (real Havok serializer — owns all binary layout), verified byte-identical round-trip; EXPORTKF for studying vanilla clips. GOTCHAS: crashes on forward-slash paths; its CONVERTKF compressor is unusably lossy (debug only). |
 | niftools addon | `.../blender_niftools_addon-master/io_scene_niftools/` | Oblivion KF/skeleton semantics: Bip01 X-forward convention, string-palette targeting, B-spline API shape (`get_times()/get_translations()/…`), bhkBlendController layout |
-| Our pipeline | `tools/generators/kf_animation_explorer.py` (KF parse, palette resolve, FK math — **skips B-splines**), `asset_convert/collision.py` (OB→SK bhk + ragdoll constraint conversion), `nif_converter.py` (`_resolve_palette_strings`, version upgrade), `skin_retarget.py` (NOT needed for creatures — see §4 Step 3) | Most machinery exists |
+| Our pipeline | `tools/generators/kf_animation_explorer.py` (KF parse, palette resolve, FK math — **skips B-splines**), `asset_convert/collision/collision.py` (OB→SK bhk + ragdoll constraint conversion), `nif_converter.py` (`_resolve_palette_strings`, version upgrade), `skin_retarget.py` (NOT needed for creatures — see §4 Step 3) | Most machinery exists |
 | LE archives (more) | `D:\SteamLibrary\steamapps\common\Skyrim\Data\` (`Update.bsa` has animation fixes; Meshes/Misc as needed) | Additional reference data |
 
 ### Remaining gaps (action items)
@@ -175,21 +175,21 @@ output.
 The whole chain is implemented and wired as pipeline **Phase 4b: Creatures**
 (`python convert.py -f X --creatures-only`, GUI step "5. Creatures"):
 
-- `asset_convert/creature_pipeline.py` — orchestrator: per creature folder →
+- `asset_convert/havok/creature_pipeline.py` — orchestrator: per creature folder →
   behavior project (`hkx_behavior.generate_creature_project`) + skeleton.nif/
   body-NIF conversion (`nif_converter creature=True`) + animation singlefile
   registration (`animation_data.write_singlefiles`) + the
   `export/<plugin>/creature_projects.json` contract for the importer.
   32/32 real Oblivion.esm creatures convert (boxtest/endgame excluded: test
   asset / KFM cinematic).
-- `asset_convert/animation_data.py` — animationdata + boundanims +
+- `asset_convert/havok/animation_data.py` — animationdata + boundanims +
   animationsetdata emission and the **singlefile merge** (vanilla base
   auto-extracted from the user's `Skyrim - Animations.bsa`, LE v104 zlib or
   SSE v105 LZ4, cached in `export/animdata_base/`). Grammar + the
   Bethesda hash (crc32 init=0/xorout=0 of lowercase; ≤4-char strings stored
   as packed ASCII — `hkx` = 7891816; dirs hashed WITH `meshes\` prefix)
   byte-validated against the vanilla files.
-- `asset_convert/hkx_ragdoll.py` — the ragdoll stage inside skeleton.hkx:
+- `asset_convert/havok/hkx_ragdoll.py` — the ragdoll stage inside skeleton.hkx:
   Oblivion `bhkBlendCollisionObject` bodies + ragdoll/hinge constraints →
   ragdoll hkaSkeleton + 2 hkaSkeletonMappers + hkpPhysicsData +
   hkaRagdollInstance (vanilla deer anatomy; GAME units — ob-havok ×7;
@@ -335,13 +335,13 @@ hkx total, and both in vanilla's range for a comparable creature.
 **Symptom:** dead creatures are nearly immovable — havok-grabbing a limb moves
 it only slightly, on EVERY ragdoll.
 
-**Cause:** `extract_ragdoll` scaled every LENGTH by `_OB_TO_GAME` (7) but
+**Cause:** `extract_ragdoll` scaled every LENGTH by `OB_TO_GAME` (7) but
 carried Oblivion's authored **mass** through untouched. Oblivion tunes mass
 against Oblivion-scale lengths, and Havok's rotational inertia goes as
 `mass * length^2`, so unconverted mass inflates resistance-to-rotation by 49x
 versus what the animators tuned.
 
-**Fix:** divide mass by 7 (`_OB_MASS_DIV = _OB_TO_GAME`). Inertia is computed
+**Fix:** divide mass by 7 (`_OB_MASS_DIV = OB_TO_GAME`). Inertia is computed
 from mass in `_capsule_inertia`, so it follows automatically. Matched-pair
 landing (total mass, ours vs closest vanilla creature): dog 262 -> 37.4 vs wolf
 29; rat 271 -> 38.7 vs skeever 60; lion 501 -> 71.6 vs sabrecat 245; minotaur
@@ -666,7 +666,7 @@ collision. Two vanilla-parity gaps compounded it — ours emitted every body
 inertia on the ~4 round bodies: the COM/torso hub and the tiny leg-tip caps),
 and the anisotropy was unbounded.
 
-**Fix (`asset_convert/hkx_ragdoll.py`):**
+**Fix (`asset_convert/havok/hkx_ragdoll.py`):**
 - `_capsule_inertia(shape, mass)` computes each body's tensor analytically
   from its capsule (solid cylinder + two hemisphere caps) instead of trusting
   Oblivion's diagonal.
@@ -731,7 +731,7 @@ each attack play the NEXT attack's file and the run gait play the
 aware-vocal clip. `motion_block_lines` had the same bug — root-motion
 blocks are keyed by animation index, one per FILE, not one per clip.
 
-Fixed by `_anim_file_index()` (mirrors the character emitter's
+Fixed by `anim_file_index()` (mirrors the character emitter's
 `dict.fromkeys` dedupe exactly). **Audit with
 `python tools/validate/animdata_index_check.py`** after touching `animation_data.py`,
 `clip_meta` composition, or the character animation list; the older
@@ -748,7 +748,7 @@ present under every experiment of that period.
 ### The SAME out-of-range symptom from PLUGIN COLLISION (2026-08-10)
 
 `animdata_index_check` can report out-of-range indices even when
-`_anim_file_index()` is perfectly correct, because the block and the character
+`anim_file_index()` is perfectly correct, because the block and the character
 hkx are chosen by **different** mechanisms:
 
 - Every plugin deploys its creatures LOOSE to the same
@@ -852,7 +852,89 @@ channels gone, no ragdoll (`has_ragdoll=False`) and a `Death` state with no
 end trigger, the graph held the clip's last frame.
 
 <a id="ghost-dissolve-solution"></a>
-### ✅ THE FIX: `Actor.AttachAshPile` — Skyrim does this natively
+### <a id="pile-activation-phantom"></a>The pile's activation volume is a PHANTOM, not a rigid body
+
+Every vanilla ash pile is built the same way (`ashpileghost01`, `ashpile01`,
+`ashpileghostblack`, byte-read from `references/Skyrim Meshes`): a child NiNode
+`Box01` carries `bhkSPCollisionObject`(flags 129) -> `bhkSimpleShapePhantom`
+(layer 15, NONCOLLIDABLE) -> `bhkTransformShape` -> `bhkBoxShape`, the
+transform shape lifting the box over the mesh (vanilla ghost pile: 64x64x16
+game units, raised z 0..16).
+
+A fixed `bhkRigidBodyT` on the same layer 15 was tried first: it shipped with
+the box measured correct (half-extents 10.4/10.4/2 on the pile's own geometry)
+and **the pile was still unselectable in game** — the crosshair pick never sees
+the body, only the phantom.
+
+The box covers the FULL geometry extents and the Z half-extent floors at 8 game
+units, vanilla's own pick-box thickness, so a flat puddle still has a
+comfortable crosshair target. The float block layout is copied from a real
+Oblivion-authored phantom (`ctrigtripwire01.nif`): 7 zeros, then three
+`[1,0,0,0,0]` rows. BSXFlags bit 1 (Havok) is what tells the engine the static
+has collision to trace against at all — without it the converted pile is inert
+even with a phantom.
+
+**The box is written in OBLIVION havok units**, because `convert_nif` runs
+collision through the usual Oblivion->Skyrim rescale afterwards
+(`collision._HAVOK_SCALE = 0.1`). Oblivion havok -> game units is x7, so a
+game-unit extent is divided by 7 and ends up correct after the x0.1. Writing
+Skyrim-scale values instead produced a box exactly 0.10x the geometry on every
+axis — the double-scale that measurement caught.
+
+The holder's own `bhkCollisionObject` is **not** reusable: it belongs to the
+living creature's rig (a limb proxy), so it is the wrong size and in the wrong
+place. Measured on the shipped meshes it covered 38% of the ghost pile's width
+at 2.3x its height, offset 10 units sideways, and just 4% of the wraith pile's.
+
+### <a id="pile-transform-baking"></a>Baking the pile where the death clip leaves it
+
+    final = parent_of_holder_world
+          + holder_local_on_the_clips_last_frame
+          + (shape_rest_world - holder_rest_world)
+
+The last term keeps the shape's offset relative to its holder; the middle term
+is where the clip actually parks the holder. Both source creatures land on the
+ground this way (ghost pile world Z 6.7..12.9, wraith 1.6..16.6, Scene Root 0).
+
+Two traps, both measured:
+
+- **Dedupe by identity.** pyffi's `tree()` yields a block once per reference and
+  the ghost's ectoplasm shape is referenced twice; transforming it twice moved
+  the pile by the clip offset TWICE (Z 21.2 instead of 10.6).
+- **Write the composed world transform straight onto the node** rather than
+  round-tripping the matrix. The ghost's ectoplasm shape has a 0.57 SCALE baked
+  into its rotation rows and `set_transform()` re-decomposes that, so arithmetic
+  on `m_43` did not survive — again Z 21.2 instead of 10.6.
+
+The pile is then centred on its own origin in X/Y. Whatever offset survives is
+drift inside the creature's rig (the ghost's from the death clip, the wraith's
+from the shape's authored rest position), and a placed object must straddle the
+point `AttachAshPile` drops it at, which is also the point the engine builds the
+activation target around. Z is left alone: that is the authored ground drop.
+
+### <a id="merged-shapes-stay-at-the-root"></a>Merged shapes stay at the ROOT
+
+Do NOT hang a skinned shape off its attachment bone. The engine applies the
+shape's parent chain ON TOP of the skinned result, so a body under
+`SkinAttachment` (a child of the animated `Bip01 NonAccum`) gets that animation
+twice and leaves the view entirely — reported in game 2026-08-26 as the ghost
+losing its whole body while still alive, with only the skeleton-owned smoke
+left. Vanilla agrees: the working dog merge keeps `WolfBody` at the root, and
+Oblivion's own part NIFs are standalone roots the engine attaches at runtime,
+never children inside a mesh file.
+
+The attachment node still matters for REST visibility: the authored hidden bit
+is carried onto the shape (the shrink blob must not show on a living ghost)
+without moving it.
+
+**The 80-bone cap runs after grafting.** SSE renders a skinned shape by
+memcpy'ing one 3x4 matrix per skin bone into a fixed 80-matrix buffer (shadow
+pass), so >80 bones is a CTD (imp: 85, in-game verified 2026-07-10). The merge
+of the lightest leaf bones into their parents must run after grafting because
+only the merged rig has bone hierarchy — Oblivion part NIFs store bones flat —
+and it invalidates the parts' `NiSkinPartition`s, so those are regenerated.
+
+### <a id="creature-mesh-merge"></a>✅ THE FIX: `Actor.AttachAshPile` — Skyrim does this natively
 
 **Skyrim dissolves creatures into piles of goo exactly like Oblivion, and
 ships a GHOST-tinted pile for it.** The pieces were already in the engine:
@@ -881,7 +963,7 @@ geometry lifted straight out of the creature's own `skeleton.nif`:
 | ghost | `AttachmentsBip` | `Bip01 ectoplasm:0` | 47 |
 | wraith | `Attachments` | `Cloak06:0` (a flat slab UNDER the body -- its remains, despite the name) | 278 |
 
-`nif_converter.extract_death_pile` lifts the subtree, bakes it where the death
+`creature_mesh.extract_death_pile` lifts the subtree, bakes it where the death
 clip leaves it, and the pipeline runs it through `convert_nif` (the raw
 extract is still Oblivion-format uv2=11 and SSE cannot load it -- the shipped
 piles are uv2=83 with `BSLightingShaderProperty` + `NiAlphaProperty`).
@@ -1065,7 +1147,7 @@ correct and ship unchanged:
    reverted; revisit only with in-game evidence that authored capsules are
    too thin to activate (they match what Oblivion shipped, and the
    "radius 0.5, 40× too small" claim was a units error — 0.54 ob-havok
-   units × `_OB_TO_GAME`(7) = 3.8 game units).
+   units × `OB_TO_GAME`(7) = 3.8 game units).
 
 **Frame contracts (the traps that made both wrong fixes easy to write):**
 - Blend body `rb.translation`/`rotation` are BIND WORLD; capsule
@@ -1161,12 +1243,12 @@ hardest humanoid-pipeline problem (rest-pose retarget) from the creature path en
     no-basis-data interpolators (bowidle.kf) = static pose;
     `NiBSplineCompFloatInterpolator` (bone stretch) dropped; `-3.4e38` sentinel = rest
     pose (already handled).
-4.2 New `asset_convert/kf_decode.py`: per KF emit uniform 30 fps sampled local transforms
+4.2 New `asset_convert/havok/kf_decode.py`: per KF emit uniform 30 fps sampled local transforms
     per target bone (NiStringPalette resolution as in kf_animation_explorer), text keys,
     cycle type, duration. **Root motion split**: the sampled `Bip01 NonAccum` (and root
     `Bip01`) translation/rotation is extracted into a root-motion curve (→ boundanims,
     Step 6) and removed from the in-hkx track (Skyrim clips are in-place).
-4.3 **Write HKX** — IMPLEMENTED (`asset_convert/hkx_anim.py`, 2026-07-08): no bone
+4.3 **Write HKX** — IMPLEMENTED (`asset_convert/havok/hkx_anim.py`, 2026-07-08): no bone
     retargeting needed (our own skeleton). Winning path after testing all three:
     tracks → pynifly's `_compress_all_blocks` spline compressor (vendored
     `external/pynifly_hkx/`) → hkaSplineCompressedAnimation as packfile XML
@@ -1313,7 +1395,7 @@ stack (simplest quadruped) with the draugr/troll stacks as bipedal references:
   in-game testing before generalizing.
 
 ### Step 6 — animationdata / animationsetdata emission + merge — DONE
-`asset_convert/animation_data.py`. Grammar notes that cost real digging:
+`asset_convert/havok/animation_data.py`. Grammar notes that cost real digging:
 - animationdatasinglefile = N + names + per project `[linecount, block]`,
   where a `[linecount, motion block]` pair follows ONLY when the flag line
   AFTER the project-file list (NOT line 1) is "1". Validated by a full walk
@@ -1407,19 +1489,19 @@ creature is fully proven.
   BSXFlags=198) — creatures have NO separate ragdoll hkx (deer verified).
 - Because we keep the Oblivion skeleton, body meshes need NO reskin/retarget — bone
   names/weights/bind matrices stay valid. `skin_retarget.py` is NOT used for creatures.
-- **`asset_convert/kf_decode.py`**: KF decode incl. B-spline, uniform 30fps sampling,
+- **`asset_convert/havok/kf_decode.py`**: KF decode incl. B-spline, uniform 30fps sampling,
   `split_root_motion` (locomotion accumulates on `Bip01` ITSELF, NonAccum static; turn
   anims carry root ROTATION, both extracted).
-- **`asset_convert/hkx_xml.py`**: hk_2010 packfile XML emitter + hkxcmd compile/decompile
+- **`asset_convert/havok/hkx_xml.py`**: hk_2010 packfile XML emitter + hkxcmd compile/decompile
   wrappers.
-- **`asset_convert/hkx_skeleton.py`**: skeleton.nif → minimal skeleton.hkx (hkaSkeleton
+- **`asset_convert/havok/hkx_skeleton.py`**: skeleton.nif → minimal skeleton.hkx (hkaSkeleton
   only; ragdoll stage handled separately, see below).
-- **`asset_convert/hkx_anim.py`**: THE animation path — DecodedClip → AnimationData →
+- **`asset_convert/havok/hkx_anim.py`**: THE animation path — DecodedClip → AnimationData →
   pynifly spline COMPRESSOR → packfile XML → hkxcmd `-v:WIN32`; validated 0.0000u/0.0000°
   vs source + hkxcmd deserializer-clean.
-- **`asset_convert/kf_writer.py`**: Skyrim-format KF writer + CONVERTKF wrapper — DEBUG
+- **`asset_convert/havok/kf_writer.py`**: Skyrim-format KF writer + CONVERTKF wrapper — DEBUG
   ONLY (see toolchain gotchas below; hkxcmd's spline compression is too lossy to ship).
-- **`asset_convert/hkx_behavior.py` (2026-07-08)**: full project generator —
+- **`asset_convert/havok/hkx_behavior.py` (2026-07-08)**: full project generator —
   `generate_creature_project(ob_creature_dir, name, out_root)` emits `actors/tes4/<name>/`
   with project/character/behavior hkx (XML templates copied from the vanilla deer dumps),
   skeleton.hkx, all converted animations, and `project_manifest.json` (clips, durations,
@@ -1431,7 +1513,7 @@ creature is fully proven.
   (RACE ATKE strings use the same, in creature_races.py). Dog validated: 20/20 generated
   hkx deserialize cleanly through hkxcmd (real Havok).
 - **CREATURE PIPELINE IS LIVE END-TO-END (2026-07-09)** — pipeline Phase 4b /
-  `--creatures-only` / GUI step "5. Creatures": `asset_convert/creature_pipeline.py`
+  `--creatures-only` / GUI step "5. Creatures": `asset_convert/havok/creature_pipeline.py`
   converts every creature folder → behavior project + converted skeleton.nif/body NIFs +
   animation singlefile registration + `export/<plugin>/creature_projects.json`. MUST run
   before import (Phase 0f consumes the json). `boxtest`+`endgame` are excluded (test asset
@@ -1464,7 +1546,7 @@ creature is fully proven.
   80 generated `TES4*Race` chains. Diagnose by diffing CREA model folders against `creature_projects.json`
   (`crea_project_gap.py` did this; removed 2026-08-25).
 - **animationdata/boundanims/animationsetdata + singlefile merge
-  (`asset_convert/animation_data.py`)**: the engine loads projects ONLY via merged
+  (`asset_convert/havok/animation_data.py`)**: the engine loads projects ONLY via merged
   `meshes/animationdatasinglefile.txt` + `animationsetdatasinglefile.txt`. Singlefile
   grammar: N + names + per-project `[linecount, block]`; a `[linecount, motion block]`
   pair follows ONLY when the flag line AFTER the project-file list (NOT line 1) is '1'
@@ -1477,7 +1559,7 @@ creature is fully proven.
   v103/104/105: v105 = 24-byte folder recs hash8+cnt4+unk4+off8 + LZ4-frame compression,
   embedded-name flag 0x100; layouts verified vs xEdit wbBSArchive.pas) and cached in
   `export/animdata_base/`. Always merge from the vanilla base → idempotent re-runs.
-- **Ragdoll stage in skeleton.hkx (`asset_convert/hkx_ragdoll.py`, 2026-07-09)**: Oblivion
+- **Ragdoll stage in skeleton.hkx (`asset_convert/havok/hkx_ragdoll.py`, 2026-07-09)**: Oblivion
   skeleton.nif bhkBlendCollisionObjects + ragdoll/limited-hinge/malleable(demoted)
   constraints → vanilla anatomy (ragdoll hkaSkeleton "Ragdoll_<bone>" + 2
   hkaSkeletonMappers + hkpPhysicsData/System + hkaRagdollInstance; the constraint graph is
@@ -1492,7 +1574,7 @@ creature is fully proven.
   bodies/capsules + 25 constraints compile + round-trip through real Havok.
 - **Creature mesh conversion (`nif_converter creature=True`)**: skinned bodies keep NiNode
   root + plain NiSkinInstance + ORIGINAL Oblivion bone names (no retarget — same
-  skeleton), NiSkinPartition regenerated in Skyrim tri format (`_regen_skin_partition`);
+  skeleton), NiSkinPartition regenerated in Skyrim tri format (`regen_skin_partition`);
   Prn-attached parts (doghead 'Prn'="Bip01 Head") get node transforms BAKED into verts
   (`_bake_node_transforms_into_verts` — skinning ignores node transforms and the head
   root carries a real rotation) then rigid plain-NiSkinInstance to the Oblivion bone
@@ -1781,13 +1863,13 @@ creature is fully proven.
   permuted order (constraints on the wrong bones — no crash, mangled corpse).
   Fix: `plan_ragdoll_tree` picks each body's parent as (1) its own authored
   joint to an earlier body, else (2) an earlier body's authored joint naming
-  it — the same joint with its ends exchanged (`_swap_joint_ends` /
+  it — the same joint with its ends exchanged (`swap_joint_ends` /
   `collision._reverse_constraint_ends`: frames and pivots swap, limits negate),
   else (3) a synthetic joint to the nearest body-carrying ancestor (fallback:
   the root). `extract_ragdoll` emits parts in NIF DFS order and
   `collision.enforce_ragdoll_tree` rebuilds every NIF body's constraint list to
   exactly that joint (extra authored joints dropped), so both files agree.
-  `_assert_ragdoll_invariants` rejects a parent index >= the child's.
+  `assert_ragdoll_invariants` rejects a parent index >= the child's.
   **The four earlier rounds (name-keyed anim-bone aliasing, duplicate bone
   names, zero-volume-body mass/radius floors, "the engine builds a powered
   constraint on a volumeless body") were NOT the crash** — each shipped and
@@ -1799,7 +1881,7 @@ creature is fully proven.
   (`extract_ragdoll`): the hkaSkeletonMapper keys parts by name.
   Alit's 12 `CollisionNode` (95%-scale
   duplicate capsule at mass 1e-4) / `EnableCollisions` (radius 0) pairs are
-  still dropped as collision-toggle proxies (`_is_marker_body`, applied on
+  still dropped as collision-toggle proxies (`is_marker_body`, applied on
   SOURCE units only — `nif_converter` strips them before collision conversion,
   and `enforce_ragdoll_tree` runs the plan with `exclude_markers=False`
   because azura's static bodies convert to mass 0). The alit is one creature
@@ -1921,7 +2003,7 @@ creature is fully proven.
   root/COM-level bones.
 - PyFFI 2.2.3 HAS B-spline helpers (get_times/get_translations/get_rotations/get_scales)
   but they return raw CONTROL POINTS (curve eval unimplemented per its docstring) — real
-  de Boor eval is in asset_convert/kf_decode.py, algorithm mirrored from NifSkope
+  de Boor eval is in asset_convert/havok/kf_decode.py, algorithm mirrored from NifSkope
   glcontroller.cpp (degree 3, clamped integer knots; dequant = short/32767*half_range
   +offset; interval v=(t-start)/(stop-start)*(nctrl-3)).
 - LE animation archive EXTRACTED to `references/Skyrim Animations/` (behavior projects,
@@ -1945,7 +2027,7 @@ creature is fully proven.
    `get_times/get_translations/get_rotations/get_scales` exist and dequantize correctly,
    but they return raw CONTROL POINTS (PyFFI's own docstring says curve evaluation is
    unimplemented). Proper cubic B-spline (de Boor) evaluation implemented in
-   `asset_convert/kf_decode.py` using NifSkope's exact algorithm (glcontroller.cpp:
+   `asset_convert/havok/kf_decode.py` using NifSkope's exact algorithm (glcontroller.cpp:
    degree 3, clamped integer knots, Cox–de Boor blend).
 3. Ragdoll sufficiency: deer has no separate ragdoll hkx (skeleton.nif bhk + graph
    modifiers only) — confirm the same holds for draugr/werewolf, and that our converted
@@ -2579,7 +2661,7 @@ feet.  See docs/commentary/asset_convert_creature.md#ragdoll-root-bone1-dead-end
 
 ## The clip claim tables
 
-**Code:** `asset_convert/behavior_clips.py`
+**Code:** `asset_convert/havok/behavior_clips.py`
 
 Split out of `hkx_behavior.py` — the taxonomy references nothing from the Havok
 XML builders, so the dependency is one-directional.
@@ -2592,7 +2674,7 @@ attack sweep.
 
 ### <a id="forward-blend-layout"></a>The MoveForward and Run blend layouts
 
-**Code:** `asset_convert/behavior_clips.py` — `speed_blend_plan`,
+**Code:** `asset_convert/havok/behavior_clips.py` — `speed_blend_plan`,
 `run_blend_plan`, `state_defs`.
 
 **The walk blend** is the vanilla MONOLITHIC-creature layout, verbatim from
@@ -2642,7 +2724,7 @@ quadruped layout), not by a state.
 
 ### <a id="forward-blend-layout"></a>The MoveForward and Run blend layouts
 
-**Code:** `asset_convert/behavior_clips.py` — `speed_blend_plan`,
+**Code:** `asset_convert/havok/behavior_clips.py` — `speed_blend_plan`,
 `run_blend_plan`, `state_defs`.
 
 **The walk blend** is the vanilla MONOLITHIC-creature layout, verbatim from
@@ -2867,7 +2949,7 @@ marker.
 
 ## FO3/FNV creature clip naming
 
-**Code:** `asset_convert/hkx_behavior_falloutnv.py`
+**Code:** `asset_convert/havok/hkx_behavior_falloutnv.py`
 
 `classify_clips` flat-scans a creature folder for `.kf` files and matches
 bare TES4 basenames (`idle`, `forward`, `turnleft`). FO3/FNV name and nest
@@ -2901,3 +2983,224 @@ to convert and are a separate concern from naming.
 
 **Aliases never overwrite.** `setdefault` means a folder already shipping the
 bare TES4 name keeps it, so Oblivion's 44 folders are untouched.
+
+---
+
+## 10. The generated graph, split by responsibility (2026-09-01)
+
+**Code:** `asset_convert/havok/behavior_nodes.py`,
+`asset_convert/havok/behavior_vocabulary.py`,
+`asset_convert/havok/behavior_locomotion.py`,
+`asset_convert/havok/behavior_attacks.py`,
+`asset_convert/havok/behavior_actions.py`,
+`asset_convert/havok/behavior_ragdoll.py`,
+`asset_convert/havok/behavior_root.py`
+
+`build_behavior_xml` was one 770-statement function at complexity 126 holding
+both the graph TOPOLOGY and the packfile XML boilerplate for every node type,
+in a 1727-line file. It is now **40 statements** over seven modules, and
+`hkx_behavior.py` is under the size limit:
+
+| Module | Holds |
+|---|---|
+| `behavior_nodes` | `GraphBuilder` — one method per packfile object type, owning the packfile plus the event (`eid`) and variable (`vidx`) index tables |
+| `behavior_vocabulary` | The ordered event and variable tables, `graph_events`, `graph_variables`, `movement_type_names` |
+| `behavior_locomotion` | `build_default` — the nested Standing/Locomotion machines and the gait blends |
+| `behavior_attacks` | `RootStates` plus the single-play root states: interrupts, attacks, equips, vocal idles |
+| `behavior_actions` | The optional branches: `build_swim`, `build_cast`, `build_block`, each returning `(states, wildcards)`, and the root expression modifiers |
+| `behavior_ragdoll` | `live_tracking` (alive) and `death_states` (dead) |
+| `behavior_root` | The root modifier list, the speed sampler, the combat handshake and the graph wrapper |
+
+**Object ORDER in the packfile is part of the contract.** Nodes are numbered
+in creation order, so a refactor that builds the same objects in a different
+sequence renumbers every reference downstream. `GraphBuilder._blender` takes a
+CALLABLE per child for exactly this reason: the original code built each
+child's clip immediately before its `hkbBlenderGeneratorChild`, and hoisting
+the clips into a list comprehension shifted every id from `#0082` on. Verified
+with a 129-graph snapshot over 43 creatures (3 argument variants each):
+byte-identical output, sha256 `2c09743c…`.
+
+Ordering broke the output three times during this split and the snapshot
+caught all three: the blender children above, an EEM built before its
+expression array in the gait hysteresis, and the attack modifier list built
+after the interrupt states instead of before them. **A split of packfile-
+emitting code is not verifiable by tests alone** — assert on the bytes.
+
+### <a id="ragdoll-bone-subsets"></a>The three ragdoll bone subsets
+
+Each names a DIFFERENT subset and none may be widened to "all bones":
+
+| Field | Used by | Why not all bones |
+|---|---|---|
+| `keyframe_lower` | `live_tracking`, while the actor is ALIVE | Vanilla's modifier is named `KeyframeLowerBody` and omits tail, neck and head so those chains hang free under physics |
+| `keyframe_full` | `AnimateToRagdoll`, state 1 | Vanilla leaves the deepest limb leaves (toe/palm tips) UNPINNED so gravity has purchase the frame the ragdoll enters the world. Keyframe everything and the corpse is welded to its pose, generates no contacts, and the contact listener never fires |
+| `contact_bones` | The `Ragdoll` release listener | Limb ROOTS plus spine/neck/head only (vanilla dog: 8 of 22). A scuffing toe or dragging tail must not fire the release before the body has landed |
+
+### <a id="the-speed-sampler-hookup"></a>The engine movement hookup
+
+The engine samples the graph's animation-driven movement speed through a
+`BSSpeedSamplerModifier` bound to iState / Direction / Speed / SpeedSampled.
+Without it AI pathing has no speed to drive, the actor never receives
+movement, and it stands in its idle forever — combat cannot approach either.
+Vanilla wraps the whole locomotion state machine in a `hkbModifierGenerator`
+under a single-state root state machine; we copy that layout verbatim, userData
+values included.
+
+### <a id="the-combat-stance-handshake"></a>The combat stance handshake
+
+The engine's ActionDraw routes `combatStanceStart` (an IDLE record); combat
+then WAITS for the graph to reply with a `weaponDraw` event before it will ever
+send an `attackStart_*`. Vanilla sends that reply from a root-level
+`hkbEventDrivenModifier` / `hkbEvaluateExpressionModifier` pair (StartCombat /
+StopCombat), NOT from state notify events — an actor without this pair chases
+its target forever and never attacks.
+
+### <a id="begincast-is-level-triggered"></a>BeginCast is SEND_ON_TRUE, not SEND_ON_FALSE_TO_TRUE
+
+The engine binds `BeginCastLeft` → `LeftHandSpellCastHandler` (read out of
+the live per-actor dispatcher map, 2026-08-26), whose whole job is: if this
+hand's ActorMagicCaster is in state 1 ("want-cast issued, waiting for the
+animation"), advance it to state 2 and `PerformAction(ActionLeftAttack)` →
+the IDLE tree → the `Spell_FireForget_LH` that enters our cast chain. It is a
+no-op in every other state.
+
+A live scamp sat for minutes with `bWantCastLeft=1`, `bMLh_Ready=1`,
+`IsCasting=0` and the caster parked in state 1: the one false→true edge had
+come and gone with nothing to show for it, and the engine never rewrites the
+flag while it waits, so an edge-triggered expression can never fire again
+("the scamp only casts when the graph is hit just right"). Raising the event
+every frame the condition holds makes the handshake un-missable; the moment
+the cast starts `IsCasting=1` turns it off, and the handler ignores it in any
+other state.
+
+### <a id="istate-is-for-swim-only"></a>iState is for SWIM ONLY
+
+While the engine-written `isSwimming` is set, `iState` points at the swim MOVT
+giving the actor its water speeds; on land it points back at Default. Without
+this the engine keeps the land movement type in water. Vanilla's original is
+`iState = cond((isSwimming ==1), iState_BearSwimDefault, iState_BearDefault)`.
+
+Wrapping this expression in `cond((IsCasting == 1), iState_<base>Rooted, ...)`
+onto an all-zero MOVT — to pin a caster — was tried 2026-08-26 and BROKE
+casting entirely in game. The working pin is `bAnimationDriven` in the cast
+chain's own modifier list, which is chaurusbehavior verbatim.
+
+### <a id="cast-readiness-is-the-graphs"></a>Cast readiness is the GRAPH's to grant
+
+Vanilla's `BSIsActiveModifier_CombatIdle` holds `bMLh_Ready` / `bMRh_Ready`
+true while the combat-idle subtree (idle + combat locomotion) is active, and
+the Stagger modifier clears them. The BeginCast_EEM condition
+`bWantCastLeft && bMLh_Ready && !IsCasting` can never fire without this — the
+AI wants to cast and the actor just stands there (the 2026-08-23 "scamps get
+stuck" report).
+
+It is held over the whole DefaultState, so the creature is ready whenever it
+is not attacking, casting, staggering, blocking or swimming — each of those is
+a sibling state.
+
+### <a id="attacks-are-gated-by-nesting"></a>Attacks are gated by NESTING, not conditions
+
+Oblivion ships one clip per weapon class under the SAME AnimGroup and the
+engine picks by what is equipped: minotaur `handtohandattackleft` and
+`twohandattackleft` BOTH declare AnimGroup `AttackLeft`. A flat graph that
+transitions straight off the engine's `attackStart_*` event cannot honour
+that, so an armed minotaur could play a bare-handed swing — and the H2H clips
+park the animated `Weapon` node ~70 units off the hand, dragging the held
+warhammer out of its grip as they play.
+
+Vanilla gates this by nesting: draugrbehavior holds a parent state per stance
+(`H2H_Readied_State` / `1HM_Sword_Readied_State` / `2HM_Readied_State` /
+`Bow_Readied_State`) and each stance's `*_Attack_State` children live INSIDE
+it. A child state is only reachable while its parent is active, so an H2H
+attack cannot be entered from the 2HM branch. Which parent is active comes
+from binding the wrapper machine's `startStateId` to the engine-written
+weapon-class variable.
+
+**Two alternatives were tried and do not work:**
+
+- `hkbExpressionCondition` on the transition — hkxcmd cannot serialize the
+  class; it drops the objects and leaves dangling pointers.
+- `EVENT if ((otherEvent) && (iRightHandType == n))` — an expression can only
+  read VARIABLES, never event names, so the guard is always false and nothing
+  fires. The equip dispatch inherits this and is dead for the same reason.
+
+Hand types are the Skyrim WEAP DNAM 'Animation Type' enum
+(`wbWeaponAnimTypeEnum`: 0 HandToHandMelee, 1-4 one-handed, 5 TwoHandSword,
+6 TwoHandAxe, 7 Bow, 8 Staff), so binding to it indexes stances directly.
+**Every hand type the engine can write must resolve to a state**, or the actor
+has no attack at all while holding that weapon class — a selector whose bound
+`startStateId` names no state selects nothing. Uncovered types fall back to
+the nearest armed stance, else H2H: a converted actor can be handed a weapon
+class Oblivion never animated for it, and playing the wrong swing beats
+standing inert.
+
+### <a id="ragdoll-less-creatures"></a>Ragdoll-less creatures keep their death animation
+
+A ghost, wraith or spectre has no bhk bodies in its source skeleton, so
+`hkx_ragdoll` extracts nothing and the creature never reaches the
+AnimateToRagdoll / Fully Ragdoll wrapper. Its Death clip has no end trigger,
+so the state holds the clip's LAST frame forever — and for those creatures the
+last frame is NOT a corpse on the ground: Oblivion's ghost `death.kf` keeps
+`Bip01 NonAccum` at standing height (Z 65.0 → 66.0 across the whole 1.17s
+clip) because the body is meant to be HIDDEN by the NiVisController / morph /
+alpha channels a Havok clip cannot carry. With the body still shown and the
+character controller still under it, the corpse hovers upright at head height.
+
+Vanilla's ragdoll-less creature is the **witchlight**: one bhkRigidBody, zero
+constraints, the string `ragdoll` appears zero times in its behavior graph, it
+has NO Death state at all, and its `WitchlightRagdollInstant` IDLE
+deliberately carries NO ENAM (the wisp's carries `RagdollInstant`) — so no
+death event ever reaches its graph and the engine disposes of the actor
+itself. Note what vanilla does **not** do: it never sends
+`RemoveCharacterControllerFromWorld` (the string is absent from
+witchlightbehavior.hkx entirely). Dropping the controller with no ragdoll to
+take over is the documented cause of corpses falling through the floor, so we
+must not add it either.
+
+We keep the death ANIMATION — Oblivion's ghosts have a real authored one the
+witchlight simply lacks — and the visibility channels recovered by `kf_decode`
+make it end on a hidden body plus a visible ectoplasm puddle rather than an
+upright corpse. The state itself stays exactly as vanilla builds a single-play
+state: no enter notify, no exit notify, no end trigger.
+
+### <a id="idlestop-is-local"></a>IdleStop is LOCAL to the vocal idle states
+
+Vocal idles (CSDT Idle/Aware slots) are single-play, and the sound annotation
+lives in the state's OWN animation file so it fires once per entry. Entry is
+paced by the engine's idle system through the ActionIdle / ActionIdleWarn IDLE
+records, exactly like vanilla WolfIdleHowl / WolfIdleWarn. Embedding the sound
+in the looping Idle/CombatStance clips instead made it fire every cycle, in
+life and in the ragdoll wrapper states after death.
+
+`IdleStop` is LOCAL to these states and **never a root wildcard**. Vanilla
+routes idleStop only out of its idle states (atronach CombatIdleSpecial →
+CombatIdle, MT_Idle specials → MT_Idle; sabrecat and draugr likewise). A cast
+is itself an IDLE-manager action (the ActionLeftAttack tree) and the engine
+cancels idles with ActionIdleStop, so a root-level `IdleStop → DefaultState`
+wildcard killed every FireForget/Attack state the moment the AI wanted to
+move: the actor snapped back to Default while the engine stayed in its casting
+state waiting for a SpellFire / Spell_Stop that could no longer come (the
+2026-08-23 "IsCasting=1, graph in DefaultState, never casts" readback).
+
+### <a id="the-death-pose-source"></a>The death pose source
+
+`FullyRagdollPose` is a CLEAN copy of the idle animation, written to
+`ragdollpose.hkx` **without annotations** — an annotation in a looping corpse
+clip voices the corpse forever (the squeaking-dead-rat bug). It must be
+registered in animationdata/animationsetdata under that exact name or it never
+binds, and the death state then runs with a dead pose source.
+
+`MODE_SINGLE_PLAY` at playbackSpeed 1.0 is the vanilla death-state clip
+semantics (dogbehavior state 3 plays `Death.hkx` single-play; no vanilla file
+anywhere ships playbackSpeed 0). A single play holds its LAST frame, so the
+corpse neither breathes nor wags.
+
+The ragdoll release is a **clip trigger**, not only the contact listener:
+vanilla dogbehavior's Death clip carries exactly one trigger, event 81
+`Ragdoll` relative-to-end, and the wolf's animationdata block fires
+`Ragdoll:0.267` absolute. The `BSRagdollContactListenerModifier` alone never
+fired for our keyframed bodies, so corpses stayed rigid forever. Our pose
+source is a HELD IDLE rather than an authored ~1s dying animation, so the
+wolf's early absolute timing — 8 frames, enough for the engine to process the
+`AddRagdollToWorld` raised on state entry — is the right equivalent, in both
+the graph trigger and the animationdata block (`RAGDOLL_RELEASE_T`).

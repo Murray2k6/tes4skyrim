@@ -94,9 +94,6 @@ from .writer import pack_formid_subrecord, pack_subrecord
 
 # ---------------------------------------------------------------------------
 # Head texture set (FTST) — race + gender → TXST FormID (Skyrim.esm)
-# ---------------------------------------------------------------------------
-# Sequential block starting at 0x000FDFE6 (DarkElf M) through 0x000FDFF5
-# (Redguard F).  Two entries per race (male then female), 8 races.
 _RACE_HEAD_TXST: dict[str, dict[str, int]] = {
     'DarkElfRace':  {'Male': 0x000FDFE6, 'Female': 0x000FDFE7},
     'BretonRace':   {'Male': 0x000FDFE8, 'Female': 0x000FDFE9},
@@ -188,7 +185,7 @@ def load_race_skin_tones(by_type: dict, export_dirs=None) -> None:
     if not races:
         return
     try:
-        from asset_convert.facegen_egt import (
+        from asset_convert.character.facegen_egt import (
             load_egt_mode_means, sample_texture_rgb, reconstruct_skin_rgb,
             parse_fgts_hex)
     except ImportError:
@@ -425,11 +422,11 @@ def _resolve_hair_part(rec: dict, hair_fid: int, race_edid: str,
     # must reference the group matching its (mapped) race — 'E' elves,
     # 'O' orcs, 'D' dremora, '' the shared human scalp.  Race-NAMED hair has
     # a single, already-correctly-fitted variant (no tag).
-    from asset_convert.hair_pipeline import _fit_group_lock
-    from asset_convert.head_fit import fit_race_for_hair
+    from asset_convert.character.hair_pipeline import fit_group_lock
+    from asset_convert.character.head_fit import fit_race_for_hair
     edid = hair_variants.hair_edid(hair_fid)
     group = ''
-    if fit_race_for_hair(edid) is None and _fit_group_lock(edid) is None:
+    if fit_race_for_hair(edid) is None and fit_group_lock(edid) is None:
         group = _HAIR_GROUP_BY_TES4_RACE.get(race_edid, '')
     return hair_variant_formid(writer, hair_fid, bucket,
                                female, base_female=genders[0], group=group)
@@ -464,7 +461,7 @@ def build_pnam_subs(rec: dict, race_edid: str, gender: str = 'Male',
     # emits an HDPT keeping the source FormID for the base length), so an
     # NPC resolves to its own plugin's hair rather than a substituted vanilla
     # Skyrim hairstyle.  Its authored length (NPC_.LNAM) selects which baked
-    # variant — see hair_variants / asset_convert.hair_pipeline.
+    # variant — see hair_variants / asset_convert.character.hair_pipeline.
     hair_fid = get_formid(rec, 'HNAM.Hair')
     if hair_fid:
         subs += pack_formid_subrecord('PNAM', _resolve_hair_part(

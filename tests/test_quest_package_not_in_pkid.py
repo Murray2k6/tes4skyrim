@@ -22,35 +22,9 @@ from pathlib import Path
 import pytest
 
 from tes5_import import packages
+from tes5_import.tes5_reader import records
 
 
-def _walk(buf):
-    hsz = struct.unpack_from('<I', buf, 4)[0]
-    stack = [(24 + hsz, len(buf))]
-    while stack:
-        s, e = stack.pop()
-        o = s
-        while o + 24 <= e:
-            t = buf[o:o + 4]
-            sz = struct.unpack_from('<I', buf, o + 4)[0]
-            if t == b'GRUP':
-                if sz < 24:
-                    break
-                stack.append((o + 24, o + sz))
-                o += sz
-            else:
-                yield t, o, sz
-                o += 24 + sz
-
-
-def _subs(buf, o, sz):
-    body = buf[o + 24:o + 24 + sz]
-    i = 0
-    while i + 6 <= len(body):
-        sg = body[i:i + 4]
-        ss = struct.unpack_from('<H', body, i + 4)[0]
-        yield sg, body[i + 6:i + 6 + ss]
-        i += 6 + ss
 
 
 def test_is_quest_package_reads_the_registered_set():
@@ -95,23 +69,18 @@ def test_built_plugin_has_no_quest_package_in_any_pkid():
     data = p.read_bytes()
 
     alias_packages = set()
-    for t, o, sz in _walk(data):
-        if t != b'QUST':
-            continue
-        for sg, payload in _subs(data, o, sz):
+    for rec in records(data, b'QUST'):
+        for sg, payload in rec.subs():
             if sg == b'ALPC' and len(payload) == 4:
                 alias_packages.add(struct.unpack_from('<I', payload)[0])
 
     violations = []
-    for t, o, sz in _walk(data):
-        if t not in (b'NPC_', b'CREA'):
-            continue
-        fid = struct.unpack_from('<I', data, o + 12)[0]
-        for sg, payload in _subs(data, o, sz):
+    for rec in records(data, b'NPC_', b'CREA'):
+        for sg, payload in rec.subs():
             if sg == b'PKID' and len(payload) == 4:
                 pk = struct.unpack_from('<I', payload)[0]
                 if pk in alias_packages:
-                    violations.append((fid, pk))
+                    violations.append((rec.form_id, pk))
 
     assert not violations, (
         f'{len(violations)} NPC PKID entries name a quest-owned package, e.g. '

@@ -23,25 +23,27 @@ Usage:
 """
 
 import argparse
-import mmap
 import os
 import struct
 import sys
 import time
-import zlib
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from tes5_import.tes5_reader import REC_HDR, subrecords, walk
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-REC_HDR = 24        # record header size in TES5
-GRP_HDR = 24        # GRUP header size in TES5
-SUB_HDR = 6         # subrecord header size (unchanged from TES4)
+#: File-level flag in the TES4/file header record.
+FLAG_LOCALIZED = 0x00000080
 
-FLAG_COMPRESSED = 0x00040000
-FLAG_LOCALIZED  = 0x00000080   # file-level flag in the TES4/file header record
+#: GRUP type 7 -- topic children, labelled with the owning DIAL's FormID.
+GRP_TOPIC_CHILDREN = 7
 
 DEFAULT_ESM = r"C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition\Data\Skyrim.esm"
 
@@ -107,104 +109,19 @@ class TES5Record:
 
 def _parse_subrecords(data: bytes) -> list:
     """Parse 6-byte-header subrecords from raw record data."""
-    subs = []
-    pos = 0
-    n = len(data)
-    while pos + SUB_HDR <= n:
-        tag  = data[pos:pos + 4].decode('ascii', errors='replace')
-        size = struct.unpack_from('<H', data, pos + 4)[0]
-        pos += SUB_HDR
-        if pos + size > n:
-            break
-        subs.append(Sub(type=tag, data=data[pos:pos + size]))
-        pos += size
-    return subs
+    return [Sub(type=t.decode('ascii', errors='replace'), data=d)
+            for t, d in subrecords(data)]
 
 
-def _read_record(mm, pos: int, file_size: int, parse_types=None):
-    """Read one TES5 record (24-byte header + subrecords). Returns None on error.
-
-    parse_types: optional set of record signatures whose subrecords should be
-    parsed; other records keep header fields only (fast FormID scans)."""
-    if pos + REC_HDR > file_size:
-        return None
-
-    sig          = mm[pos:pos + 4].decode('ascii', errors='replace')
-    data_size    = struct.unpack_from('<I', mm, pos + 4)[0]
-    flags        = struct.unpack_from('<I', mm, pos + 8)[0]
-    form_id      = struct.unpack_from('<I', mm, pos + 12)[0]
-    form_version = struct.unpack_from('<H', mm, pos + 20)[0]
-
-    rec = TES5Record(type=sig, data_size=data_size, flags=flags,
-                     form_id=form_id, form_version=form_version)
-
-    if parse_types is not None and sig not in parse_types:
-        return rec
-
-    data_start = pos + REC_HDR
-    data_end   = data_start + data_size
-    if data_end > file_size:
-        return rec
-
-    raw = bytes(mm[data_start:data_end])
-
-    if flags & FLAG_COMPRESSED and len(raw) >= 4:
-        try:
-            raw = zlib.decompress(raw[4:])
-        except zlib.error:
-            return rec
-
-    rec.subrecords = _parse_subrecords(raw)
-    return rec
-
-
-def _parse_group(mm, start: int, end: int, file_size: int, records: list,
-                 parent_wrld: int, parent_cell: int, parent_dial: int,
-                 parse_types=None):
-    """Recursively parse records within a GRUP block."""
-    pos        = start + GRP_HDR
-    group_type = struct.unpack_from('<I', mm, start + 12)[0]
-    label      = mm[start + 8:start + 12]
-
-    # Propagate hierarchy from group label
-    if group_type == 1:                       # World children
-        parent_wrld = struct.unpack_from('<I', label, 0)[0]
-    elif group_type in (6, 8, 9, 10):         # Cell children / persistent / temporary / VWD
-        parent_cell = struct.unpack_from('<I', label, 0)[0]
-    elif group_type == 7:                     # Topic children
-        parent_dial = struct.unpack_from('<I', label, 0)[0]
-
-    while pos < end and pos < file_size:
-        if pos + 4 > file_size:
-            break
-
-        sig = mm[pos:pos + 4]
-
-        if sig == b'GRUP':
-            if pos + GRP_HDR > file_size:
-                break
-            sub_size = struct.unpack_from('<I', mm, pos + 4)[0]
-            sub_end  = pos + sub_size
-            _parse_group(mm, pos, sub_end, file_size, records,
-                         parent_wrld, parent_cell, parent_dial, parse_types)
-            pos = sub_end
-        else:
-            rec = _read_record(mm, pos, file_size, parse_types)
-            if rec is None:
-                break
-            rec.parent_wrld = parent_wrld
-            rec.parent_cell = parent_cell
-            rec.parent_dial = parent_dial
-
-            if rec.type == 'CELL':
-                parent_cell = rec.form_id
-            elif rec.type == 'WRLD':
-                parent_wrld = rec.form_id
-            elif rec.type == 'DIAL':
-                parent_dial = rec.form_id
-
-            records.append(rec)
-            pos += REC_HDR + rec.data_size
+def _shape(rec, wrld: int, cell: int, dial: int, parse: bool) -> TES5Record:
+    """One shared-reader Record restated as this tool's TES5Record."""
+    out = TES5Record(type=rec.sig.decode('ascii', errors='replace'),
+                     data_size=rec.size, flags=rec.flags,
+                     form_id=rec.form_id, form_version=rec.form_version,
+                     parent_wrld=wrld, parent_cell=cell, parent_dial=dial)
+    if parse:
+        out.subrecords = _parse_subrecords(rec.body)
+    return out
 
 
 def read_tes5_file(filepath: str, parse_types=None):
@@ -218,42 +135,31 @@ def read_tes5_file(filepath: str, parse_types=None):
         header_rec: TES5Record (the TES4/file header)
         all_records: list[TES5Record]
         is_localized: bool
+
+    parent_wrld/cell/dial come from the enclosing GRUP's label, which is scoped
+    by the walk. A record that labels a group sits OUTSIDE it and correctly
+    reports 0.
+    See: docs/reference/python_tools.md#tes5-record-parent-fields
     """
-    with open(filepath, 'rb') as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        try:
-            return _parse_file(mm, parse_types)
-        finally:
-            mm.close()
-
-
-def _parse_file(mm, parse_types=None):
-    file_size = len(mm)
-    pos = 0
-
-    # First record is the TES4/file header (always fully parsed — masters live here)
-    header = _read_record(mm, pos, file_size, None)
-    if header is None:
-        raise ValueError('Could not read file header')
+    raw = Path(filepath).read_bytes()
+    size = struct.unpack_from('<I', raw, 4)[0]
+    header = TES5Record(type='TES4', data_size=size,
+                        flags=struct.unpack_from('<I', raw, 8)[0],
+                        form_id=struct.unpack_from('<I', raw, 12)[0],
+                        form_version=struct.unpack_from('<H', raw, 20)[0])
+    header.subrecords = _parse_subrecords(raw[REC_HDR:REC_HDR + size])
     is_localized = bool(header.flags & FLAG_LOCALIZED)
-    pos += REC_HDR + header.data_size
 
-    all_records = []
-    while pos < file_size:
-        if pos + 4 > file_size:
-            break
-        sig = mm[pos:pos + 4]
-        if sig != b'GRUP':
-            break
-        if pos + GRP_HDR > file_size:
-            break
-        group_size = struct.unpack_from('<I', mm, pos + 4)[0]
-        group_end  = pos + group_size
-        _parse_group(mm, pos, group_end, file_size, all_records, 0, 0, 0,
-                     parse_types)
-        pos = group_end
-
-    return header, all_records, is_localized
+    want = None if parse_types is None else frozenset(
+        s.encode('ascii') for s in parse_types)
+    records = []
+    for rec, stack in walk(raw, bodies=want):
+        topic = stack.of_type(GRP_TOPIC_CHILDREN)
+        records.append(_shape(
+            rec, stack.worldspace or 0, stack.cell or 0,
+            0 if topic is None else topic.label_fid,
+            want is None or rec.sig in want))
+    return header, records, is_localized
 
 
 # ---------------------------------------------------------------------------

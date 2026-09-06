@@ -10,7 +10,7 @@ just text_reader/writer, and loads scipy/shapely lazily) keeps each child small.
 FormIDs are pre-assigned in the parent (job['navm_fid']) so no PluginWriter — an
 unpicklable, shared-state object — has to cross the process boundary.
 
-The Havok collision cache is a module global in `asset_convert.collision_extract`;
+The Havok collision cache is a module global in `asset_convert.collision.collision_extract`;
 a spawned child does NOT inherit the parent's loaded copy, so each worker loads it
 once from disk in the pool initializer.  Without this, every cell would voxelize
 an empty world and emit no navmesh at all.
@@ -59,7 +59,7 @@ def init_worker(base_model_by_fid: dict, door_fids: set, collision_cache: str,
     set_formid_index_offset(formid_offset)
     set_injected_formids(injected_formids or {})
     if collision_cache:
-        from asset_convert.collision_extract import load_collision
+        from asset_convert.collision.collision_extract import load_collision
         load_collision(collision_cache, quiet=True)
 
     # Door panel centroids: the REFR position is the door's hinge, not the
@@ -152,7 +152,7 @@ def run_job(job: dict):
         if job.get('verify') and meta and meta.get('geom_cached'):
             return job['key'], _verify_against_cache(job, (navm_bytes, meta))
         return job['key'], (navm_bytes, meta)
-    except Exception as e:  # noqa: BLE001 — must not kill the pool
+    except Exception as e:
         import traceback
         return job['key'], (None, {'error': f'{type(e).__name__}: {e}',
                                    'traceback': traceback.format_exc()})

@@ -25,8 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert.sibling_lod import touched_worldspace_fids
-from asset_convert.lod_gen import _formid_remap_table, _plugin_masters
+from asset_convert.lod.sibling_lod import touched_worldspace_fids
+from asset_convert.lod.esm_scan import formid_remap_table, plugin_masters
 
 
 def _rec(sig: bytes, fid: int, body: bytes = b'') -> bytes:
@@ -60,17 +60,17 @@ def _plugin(tmp_path: Path, name: str, payload: bytes,
 
 def _norm(fid: int, masters=('Skyrim.esm', 'Oblivion.esm')) -> int:
     """The load-order-wide id these tests' MASTER-owned raw ids normalise to."""
-    from asset_convert.lod_gen import _global_file_index
+    from asset_convert.lod.esm_scan import global_file_index
     top = fid >> 24
     owner = masters[top] if top < len(masters) else None
     assert owner is not None, 'use _self() for ids the plugin owns'
-    return _global_file_index(owner.lower()) << 24 | (fid & 0x00FFFFFF)
+    return global_file_index(owner.lower()) << 24 | (fid & 0x00FFFFFF)
 
 
 def _self(esm: Path, fid: int) -> int:
     """Same, for an id whose index byte is past the master list (self-owned)."""
-    from asset_convert.lod_gen import _global_file_index
-    return _global_file_index(esm.name.lower()) << 24 | (fid & 0x00FFFFFF)
+    from asset_convert.lod.esm_scan import global_file_index
+    return global_file_index(esm.name.lower()) << 24 | (fid & 0x00FFFFFF)
 
 
 def test_records_under_a_worldspace_grup_are_detected(tmp_path):
@@ -147,7 +147,7 @@ def test_scope_is_per_file_not_shared(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _remap(esm: Path, fid: int) -> int:
-    t = _formid_remap_table(esm)
+    t = formid_remap_table(esm)
     return t[fid >> 24] | (fid & 0x00FFFFFF)
 
 
@@ -187,8 +187,99 @@ def test_a_master_at_different_slots_still_resolves_to_one_id(tmp_path):
     ve = _plugin(tmp_path, 'TWMP_Valenwood_Elsweyr.esp', b'',
                  masters=('Skyrim.esm', 'Oblivion.esm', 'Tamriel.esp',
                           'ElsweyrAnequina.esp'))
-    assert _plugin_masters(ve)[3] == 'elsweyranequina.esp'
+    assert plugin_masters(ve)[3] == 'elsweyranequina.esp'
     # ANQ's own 02xxxxxx == the child's 03xxxxxx, and neither equals the
     # child's 02xxxxxx (which is Tamriel.esp).
     assert _remap(anq, 0x02014FE0) == _remap(ve, 0x03014FE0)
     assert _remap(anq, 0x02014FE0) != _remap(ve, 0x02014FE0)
+
+
+
+def test_a_supplier_that_places_nothing_still_supplies_assets(tmp_path):
+    """Overlay scoping must not scope ASSETS.
+
+    The Morroblivion compatibility patch defines 3,215 base records and no
+    references, so it is correctly dropped from the overlays -- but its
+    textures still have to resolve, or LODGen reports them missing.
+
+    Here Patch.esp touches nothing and Places.esp touches W1.
+    See: docs/commentary/asset_convert_terrain.md#lod-suppliers-vs-contributors
+    """
+    from tools.release.create_lod import _plan_jobs
+
+    owner = 'Owner.esm'
+    plugins = [owner, 'Patch.esp', 'Places.esp']
+    (tmp_path / owner).mkdir()
+    (tmp_path / owner / owner).write_bytes(b'x')
+
+    def _out(root, name, export_root=None):
+        """Every plugin's output root, flat under tmp_path."""
+        return tmp_path / name
+
+    for n in plugins:
+        (tmp_path / n).mkdir(exist_ok=True)
+        (tmp_path / n / n).write_bytes(b'x')
+
+    jobs = _plan_jobs(
+        ['W1'], {'W1': owner}, plugins,
+        {owner: {7}, 'Patch.esp': set(), 'Places.esp': {7}},
+        tmp_path, tmp_path, _out,
+        lambda n, root, order: [owner],
+        lambda esm, edid: 7)
+
+    assert len(jobs) == 1
+    _edid, _owner, _esm, _ov, contributors, suppliers = jobs[0]
+    assert 'Patch.esp' not in contributors, 'it places nothing: not overlaid'
+    assert 'Patch.esp' in suppliers, 'but its assets must still resolve'
+    assert 'Places.esp' in contributors and 'Places.esp' in suppliers
+
+
+
+def test_lodgen_input_drops_only_the_banned_model(tmp_path):
+    """The retry strips a faulting model by EditorID and keeps everything else.
+
+    A NullReferenceException kills the whole LODGen run, so the bake is retried
+    without the model that threw. The EditorID sits at field 9 of a reference
+    row; header lines carry no tab and must survive untouched.
+    See: docs/commentary/asset_convert_terrain.md#lodgen-nullreference-retry
+    """
+    from asset_convert.lod.lod_gen import _drop_lodgen_refs
+
+    def _row(edid):
+        """One reference row whose base EditorID is `edid`."""
+        return '\t'.join(['02011A01', '00000C00'] + ['0.0'] * 7
+                         + [edid, '00008000', '', 'm.nif', '', '', ''])
+
+    src = tmp_path / 'in.txt'
+    src.write_text('\n'.join([
+        'GameMode=TES5', 'Worldspace=W1',
+        _row('GoodOne'), _row('Waterfall_01'), _row('GoodTwo'),
+        _row('Waterfall_01'),
+    ]) + '\n', encoding='utf-8')
+
+    assert _drop_lodgen_refs(src, {'Waterfall_01'}) is True
+    out = src.read_text(encoding='utf-8').splitlines()
+    assert out[:2] == ['GameMode=TES5', 'Worldspace=W1'], 'headers survive'
+    assert len(out) == 4, 'both Waterfall rows dropped, both Good rows kept'
+    assert not any('Waterfall_01' in ln for ln in out)
+    assert sum(1 for ln in out if 'GoodOne' in ln) == 1
+
+    assert _drop_lodgen_refs(src, {'Absent'}) is False, 'no match: no rewrite'
+
+
+def test_animated_ninode_roots_are_not_accepted_by_lodgen():
+    """Subclassing NiNode is not enough — LODGen throws on these roots.
+
+    `NiBSAnimationNode` IS a NiNode subclass, so the isinstance-derived set
+    accepted it and LODGen died with NullReferenceException on the four
+    Tamriel Data models that carry one.
+    See: docs/commentary/asset_convert_terrain.md#lodgen-rejects-animated-roots
+    """
+    from asset_convert.lod.lod_gen import (_LODGEN_BAD_ROOTS,
+                                           _ninode_root_names)
+
+    accepted = _ninode_root_names()
+    assert 'NiBSAnimationNode' not in accepted
+    assert 'NiSwitchNode' not in accepted
+    assert not (accepted & _LODGEN_BAD_ROOTS), 'the two sets are disjoint'
+    assert {'NiNode', 'BSFadeNode'} <= accepted, 'ordinary roots still bake'

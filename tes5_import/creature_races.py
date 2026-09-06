@@ -1,7 +1,7 @@
 """Generated creature RACE / ARMA / ARMO(skin) records.
 
 Every CREA whose model folder was converted by the creature pipeline
-(asset_convert/creature_pipeline.py — see export/<plugin>/creature_projects.json)
+(asset_convert/havok/creature_pipeline.py — see export/<plugin>/creature_projects.json)
 gets a GENERATED race chain instead of the old Skyrim-race aliasing
 (skyrim_overrides.resolve_creature_race, kept only as a fallback for
 creatures without a converted project). Humanoid NPC_ records are NOT
@@ -257,7 +257,8 @@ def _pile_mesh_bounds(proj, pile_name):
     if path is None:
         return None
     try:
-        from asset_convert import pyffi_monkey_patch  # noqa: F401
+        from asset_convert.nif.pyffi_monkey_patch import apply_patches
+        apply_patches()
         from pyffi.formats.nif import NifFormat
         data = NifFormat.Data()
         with open(path, 'rb') as f:
@@ -361,7 +362,7 @@ def creature_dissolve_info(crea_fid: int):
     """(ash pile FormID, death-clip seconds) when this CREA dissolves on death.
 
     None for every ordinary creature.  The trigger is the AUTHORED animation,
-    never a name: asset_convert.hkx_behavior.detect_dissolve marks a project
+    never a name: asset_convert.havok.hkx_behavior.detect_dissolve marks a project
     whose death.kf hides the actor's own skin holder (`SkinAttachment`) with a
     NiVisController instead of dropping the body.  Measured over every creature
     folder in all three test plugins, that fires on exactly four -- ghost and

@@ -27,6 +27,7 @@ Vanilla census (Skyrim.esm, 258 MUST / 50 MUSC) drove the shape:
 import json
 import struct
 
+from ..tes5_reader import records
 from ..writer import pack_record, pack_string_subrecord, pack_subrecord
 
 # CNAM track types (xEdit wbDefinitionsTES5.pas:7203).  These are hashes, not
@@ -319,7 +320,7 @@ def load_music_manifest(out_root, export_dir=None, plugin=None) -> dict:
         # No usable manifest: derive one from the extracted tree.  Pure
         # directory walk -- no ffmpeg, no xWMAEncode, no subprocess.
         try:
-            from asset_convert.music_convert import scan_music
+            from asset_convert.audio.music_convert import scan_music
             n = scan_music(plugin, export_dir, str(Path(out_root).parent))
             if n:
                 print(f'  Music: scanned {n} tracks from the extracted '
@@ -399,28 +400,6 @@ def build_music_records(manifest: dict, writer, plugin: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # DOBJ -- the Default Object Manager
-# ---------------------------------------------------------------------------
-# 🛑 THIS is how the engine finds combat music.  It does NOT scan MUSC records
-# for the combat flags; it asks BGSDefaultObjectManager for `kBattleMusic`,
-# whose form comes from the DOBJ record's `BTMS` entry -- hardcoded in
-# Skyrim.esm to MUSCombat (0003418E).
-#
-# Confirmed against SeaSparrowOG/CombatMusic (an SKSE combat-music plugin),
-# whose every hook is keyed on exactly that lookup:
-#
-#     const auto MUSCombat = defaultObjects->GetObject<RE::BGSMusicType>(
-#         RE::BGSDefaultObjectManager::DefaultObject::kBattleMusic);
-#     if (!MUSCombat || a_music != MUSCombat) { return a_music; }
-#
-# So a Battle MUSC that nothing points at is unreachable no matter how
-# correctly it is built -- which is why ours stayed silent with vanilla-perfect
-# flags, priority, ducking, cue points and conditions.  Battle is the ONE
-# category with no CELL/WRLD/REGN route: `by_enum` only carries the 3 TES4
-# enum values (explore/public/dungeon), so nothing else can ever name it.
-#
-# Every DLC overrides DOBJ with the FULL array (Dawnguard 324, Dragonborn 346,
-# HearthFires 346, Update 366 entries), so that is the established pattern: we
-# copy the winning master's entries and replace only BTMS.
 DOBJ_BATTLE_MUSIC_TAG = b'BTMS'
 
 
@@ -428,28 +407,12 @@ def _read_master_dobj(skyrim_esm: str):
     """(FormID, [(tag, formid), ...]) for Skyrim.esm's DOBJ, or None."""
     with open(skyrim_esm, 'rb') as fh:
         data = fh.read()
-    pos = 24 + struct.unpack('<I', data[4:8])[0]
-    end = len(data)
-    while pos < end:
-        sig = data[pos:pos + 4]
-        if sig == b'GRUP':
-            pos += 24
-            continue
-        size = struct.unpack('<I', data[pos + 4:pos + 8])[0]
-        if sig == b'DOBJ':
-            fid = struct.unpack('<I', data[pos + 12:pos + 16])[0]
-            body = data[pos + 24:pos + 24 + size]
-            i = 0
-            while i + 6 <= len(body):
-                sub = body[i:i + 4]
-                sz = struct.unpack('<H', body[i + 4:i + 6])[0]
-                val = body[i + 6:i + 6 + sz]
-                if sub == b'DNAM':
-                    return fid, [(val[j:j + 4],
-                                  struct.unpack('<I', val[j + 4:j + 8])[0])
-                                 for j in range(0, len(val), 8)]
-                i += 6 + sz
-        pos += 24 + size
+    for rec in records(data, b'DOBJ'):
+        val = rec.sub(b'DNAM')
+        if val is not None:
+            return rec.form_id, [
+                (val[j:j + 4], struct.unpack_from('<I', val, j + 4)[0])
+                for j in range(0, len(val) - 7, 8)]
     return None
 
 

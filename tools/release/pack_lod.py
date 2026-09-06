@@ -28,7 +28,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from asset_convert.sibling_lod import LOD_DIR_NAME
+from asset_convert.lod.sibling_lod import LOD_DIR_NAME
 from output_layout import finished_dir
 
 

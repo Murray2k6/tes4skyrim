@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from asset_convert import source_registry  # noqa: E402
+from asset_convert.sources import source_registry
 
 # Folders holding SHARED assets: keyed by asset path, identical for every
 # plugin in the mod.

@@ -1,6 +1,6 @@
 """Regression tests for the vectorised terrain-LOD block encoders and fills.
 
-_encode_dxt1_quality, _encode_bc4_channel and _fill_missing were rewritten from
+encode_dxt1_quality, encode_bc4_channel and fill_missing were rewritten from
 per-block / per-cell Python loops into whole-array NumPy (5-13x faster; the DXT1
 encoder alone was ~33% of all terrain-LOD tile time).  The rewrites are meant to
 be BIT-EXACT, not merely "close enough" — terrain LOD .dds files are compared
@@ -16,8 +16,9 @@ import struct
 import numpy as np
 import pytest
 
-from asset_convert.terrain_lod import (_encode_bc4_channel, _encode_dxt1_quality,
-                                       _fill_missing, _rgb_to_565, _565_to_rgb)
+from asset_convert.texture.dds_codec import (c565_to_rgb, encode_bc4_channel,
+                                         encode_dxt1_quality, rgb_to_565)
+from asset_convert.lod.terrain_lod import fill_missing
 
 
 def _dxt1_reference(img: np.ndarray) -> bytes:
@@ -34,8 +35,8 @@ def _dxt1_reference(img: np.ndarray) -> bytes:
             block = padded[by:by + 4, bx:bx + 4].reshape(16, 3).astype(np.int32)
             cmin = block.min(axis=0)
             cmax = block.max(axis=0)
-            c0 = _rgb_to_565(cmax.astype(np.uint8))
-            c1 = _rgb_to_565(cmin.astype(np.uint8))
+            c0 = rgb_to_565(cmax.astype(np.uint8))
+            c1 = rgb_to_565(cmin.astype(np.uint8))
             if c0 < c1:
                 c0, c1 = c1, c0
             elif c0 == c1:
@@ -44,12 +45,12 @@ def _dxt1_reference(img: np.ndarray) -> bytes:
                 else:
                     c1 = c0 - 1
             palette = np.array([
-                _565_to_rgb(c0),
-                _565_to_rgb(c1),
-                ((2 * _565_to_rgb(c0).astype(np.int32)
-                  + _565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
-                ((_565_to_rgb(c0).astype(np.int32)
-                  + 2 * _565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
+                c565_to_rgb(c0),
+                c565_to_rgb(c1),
+                ((2 * c565_to_rgb(c0).astype(np.int32)
+                  + c565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
+                ((c565_to_rgb(c0).astype(np.int32)
+                  + 2 * c565_to_rgb(c1).astype(np.int32)) // 3).astype(np.uint8),
             ], dtype=np.int32)
             diffs = block[:, None, :] - palette[None, :, :]
             codes = (diffs * diffs).sum(axis=2).argmin(axis=1)
@@ -125,19 +126,19 @@ class TestDXT1Encoder:
     def test_matches_per_block_reference(self, size):
         rng = np.random.default_rng(size)
         img = rng.integers(0, 256, (size, size, 3), dtype=np.uint8)
-        assert _encode_dxt1_quality(img) == _dxt1_reference(img)
+        assert encode_dxt1_quality(img) == _dxt1_reference(img)
 
     def test_flat_block_endpoints(self):
         """A uniform block hits the c0 == c1 branch; both endpoints must still
         encode a valid opaque (4-color) block."""
         for value in (0, 1, 128, 255):
             img = np.full((4, 4, 3), value, dtype=np.uint8)
-            assert _encode_dxt1_quality(img) == _dxt1_reference(img)
+            assert encode_dxt1_quality(img) == _dxt1_reference(img)
 
     def test_non_multiple_of_four_is_padded(self):
         rng = np.random.default_rng(0)
         img = rng.integers(0, 256, (13, 7, 3), dtype=np.uint8)
-        out = _encode_dxt1_quality(img)
+        out = encode_dxt1_quality(img)
         assert out == _dxt1_reference(img)
         assert len(out) == (16 // 4) * (8 // 4) * 8   # padded to 16x8, 8B/block
 
@@ -151,12 +152,12 @@ class TestBC4Encoder:
         for by in range(0, size, 4):
             for bx in range(0, size, 4):
                 expected += _bc4_block_reference(chan[by:by + 4, bx:bx + 4].reshape(16))
-        assert _encode_bc4_channel(chan).tobytes() == bytes(expected)
+        assert encode_bc4_channel(chan).tobytes() == bytes(expected)
 
     def test_flat_channel_uses_zero_indices(self):
         """All-equal blocks take the r0 == r1 path: indices must be all zero."""
         chan = np.full((8, 8), 200, dtype=np.uint8)
-        out = _encode_bc4_channel(chan)
+        out = encode_bc4_channel(chan)
         assert out.shape == (4, 8)
         for blk in out:
             assert blk[0] == 200 and blk[1] == 200
@@ -173,7 +174,7 @@ class TestFillMissing:
 
         h_new, c_new = h.copy(), c.copy()
         h_ref, c_ref = h.copy(), c.copy()
-        _fill_missing(h_new, c_new)
+        fill_missing(h_new, c_new)
         _fill_missing_reference(h_ref, c_ref)
 
         assert np.array_equal(h_new, h_ref)
@@ -183,7 +184,7 @@ class TestFillMissing:
     def test_all_nan_grid_becomes_zero(self):
         h = np.full((33, 33), np.nan, dtype=np.float32)
         c = np.zeros((33, 33, 3), dtype=np.uint8)
-        _fill_missing(h, c)
+        fill_missing(h, c)
         assert (h == 0.0).all()
 
     def test_fully_valid_grid_is_untouched(self):
@@ -191,7 +192,7 @@ class TestFillMissing:
         h = rng.random((33, 33)).astype(np.float32)
         c = rng.integers(0, 256, (33, 33, 3), dtype=np.uint8)
         h0, c0 = h.copy(), c.copy()
-        _fill_missing(h, c)
+        fill_missing(h, c)
         assert np.array_equal(h, h0) and np.array_equal(c, c0)
 
     def test_empty_column_takes_nearest_valid(self):
@@ -202,5 +203,5 @@ class TestFillMissing:
         h[:, 3] = np.nan
         c = np.zeros((8, 8, 3), dtype=np.uint8)
         c[:, :, 0] = np.arange(8, dtype=np.uint8)[None, :]
-        _fill_missing(h, c)
+        fill_missing(h, c)
         assert (h[:, 3] == 2.0).all()          # column 2, not 4

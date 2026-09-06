@@ -47,7 +47,7 @@ if os.environ.get('PYTHONHASHSEED') != '0':
     os.environ['PYTHONHASHSEED'] = '0'
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-from asset_convert import nif_converter as nc  # noqa: E402
+from asset_convert.nif import nif_converter as nc
 
 
 def collect(src_root: Path, count: int, seed: int, include_lod: bool):

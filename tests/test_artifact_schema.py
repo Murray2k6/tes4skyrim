@@ -16,7 +16,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tes5_import.artifact_schema import (  # noqa: E402
+from tes5_import.artifact_schema import (
     ARTIFACTS, StaleArtifactError, read_artifact, write_artifact)
 
 

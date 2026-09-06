@@ -30,11 +30,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from PIL import Image, ImageDraw  # noqa: E402
+from PIL import Image, ImageDraw
 
-from tes5_import.navmesh import corridor_clean, params  # noqa: E402
-from tools.navmesh.index import NavIndex, DEFAULT_EXPORT  # noqa: E402
-from tools.navmesh.metrics import (  # noqa: E402
+from tes5_import.navmesh import corridor_clean, params
+from tools.navmesh.index import NavIndex, DEFAULT_EXPORT
+from tools.navmesh.metrics import (
     crossed_boundary_edges, open_notches,
 )
 

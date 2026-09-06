@@ -38,7 +38,7 @@ MAX_ALPHA_LAYERS = 6
 MAX_VTXT_POS = 288      # 17*17 quadrant grid
 
 
-def _master_names(path):
+def master_names(path):
     """MAST entries of a plugin header, in load order."""
     with open(path, 'rb') as fh:
         head = fh.read(24)
@@ -62,10 +62,10 @@ def _master_count(path):
     Also the index byte the file's own records carry, since a file's records
     sit immediately after its masters in load order.
     """
-    return len(_master_names(path))
+    return len(master_names(path))
 
 
-def _iter_records(data):
+def iter_records(data):
     """Flatten the file: (sig, fid, body, wrld, cell, gtype, order, blk, sub)."""
     out = []
 
@@ -128,7 +128,7 @@ def load(path):
     cells = {}      # (wrld, x, y) -> (cell fid, block label, sub-block label)
     land = {}       # cell fid -> (body, index within its group, group type)
     ltex = set()
-    for sig, fid, body, wrld, cell, gtype, order, blk, sub in _iter_records(data):
+    for sig, fid, body, wrld, cell, gtype, order, blk, sub in iter_records(data):
         if sig == b'LTEX':
             ltex.add(fid)
         elif sig == b'CELL':
@@ -234,7 +234,7 @@ def main():
     # we never convert (Skyrim.esm) simply have no output and are skipped by
     # the isfile() check below.
     if args.masters is None:
-        args.masters = _master_names(path)
+        args.masters = master_names(path)
     # A master's LTEX ids are in ITS OWN FormID space; this plugin names them
     # by the index byte of the master's slot in ITS master list. Merging them
     # verbatim compares ids from two different spaces and reports healthy

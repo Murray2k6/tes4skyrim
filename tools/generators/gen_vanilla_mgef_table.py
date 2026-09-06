@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tes5_import.skyrim_overrides import (  # noqa: E402
+from tes5_import.skyrim_overrides import (
     MGEF_AV_CODE_TO_SKYRIM,
     MGEF_CODE_TO_SKYRIM,
 )

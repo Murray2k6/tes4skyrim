@@ -26,12 +26,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from asset_convert import pyffi_monkey_patch as _patch  # noqa: F401
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
 from pyffi.formats.nif import NifFormat
 
-from asset_convert.body_wrap import (get_field, closest_point_on_triangles,
-                                     _iter_skinned_geoms, _geom_world,
-                                     _geom_triangles, _block_name)
+from asset_convert.character.body_wrap import (get_field, closest_point_on_triangles,
+                                     iter_skinned_geoms, geom_world,
+                                     geom_triangles, block_name)
 
 _SPLICE_PREFIXES = ('MaleUnderwear', 'FemaleUnderwear', 'HandMale',
                     'HandFemale', 'MaleFeet', 'FemaleFeet', 'BodyFill')
@@ -42,10 +43,10 @@ def _load_blocks(path):
     with open(path, 'rb') as f:
         data.read(f)
     out = {}
-    for block, skel_root in _iter_skinned_geoms(data):
-        name = _block_name(block)
-        verts, _G = _geom_world(block, skel_root)
-        tris = _geom_triangles(block)
+    for block, skel_root in iter_skinned_geoms(data):
+        name = block_name(block)
+        verts, _G = geom_world(block, skel_root)
+        tris = geom_triangles(block)
         out.setdefault(name, []).append((verts, tris))
     return out
 

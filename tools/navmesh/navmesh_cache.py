@@ -115,14 +115,14 @@ def asset_name(plugin: str) -> str:
 
 def source_tag(plugin: str) -> str | None:
     """The navmesh source tag the CURRENT code would use for this plugin."""
-    from tes5_import import import_main as im
-    got = im._navmesh_geom_cache(collision_path(plugin))
+    from tes5_import.navmesh import pool as navm_pool
+    got = navm_pool.navmesh_geom_cache(collision_path(plugin))
     return got[1] if got else None
 
 
 def collision_hash(plugin: str) -> str | None:
     """Content hash of the plugin's collision cache, or None if absent."""
-    import asset_convert.collision_extract as ce
+    import asset_convert.collision.collision_extract as ce
     path = collision_path(plugin)
     if not os.path.exists(path):
         return None

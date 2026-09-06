@@ -77,7 +77,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from tools.live.game_bridge import Bridge, BridgeError  # noqa: E402
+from tools.live.game_bridge import Bridge, BridgeError
 
 # TESCondition::Run -- see module docstring for how this was identified.
 CTDA_EVAL_ID = 21971

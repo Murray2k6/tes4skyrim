@@ -3,6 +3,7 @@
 Each test here pins a bug that actually shipped a wrong mesh during
 development.  They are cheap; the byte-equality runs that found them are not.
 """
+from asset_convert.nif import morphs
 import io
 import os
 import sys
@@ -11,9 +12,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from asset_convert import pyffi_monkey_patch  # noqa: F401,E402  (installs)
-from asset_convert import nif_geom_array as GA  # noqa: E402
-from pyffi.formats.nif import NifFormat  # noqa: E402
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from asset_convert.nif import nif_geom_array as GA
+from pyffi.formats.nif import NifFormat
 
 pytestmark = pytest.mark.skipif(not GA._INSTALLED,
                                 reason='numpy-backed arrays not installed')
@@ -149,15 +151,14 @@ def test_get_size_matches_pyffi():
 
 
 def test_clone_does_not_alias_the_source():
-    """_copy_block_fields clones a shape; _emulate_morphs then does v.x += d.x.
+    """_copy_block_fields clones a shape; emulate_morphs then does v.x += d.x.
 
     If the clone aliases the source array those += land on the ORIGINAL
     vertices and accumulate across morph targets.
     """
-    from asset_convert import nif_converter as nc
     src = _shape(n=5)
     dst = src.__class__()
-    nc._copy_block_fields(src, dst)
+    morphs._copy_block_fields(src, dst)
     assert [(v.x, v.y, v.z) for v in dst.vertices] == \
            [(v.x, v.y, v.z) for v in src.vertices]
     dst.vertices[0].x = 999.0

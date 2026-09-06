@@ -1,12 +1,13 @@
-# asset_convert/terrain_lod.py — terrain, LOD and grass
+# asset_convert/lod/terrain_lod.py — terrain and LOD
 
-**Code:** `asset_convert/terrain_lod.py`, `asset_convert/lod_gen.py`, `asset_convert/lod_far_gen.py`, `asset_convert/grass_profile.py`, `asset_convert/lava_surface.py`
+**Code:** `asset_convert/lod/terrain_lod.py`, `asset_convert/texture/dds_codec.py`, `asset_convert/lod/lod_gen.py`, `asset_convert/lod/lod_far_gen.py`, `asset_convert/lava_surface.py`
 
 ## Contents
 
 - [Grass (GRAS) conversion — record invariants + shader profile (2026-07-09)](#grass-conversion-record-invariants-shader)
 - [Terrain/LOD/LAND-adjacent asset notes](#terrainlodland-adjacent-asset-notes)
 - [Lava surfaces — Oblivion realm water rendered as actual lava (2026-08-23)](#lava-surfaces-oblivion-realm-water)
+- [QEM decimation: the budget and its tuning constants](#qem-decimation-tuning)
 
 ## Grass (GRAS) conversion — record invariants + shader profile (2026-07-09)
 <a id="grass-conversion-record-invariants-shader"></a>
@@ -14,11 +15,11 @@
 - **GRAS record invariants (the working-example pattern)**: every working GRAS record — vanilla Skyrim.esm, USSEP, Beyond Skyrim's BSHeartland.esm, Skyrim Extended Cut, Legacy Orsinium (all dumpable from the install with tools/esm/tes5_esm_reader.py) — has (1) **OBND all ZEROS**, never computed mesh bounds, (2) **MODT present** (BSHeartland proves a 12-byte version-2 stub `02000000 00000000 00000000` suffices), and (3) **the model under `meshes\landscape\grass\`** — 45/45 surveyed MODL paths contain `landscape\grass\`; nothing outside it is known to work (same kind of hardcoded naming contract as the `NPC Root [Root]` bone). convert_GRAS builds the record manually to honor all three (MODL via `grass_profile.grass_model_dest()` → `landscape\grass\tes4_<basename>.nif`, flattened — TES4 grass basenames are collision-free), and `grass_profile.run()` copies each converted grass NIF there (sources under tes4\ stay for FLOR/STAT sharing). BSHeartland also shows GRAS DATA density up to 80 and TES4-style values are fine; LTEX INAM (SSE "Is Snow" flag) is optional.
 - **Grass NIFs with Vertex_Alpha + low VC alpha look invisible/ghosted in NifSkope — that is normal and matches vanilla** (vanilla grass VC alpha avg ~0.15; NifSkope multiplies it into the alpha test, the in-game grass shader uses it as wind weight instead). Don't diagnose grass visibility in NifSkope. Alpha-test thresholds are clamped to the vanilla grass envelope (≤100; Oblivion used up to 128).
 - **GRAS DATA Density/PositionRange must be clamped to the working envelope** (Density ≤80, PositionRange ≤32 — vanilla uses Density 3-6/PosRange ≤32, BSHeartland up to Density 80). TES4 values (Density up to 100, PosRange up to 90) were tuned for Oblivion's 4x-coarser placement grid (iMinGrassSize 80 vs Skyrim 20); passed through raw they over-instance the grass planter and CTD **with no crash log** on cells where dense grass textures cover whole quadrants (found via `python tools/esm/cell_grass.py export/Oblivion.esm --wrld Tamriel --cell X,Y` — lists the grass types each cell can spawn; the two density-100 types were the outliers shared by the crashing cells).
-- **Grass CTD root cause #2 — Oblivion meshes with NO triangle data (SOLVED 2026-07-10)**: several vanilla Oblivion grass meshes (GroundCoverMediumGrass01/LongGrass01, GroundCoverPineappleWeed*, GroundCoverWildPlant*, ms14longgrass01) ship NiTriShapeData with `has_triangles=False` — Num Triangles is set but the index array is ABSENT (only `Oblivion - Meshes.bsa` has them; no intact alternates exist). Oblivion's grass renderer tolerated it; Skyrim's planter dereferences the missing data → **region-specific CTD with no log** (Heartland/Cheydinhal cells). Several others (JMMediumGrass*, brmediumgrassyellow01, groundcoverfern01, oblivionmoldroots01) carry legacy vertex **match groups** (no vanilla Skyrim mesh has any) → same crash in Bruma cells. Fix: `asset_convert/tri_reconstruct.py` — blade triangles are reconstructed from the 3-UV-role pattern (base-left/base-right/tip; tip role = highest avg z; each blade pairs a tip with the base pair whose midpoint it tops; winding from stored normals), and match groups are cleared on every converted shape. Both run inside `_convert_strips_or_shape`, so FLOR/STAT meshes sharing these sources heal on full re-runs. Diagnosis method: `tools/esm/cell_grass.py` per-cell grass lists × working-vs-crashing region diff → the defective meshes were exactly the types unique to crashing regions. A mesh with `has_triangles=False` also renders as NOTHING in NifSkope (that was the real cause of the "invisible in NifSkope" report, not vertex alpha).
+- **Grass CTD root cause #2 — Oblivion meshes with NO triangle data (SOLVED 2026-07-10)**: several vanilla Oblivion grass meshes (GroundCoverMediumGrass01/LongGrass01, GroundCoverPineappleWeed*, GroundCoverWildPlant*, ms14longgrass01) ship NiTriShapeData with `has_triangles=False` — Num Triangles is set but the index array is ABSENT (only `Oblivion - Meshes.bsa` has them; no intact alternates exist). Oblivion's grass renderer tolerated it; Skyrim's planter dereferences the missing data → **region-specific CTD with no log** (Heartland/Cheydinhal cells). Several others (JMMediumGrass*, brmediumgrassyellow01, groundcoverfern01, oblivionmoldroots01) carry legacy vertex **match groups** (no vanilla Skyrim mesh has any) → same crash in Bruma cells. Fix: `asset_convert/nif/tri_reconstruct.py` — blade triangles are reconstructed from the 3-UV-role pattern (base-left/base-right/tip; tip role = highest avg z; each blade pairs a tip with the base pair whose midpoint it tops; winding from stored normals), and match groups are cleared on every converted shape. Both run inside `_convert_strips_or_shape`, so FLOR/STAT meshes sharing these sources heal on full re-runs. Diagnosis method: `tools/esm/cell_grass.py` per-cell grass lists × working-vs-crashing region diff → the defective meshes were exactly the types unique to crashing regions. A mesh with `has_triangles=False` also renders as NOTHING in NifSkope (that was the real cause of the "invisible in NifSkope" report, not vertex alpha).
 - **Grass CTD root cause #3 — intermediate NiNode wrapper on rotated sources (SOLVED 2026-07-10)**: Skyrim's grass instancer (`AddCellGrassTask` → `BSMultiStreamInstanceTriShape`) requires grass geometry as a **direct child of the BSFadeNode root** — every working grass NIF (vanilla + converted `gcgorsegrass`/`gclonggrass`) is flat `BSFadeNode → NiTriShape`. But the generic converter's Pass-6c wraps geometry in an inner NiNode whenever the **source root carries a non-identity rotation** (it bakes the rotation into a child NiNode because Skyrim honors child-NiNode rotation but ignores BSFadeNode root rotation for statics). The grass path never traverses that inner node → dereferences garbage (`rdi=0x0001000100010001`, `movzx ecx,[rdi+0x32]`) → **CTD** on any cell spawning the type. Hit TES4 **BWCattail01/02/03** (their source roots are rotated; the crash object was `BWCattail02` with a nested `NiNode "BWCattail02"`). Fix: `grass_profile._flatten_grass_root()` (runs inside `apply_grass_profile`) bakes each plain NiNode wrapper's transform into its geometry's verts+normals and re-parents the geometry onto the root, dropping the empty NiNode — world-space geometry preserved (verified: Z height extent unchanged). Only collapses bare NiNode wrappers holding pure geometry (no collision/controller/extra-data). Diagnosis: crash log named `tes4_bwcattail02.nif` + `BSFadeNode`/`NiNode` both named "BWCattail02"; block dump vs a working converted grass NIF showed the extra nesting; source root rotation identity=False (vs gcgorsegrass identity=True, which stayed flat).
 - Known remaining grass-NIF oddities (not crash-related, grass renders): most grass tex[1] `_n.dds` normal maps don't exist (vanilla grass points tex[1] at `textures\effects\HighFrequencyNormals.dds` or the literal string `NOR`); bwcattail03 references BWCatTail02.dds which is absent from the extracted BSAs.
 - **BSHeartland.esm is the best reference for "custom worldspace + custom grass records that provably work"** — compare against it before vanilla when a worldspace-scoped feature is dead.
-- Grass NIFs additionally get the vanilla grass shader profile (`asset_convert/grass_profile.py`, run by `asset_pipeline.convert_meshes`; models identified from the export's `GRAS.txt`): NiAlphaProperty alpha-test only (blend bit clear), SLSF1 OwnEmit+VertexAlpha set / Specular clear (Specular + glossiness 0 = pow(NdotH,0)=1 white-out), emissive ×1.0, gloss 80, spec white/1.0, lighting effects 0.3/2.0, clamp 0 — matching every vanilla LE grass mesh in `references/Skyrim Meshes/meshes/landscape/grass/`. Geometry/UVs/vertex-color alpha (wind weight) preserved.
+- Grass NIFs additionally get the vanilla grass shader profile (`asset_convert/nif/grass_profile.py`, run by `asset_pipeline.convert_meshes`; models identified from the export's `GRAS.txt`): NiAlphaProperty alpha-test only (blend bit clear), SLSF1 OwnEmit+VertexAlpha set / Specular clear (Specular + glossiness 0 = pow(NdotH,0)=1 white-out), emissive ×1.0, gloss 80, spec white/1.0, lighting effects 0.3/2.0, clamp 0 — matching every vanilla LE grass mesh in `references/Skyrim Meshes/meshes/landscape/grass/`. Geometry/UVs/vertex-color alpha (wind weight) preserved.
 - 8 Shivering Isles grass models (Plants\Dementia\*, Plants\Mania\*) are absent from the extracted BSAs — their GRAS records exist but have no mesh until SI assets are extracted.
 
 ## Terrain/LOD/LAND-adjacent asset notes
@@ -181,7 +182,7 @@ fast as the size). Guarded by
 ### Distant LOD generation (one-click, rebuilt 2026-07-06) — `convert.py` Phase 8 `phase_lod`
 Two pieces, both native, both re-enabled in the pipeline (`generate_lod` + `generate_terrain_lod`).
 
-**Terrain LOD** (`asset_convert/terrain_lod.py` + `terrain_lod_textures.py`): per-tile `.btr` heightmap NIF + composited diffuse `.dds` + heightmap-derived BC5 normal `.dds`, LOD levels 4/8/16/32. TES4Tamriel = 1301 tiles.
+**Terrain LOD** (`asset_convert/lod/terrain_lod.py` + `terrain_lod_textures.py`): per-tile `.btr` heightmap NIF + composited diffuse `.dds` + heightmap-derived BC5 normal `.dds`, LOD levels 4/8/16/32. TES4Tamriel = 1301 tiles.
 - **The old diffuse was the bug**: it upscaled raw LAND VCLR vertex colors → a blurry color grid (why distant terrain looked wrong). FIX: `terrain_lod_textures.composite_cell()` composites the REAL landscape textures — resolve LTEX FormID→diffuse via `build_ltex_texture_map` (LAND BTXT/ATXT → LTEX.TNAM → TXST.TX00 = `tes4\landscape\*.dds`), then per quadrant blend base + alpha layers using the ATXT/VTXT opacity grid (17×17, pos=row*17+col, sorted by ATXT layer index), ×VCLR shading at 0.4 strength (full x2 caused hard cell seams). Landscape UV repeats every 2 cells.
 - **Compositor orientation contract (fixed 2026-07-09 — the "large single color areas" bug was three separate defects):**
   1. **Quadrants with no BTXT base layer** (22.6% of Tamriel quadrants, whole sea floor) rendered flat grey-128. The engine's default for unpainted land is `Landscape\Default.dds` → `DEFAULT_LAND_TEXTURE = tes4\landscape\default.dds`. Cells with NO LAND record now also composite (default texture) instead of a flat fill.
@@ -195,9 +196,9 @@ Two pieces, both native, both re-enabled in the pipeline (`generate_lod` + `gene
 - Normal map derived from the heightmap gradient (`_heightmap_normal_rgb` + real BC5 via `_encode_bc4_block`), replacing the old flat normal so distant terrain is lit.
 - Debug single tiles without a full run: `python tools/lod/terrain_lod_render.py` (rebuilds specific tiles in-process, reports water quads, dumps diffuse PNG). `python -m tools.lod.terrain_lod_tex_probe [--cell X Y]` audits LTEX→TXST→dds resolution and per-cell layers.
 - Validate with `python tools/lod/terrain_lod_render.py --esm output/oblivion.esm/oblivion.esm --worldspace TES4Tamriel --cell X Y --radius R` → side-by-side hillshade + composited diffuse (the primary iteration tool; do NOT byte-match vanilla .btr). `tools/lod/lod_nif_inspect.py` dumps .btr/.bto geometry+shader.
-- **🔴 A worldspace a MASTER defines is ALWAYS sourced from that master, with the plugin as an OVERLAY — never from the plugin alone, however much terrain it adds** (2026-08-11, Tamriel.esp). `convert.py::_records_esm` used to hand record ownership to whichever file held the *bulk* of the LAND records. That silently inverts for a plugin which **extends** a master's worldspace rather than patching it: Tamriel.esp adds a landmass around Cyrodiil (99,910 LAND vs Oblivion.esm's 31,823), won ownership, and every tile was then built from the plugin ALONE — all of the master's own terrain was missing from the heightmap and `_fill_missing` edge-extended it into flat plateaus. Symptom: tile-sized discontinuities along the vanilla border, **worst at level 32** where one tile spans 32×32 cells (tile `32.0.-32` had 86 of 1024 cells and encoded world Z `4096..16416` instead of `-4576..20152`; tile `32.0.0` had ZERO cells and rendered dead flat). The tell is that the only level-32 tiles that looked *correct* were the two the plugin never regenerated, so the master's copy survived. Record COUNT never distinguished "patches a worldspace" from "extends a worldspace" and must not decide ownership — the overlay path already expresses "master's terrain + this plugin's edits" correctly and is what the DLC/override case always used. Verify with `Parsing LAND records from <master>, <plugin>` in the run log and a LAND count ABOVE the plugin's own (110,095 vs 99,910 here); a single-file parse line means the bug is back.
+- **🔴 A worldspace a MASTER defines is ALWAYS sourced from that master, with the plugin as an OVERLAY — never from the plugin alone, however much terrain it adds** (2026-08-11, Tamriel.esp). `convert.py::_records_esm` used to hand record ownership to whichever file held the *bulk* of the LAND records. That silently inverts for a plugin which **extends** a master's worldspace rather than patching it: Tamriel.esp adds a landmass around Cyrodiil (99,910 LAND vs Oblivion.esm's 31,823), won ownership, and every tile was then built from the plugin ALONE — all of the master's own terrain was missing from the heightmap and `fill_missing` edge-extended it into flat plateaus. Symptom: tile-sized discontinuities along the vanilla border, **worst at level 32** where one tile spans 32×32 cells (tile `32.0.-32` had 86 of 1024 cells and encoded world Z `4096..16416` instead of `-4576..20152`; tile `32.0.0` had ZERO cells and rendered dead flat). The tell is that the only level-32 tiles that looked *correct* were the two the plugin never regenerated, so the master's copy survived. Record COUNT never distinguished "patches a worldspace" from "extends a worldspace" and must not decide ownership — the overlay path already expresses "master's terrain + this plugin's edits" correctly and is what the DLC/override case always used. Verify with `Parsing LAND records from <master>, <plugin>` in the run log and a LAND count ABOVE the plugin's own (110,095 vs 99,910 here); a single-file parse line means the bug is back.
 
-**Object LOD + tree billboards** (`asset_convert/lod_gen.py` via `external/lodgen/LODGenx64.exe`): STAT/etc. flagged `0x8000` (Distant LOD)/`0x10000000` (World Map) by size in the importer get baked into `.bto`. TREE refs render as **crossed-quad billboard cards** via LODGen's FlatTextures mechanism (`_tree_billboard` points the LOD "model" at `tes4\trees\billboards\<sptstem>.dds` — Oblivion ships 118 billboard renders; `_write_flat_textures` emits the descriptor + a normals file so cards are lit + `_ensure_white_dds`). 91 flat textures, 716/734 LOD4 .bto contain tree billboards. `.btt`/`.lst` vanilla tree-LOD format was deliberately NOT reverse-engineered (risky, unvalidatable) — flat cards in .bto is the reliable Skyblivion path.
+**Object LOD + tree billboards** (`asset_convert/lod/lod_gen.py` via `external/lodgen/LODGenx64.exe`): STAT/etc. flagged `0x8000` (Distant LOD)/`0x10000000` (World Map) by size in the importer get baked into `.bto`. TREE refs render as **crossed-quad billboard cards** via LODGen's FlatTextures mechanism (`_tree_billboard` points the LOD "model" at `tes4\trees\billboards\<sptstem>.dds` — Oblivion ships 118 billboard renders; `_write_flat_textures` emits the descriptor + a normals file so cards are lit + `_ensure_white_dds`). 91 flat textures, 716/734 LOD4 .bto contain tree billboards. `.btt`/`.lst` vanilla tree-LOD format was deliberately NOT reverse-engineered (risky, unvalidatable) — flat cards in .bto is the reliable Skyblivion path.
 - **GOTCHA**: `LODGenx64.exe` runs with cwd=external/lodgen/ → `PathData=` MUST be absolute (`Path(output_dir).resolve()`) or it fails its Data-dir check (exit -1, log "No Data directory"). LODGen's "Oh crap N = N = ..." stderr spam is a harmless degenerate-triangle notice, not an error.
 - **GOTCHA — a geometry-rooted NIF kills the ENTIRE worldspace's object LOD** (found 2026-07-27, Morrowind_ob.esm): `LODGenx64` casts every LOD mesh's root block to `NiNode` unchecked, so a root that is a bare `NiTriShape`/`NiTriStrips` throws `System.InvalidCastException: Unable to cast … NiTriShape to … NiNode` **on a worker thread, unhandled** → the process dies, writes NO log (the stale log is the previous worldspace's, so it looks like LOD "just didn't run"), and the worldspace ends up with a single junk `.bto`. Two 4-triangle `bcscum02/03.nif` scum patches cost Morrowind_ob all 75,316 of its LOD references. Two independent guards now exist:
   1. `nif_converter` wraps a geometry root in a `NiNode` before the usual `NiNode→BSFadeNode` step (vanilla census: 400/400 sampled Skyrim meshes have a NiNode-derived root — `BSFadeNode` 340, `NiNode` 55, `BSMasterParticleSystem` 2, `BSLeafAnimNode` 3; **zero** geometry roots, so this is invalid for Skyrim regardless of LODGen).
@@ -286,7 +287,7 @@ silent-failure properties).
 
 ## FO3/FNV keys LOD by EditorID
 
-**Code:** `asset_convert/terrain_lod_falloutnv.py`
+**Code:** `asset_convert/lod/terrain_lod_falloutnv.py`
 
 `shipped_lod_worldspaces` treats the source game's own shipped LOD assets as
 the authority on which worldspaces deserve distant LOD. Oblivion and Nehrim key
@@ -312,9 +313,160 @@ rank worldspaces, so every file under a worldspace's directory counts,
 `blocks` and `normals` subfolders included.
 
 
+## <a id="lod-suppliers-vs-contributors"></a>Overlay scoping must not scope ASSETS
+
+**Code:** `_plan_jobs` in `tools/release/create_lod.py`
+
+Two different questions get asked about the plugins around a worldspace's
+owner, and answering both with one list loses textures.
+
+*Which plugins are overlaid as RECORDS* is deliberately narrow. Depending on a
+worldspace's owner is not the same as editing it: `Morrowind_ob.esm` rests on
+`Oblivion.esm` and so passes the dependency gate for all 18 of its
+worldspaces, while placing nothing in any of them — 18 parses of a 206 MB file
+to merge zero records. A plugin whose ESM cannot be read is kept rather than
+dropped, because an unnecessary overlay costs time and a missing one costs LOD.
+
+*Which plugins SUPPLY assets* is wider, and scoping it the same way is wrong. A
+plugin that places no references can still define the base objects that another
+plugin's references point at. The Morroblivion compatibility patch is exactly
+that shape: **3,215 base records and no CELL or REFR dump at all**. Filtered
+out of the asset roots, it took its texture tree with it, and LODGen reported
+**73 LOD textures missing** — every one of them a file sitting in
+`output/Morrowind-Morroblivion-Compatibility.esp/textures/tes4/`.
+
+So `_plan_jobs` returns both: `contributors` (scoped, overlaid as records) and
+`suppliers` (every dependency-legal plugin, feeding `master_mesh_dirs`,
+`master_texture_dirs` and `far_nif_dirs`).
+
+The dependency gate itself is not optional in either list. A plugin that does
+not rest on the owner cannot legally touch its worldspace, and overlaying one
+anyway merges two unrelated games: `Nehrim.esm` is standalone, and stacking it
+onto Oblivion's `TES4Tamriel` would pull its FormIDs into Cyrodiil's tiles.
+
+## <a id="lodgen-rejects-animated-roots"></a>LODGen rejects animated NiNode roots
+
+**Code:** `_LODGEN_BAD_ROOTS` / `_ninode_root_names` in `asset_convert/lod/lod_gen.py`
+
+`_root_is_ninode` excludes meshes whose root block would crash LODGen's
+`NiNode` cast. It derived the accepted set from the pyffi class tree — every
+`NiNode` subclass — and that is too generous.
+
+`NiBSAnimationNode` **is** a `NiNode` subclass (`NiBSAnimationNode -> NiNode ->
+NiAVObject`), so it passed the guard, and LODGen still threw
+`NullReferenceException` in `ParseNif` (`LODApp.cs:1386`). These are
+Morrowind-era animated roots that survive conversion intact: the four models
+that killed a Tamriel Rebuilt bake one after another —
+`T_Mw_FloraOW_Bulbshroom_01`/`_03`, `T_Glb_TerrWater_Waterfall_01`/`_03` — all
+have one.
+
+Censused over 40,962 converted meshes (Tamriel Data + Morroblivion):
+
+| Root type | Count |
+|---|---|
+| BSFadeNode | 39,754 |
+| NiNode | 1,151 |
+| NiBSAnimationNode | 56 |
+| NiSwitchNode | 1 |
+
+57 meshes, but any ONE of them entering a bake costs the whole worldspace's
+object LOD — the failure is not proportional to the count.
+
+So the derived set is filtered by `_LODGEN_BAD_ROOTS`. The excluded types are
+the ones whose semantics are a controller or a selector rather than a plain
+transform: animation (`NiBSAnimationNode`, `NiBSParticleNode`), runtime
+selection (`NiSwitchNode`, `NiLODNode`, `NiBillboardNode`), and the non-render
+roots (`RootCollisionNode`, `AvoidNode`). An excluded mesh loses only its own
+distant LOD and pops in at load distance, which is what the pre-existing
+`skipped_unsafe` path already does for unreadable meshes.
+
+This is the pre-flight half of the defence; the retry
+([#lodgen-nullreference-retry](#lodgen-nullreference-retry)) covers roots that
+pass the guard and still throw.
+
+## <a id="lodgen-nullreference-retry"></a>LODGen dies on NullReferenceException, and the retry
+
+**Code:** `run_lodgen` in `asset_convert/lod/lod_gen.py`
+
+`LODGenx64.exe` 3.0.36.0 replaced 2.2.0.0 because 2.2 handles no exceptions: a
+model it cannot parse throws on a ThreadPool worker and kills the process, so
+every tile not yet written is silently lost. Measured on Nehrim: 28 of 418
+tiles baked, twice in a row, because of ONE model (`LeyawiinHouseLower01`, 5
+references in the entire game). The fault is inside LODGen, not the mesh —
+repairing that model's tangent flag and recomputing its normals each made 2.2
+crash EARLIER.
+
+3.x catches `ArgumentOutOfRangeException` per object, prints
+`Error processing <EditorID>` and carries on. It does NOT catch
+`NullReferenceException`, which unwinds the parallel loop and ends the run with
+the same total loss.
+
+Measured on the Morroblivion + Tamriel Data + Tamriel Rebuilt load order: an
+input of **286,985 references** produced **26 level-4 tiles in 7 seconds** and
+no level 8/16/32 at all, because `T_Glb_TerrWater_Waterfall_01` threw. The run
+looked clean — exit code carries no signal (3.x returns nonzero whenever any
+object failed, even on a complete bake), and "tiles > 0" was satisfied by the
+26. In game that is a worldspace with essentially no distant objects.
+
+So a run whose output contains `NullReferenceException` is retried with every
+model named in an `Error processing` line stripped from the input
+(`_drop_lodgen_refs`, matching the base EditorID at field index 9 of a
+reference row). Each attempt bans one more faulting model, bounded at 4; a
+clean run never retries. If it still dies, `run_lodgen` now returns False
+instead of reporting success on a truncated bake.
+
+This complements the pre-flight `skipped_unsafe` check, which excludes meshes
+that are unreadable or have a non-NiNode root. That predicts the crashes it
+can; the retry covers the ones it cannot.
+
+### <a id="lodgen-output-must-stream"></a>Its output must be STREAMED, not captured
+
+Parsing the output for `Error processing` and `NullReferenceException` is why
+it is piped rather than inherited — a piped child also cannot pop up its own
+console window under the console-less GUI launcher. But `capture_output=True`
+withholds every line until the child exits, and a worldspace bake runs for
+many MINUTES: the Morrowind run above printed its whole per-tile progress log
+(`Finished LOD level 4 coord ...`) in one dump at the end, so the pipeline
+looked hung throughout. `run_streamed` (`subprocess_flags.py`) echoes each
+line as it arrives and still returns the full text the retry logic parses.
+
+`--skyblivionTexPath` is deliberately NOT passed: it prepends an extra `tes4\`
+to texture paths already under `textures	es4\`, doubling the prefix and
+causing null-pointer crashes.
+
+## <a id="lod-for-plugins-that-only-edit"></a>LOD for plugins that only EDIT a worldspace
+
+**Code:** `_add_edited_worldspaces` in `asset_convert/lod/sibling_lod.py`
+
+`lod_capable_worldspaces` treats the SOURCE GAME's shipped LOD assets as the
+authority on which worldspaces deserve LOD. That reasoning holds for
+Oblivion-format content, where every plugin extending a landmass ships LOD for
+the master's worldspace, and it is why Oblivion LOD has always been correct.
+
+It fails for a plugin that adds land to someone else's worldspace while
+shipping no LOD of its own. Morroblivion ships Oblivion-format LOD for
+`WrldMorrowind` and qualifies. Tamriel Rebuilt is Morrowind-native, overrides
+that same worldspace (`00380000`), and ships no LOD assets at all, so
+`shipped_lod_worldspaces` returned `[]` and it contributed nothing to the bake.
+
+Measured: TR holds **10,368 LAND records** over grid X -42..99, Y -116..67,
+but the baked tiles covered only X -64..44, Y -32..56 -- Morroblivion's island.
+Every TR cell east, west and south of it rendered with no distant terrain.
+
+So after the per-plugin scan, a plugin joins any ALREADY-QUALIFIED worldspace
+it puts exterior cells in. The qualifying judgement still comes from a plugin
+that ships LOD -- this only widens who contributes to a worldspace already
+being built, and never invents one. That keeps the debug-worldspace false
+positives out (`TestGatekeeper` et al. are qualified by nobody) while letting
+Morrowind-native content ride on the grid its sibling established.
+
+Membership is read from the CELL dump's `ParentWRLD`, not the converted ESM:
+the scan runs before the bake and for plugins that may not be converted yet,
+and the dump is the same authored data the extent pass measures from.
+
 ## Why the WRLD scan includes masters
 
-**Code:** `_worldspace_edids` in `asset_convert/terrain_lod.py`
+**Code:** `worldspace_edids` in `asset_convert/lod/terrain_lod.py`
 
 An OVERRIDE plugin ships LOD assets for a worldspace it does not itself define.
 The GOTY `DLCShiveringIsles.esp` is an 85-byte header-only stub -- every
@@ -326,3 +478,424 @@ can resolve, so the worldspace silently drops out of the LOD set.
 A master's records are also NOT reliably a sibling directory: an imported mod's
 plugins live inside their mod's shared folder, so `.parent` is that folder
 rather than `export/`. Masters resolve through the source registry instead.
+
+## QEM decimation: the budget and its tuning constants
+<a id="qem-decimation-tuning"></a>
+
+**Code:** `asset_convert/lod/mesh_decimate.py`, called from
+`asset_convert/lod/lod_far_gen.py`.
+
+The budget targets roughly vanilla Skyrim object-LOD density +25%. Vanilla
+Tamriel spends **~11,000 bytes of object LOD per CELL at level 4** (measured
+from `Skyrim - Meshes1.bsa`); before this pass we spent **~410,000, i.e. 37x
+vanilla**, because decimation was structurally broken and every constant had
+been clamped down to hide the damage:
+
+- Shapes were decimated **independently**, so shared rims drifted apart and
+  tore holes. `_BOUNDARY_WEIGHT` froze both rims to limit the drift, and
+  `_MIN_SRC_TRIS`/`_MIN_TRIS` deleted small shapes rather than risk them.
+- Collapses kept the **original UV**, so charts were squeezed into a third of
+  their proper footprint. `MAX_DEV_FRAC` was clamped to 0.03 to limit the
+  shearing, which stalled reduction at ~40% of source verts against a nominal
+  8% target.
+
+Both defects are fixed — one welded topology per model, UVs interpolated onto
+the survivor — so the defensive constants are gone and the real budget stands
+on its own.
+
+### Why welding matters
+
+Decimating a model as ONE welded topology is what keeps it watertight. A rim
+shared by two shapes is a free boundary to both: each side chooses different
+survivors, the rims drift apart, and the gap is the hole. Welding makes the
+shared rim one graph node, so a collapse moves both sides at once.
+
+### The constants
+
+| Constant | Value | Role |
+|---|---:|---|
+| `WELD_EPS` | 1e-3 | position weld tolerance, game units |
+| `MAX_DEV_FRAC` | 0.25 | error floor, as a fraction of the model diagonal |
+| `TOPO_BOUNDARY_WEIGHT` | 6.0 | budget multiplier per unit of boundary fraction |
+| `_BOUNDARY_WEIGHT` | 1.0 | boundary-edge constraint quadric weight (× len²) |
+| `_STITCH_FRAC` | 0.008 | proximity-stitch tolerance, fraction of the diagonal |
+| `_STITCH_MAX_EDGE_MULT` | 1.0 | stitch radius cap, in median edge lengths |
+| `_EDGE_LEN_REG` | 0.5 | edge-length regularization (× mean face area) |
+
+`_BOUNDARY_WEIGHT` used to be 8.0, to stop the two sides of a shared rim
+drifting apart — which it could never do, because each side was decimated
+separately and nothing made them agree. Now that a model is one welded
+topology the seam cannot open, so it only has to hold genuinely open rims
+(window frames, wall tops, leaf-card edges) a little longer than interior
+geometry.
+
+`MAX_DEV_FRAC` at 0.25 is deliberately loose: at LOD range (2+ km) a quarter
+of the model diagonal is well under a pixel of silhouette.
+
+`TOPO_BOUNDARY_WEIGHT` scales the budget by how much of the model is open rim,
+since rim vertices are pinned by the open-rim guard — a 30%-rim building gets
+2.8x the vertices of a closed rock at the same ratio.
+
+`_STITCH_MAX_EDGE_MULT` caps the stitch radius so a merge never crosses more
+than the scale of the authored detail.
+
+### Stitching: why an exact weld is not enough
+<a id="qem-stitch-pass"></a>
+
+An exact position weld only joins vertices that **coincide**. Game models are
+not built that way: `piratecabin01` is 14 open sheets that overlap and
+interpenetrate — visually one solid cabin, topologically **33 separate
+components**, with only 20 of 91 shape pairs having any vertex within a unit of
+each other. Decimating that divides one budget among 33 pieces, which grinds
+each to nothing and takes whole planks with it.
+
+So nodes that are merely CLOSE are merged, not just identical ones. The
+tolerance is relative to the model, because "touching" means something
+different on a 100-unit crate and an 8,000-unit fort. The stitch runs before
+quadrics are built, so the collapse sees one connected surface and simplifies a
+plank into its neighbour exactly as it simplifies one rock face into the next.
+
+**The radius is capped by the model's DETAIL scale, not just its overall
+size.** A fraction of the diagonal is right for a building, whose planks are
+large and genuinely overlap, but on thin repeated geometry it exceeds the size
+of the parts themselves and fuses things that merely pass near each other:
+`mainmast01` is rigging with a 2,968-unit diagonal and a 9-unit median edge, so
+a 24-unit radius welded separate ropes into one and the collapse dragged them
+together. Measured across models, radius / median-edge cleanly separates the
+two cases:
+
+| model | ratio | wants stitching |
+|---|---:|---|
+| `piratecabin01` | 0.38 | yes |
+| castle | 0.79 | yes |
+| IC wall | 1.78 | no |
+| `mainmast01` | 2.62 | no |
+
+Hence the cap at the median edge length. When a group is merged the
+representative keeps its **original** position — averaging the group would pull
+the surface off the silhouette.
+
+### Why welding is what stops seams tearing
+<a id="qem-weld-seams"></a>
+
+`tri_mat` tags each input triangle with the material (source shape) it came
+from. It is carried through the collapse unchanged and returned alongside the
+surviving triangles, which is what lets a whole model be welded into ONE
+topology and decimated together: shared rims between shapes become genuinely
+shared graph nodes, so a collapse moves both sides at once and the seam cannot
+tear. The triangles are split back out per material afterwards.
+
+Decimating each shape separately instead let the two sides of a seam pick
+different survivors and drift apart. Measured on `centrancerockmosslg01`, the
+shared boundary went from **32% welded to 9%**, and the gap opened from **3.8
+to 93.4 units** — 6% of the object diagonal.
+
+### The four collapse guards
+<a id="qem-collapse-guards"></a>
+
+Each guard exists because removing it produced a specific measured failure.
+
+**Open-rim guard.** A boundary vertex may only collapse INTO another boundary
+vertex, so an open rim simplifies along itself and stays where the author put
+it. The constraint quadrics cannot prevent this on their own, because a
+half-edge collapse is charged the SURVIVOR's quadric — they only penalise
+moving a rim vertex ALONG its edge line, and say nothing about it being
+absorbed upward into the body. Measured on `rockgreatforest1125rdm`, whose 106
+rim verts all sit at z=-241.2: without the guard only **12 of 178 rim nodes
+survived and the rim rose 162 units** — 34% of the model height — leaving the
+rock floating above the terrain.
+
+**Per-component floor.** A model is often many DISCONNECTED pieces —
+`piratecabin01` is 33 planks, beams and panels — and a global vertex budget
+says nothing about how it should be split between them. Asking for 54 vertices
+across 33 pieces is ~1.6 each, far below the 4 a closed piece needs, so the
+loop ground whole planks out of existence and the "holes" were missing parts,
+not torn surface. Every component gets its own floor of `_COMP_MIN = 4`: four
+vertices is the minimum for a closed piece (a tetrahedron), and while a flat
+open sheet still reads at 3, one wasted vertex on a plank is nothing against
+the plank disappearing.
+
+**Isolation guard.** Decimation must never leave a triangle floating on its
+own. A collapse removes the faces containing edge (u,v) and rewrites the rest;
+if that would strand any surviving neighbour as a triangle sharing no edge with
+another live face, the collapse is refused. Without it a low budget shreds a
+surface into loose confetti rather than simplifying it, which reads in-game as
+holes with stray triangles floating in them.
+
+**Normal-flip guard.** A collapse is rejected if it would flip an adjacent
+face's normal.
+
+### Stranded vertices must be counted
+<a id="qem-stranded-verts"></a>
+
+A degenerating face can strand a THIRD vertex — not just `u` or `v` — by taking
+its last face away. Those have to be counted, or `alive` drifts above the real
+vertex count and the loop keeps collapsing long after the budget is met:
+`piratecabin01` asked for 54 vertices and was ground down to **14, losing 10 of
+its 14 shapes**.
+
+### UV charts: why the corner UV is mutable
+<a id="qem-uv-charts"></a>
+
+A collapse u→v moves the corner's POSITION to v while the corner keeps u's
+ORIGINAL UV. The triangle then covers the geometry both vertices used to span,
+but its UV footprint is unchanged — so the chart is squeezed into less and less
+of the texture as collapses accumulate. Measured on
+`rockgreatforest1500fgdrlichen`: the far mesh retains **96.3% of the source's
+geometric area but only 32.3% of its UV area**, leaving 80% of triangles below
+half the source texel density. On `icexteriorwall02` the density spread reached
+**53,303x** — a single-texel streak, which reads in-game as a garbled or
+invisible texture.
+
+The fix is a MUTABLE UV per corner that moves with the vertex: when u collapses
+into v, the corner's UV becomes the point in u's chart corresponding to v's
+position. The face still holds its other two corners, whose UVs are known and
+whose positions are unchanged, so the face defines a local affine map from
+position to UV; solving it for v's position gives exactly where v lands in this
+face's chart. UVs are piecewise-linear over the surface, so this is exact and
+keeps the chart's area in step with the geometry it covers. A degenerate face
+leaves the UV unchanged.
+
+A corner's UV is per-FACE once it starts moving, since two faces sharing a
+vertex can sit in different charts, so each corner gets its own slot.
+
+### Deliberately NO component-pruning fallback
+<a id="qem-no-component-pruning"></a>
+
+An earlier version dropped whole connected components smallest-area-first when
+collapses stalled above target. That was written when each SHAPE was decimated
+alone, so a "component" meant a disconnected island within one shape. Now that
+a model is decimated as ONE welded soup, every shape is its own component, and
+the same code deleted entire shapes to meet the budget: `piratecabin01` went
+from **14 shapes / 2,686 verts to 4 shapes / 15 verts**, and
+`ruinshallnxdeadenda01` lost most of its geometry the same way.
+
+Overshooting the budget is far better than deleting parts of the model, so a
+shape is simply left heavier than target when the error floor genuinely blocks
+further collapses.
+
+### Scalar arithmetic in the inner loop
+<a id="qem-scalar-inner-loop"></a>
+
+`cost_of`, `flips` and `uv_at` are written out longhand in plain Python
+scalars rather than NumPy. They run ~100k times per shape on 3-vectors, where
+NumPy's per-call dispatch overhead dwarfs the arithmetic — `np.cross` alone
+spent more time in `normalize_axis_tuple`/`moveaxis` than on the cross product.
+The corner UVs are plain `(u, v)` tuples for the same reason.
+
+### The budget must be counted in WELDED nodes
+<a id="qem-budget-welded-nodes"></a>
+
+The target handed to `qem_decimate` must be expressed in **welded nodes**,
+because that is what the collapse loop counts down. A NIF's vertex array splits
+a position once per UV/normal seam: measured across greatforest `_far.nif`,
+**310 stored vertices for 62 distinct positions — 5.0x**. So a ratio applied to
+the stored count asks for far more geometry than actually exists.
+
+That is what made the far-ring tiers inert. `TIER16`'s ratio of 0.25 against
+the stored count worked out to **1.26x the welded count**, so `alive > target`
+was false on entry, the loop never ran, and `_far16.nif` was written as a
+byte-for-byte copy of `_far.nif`.
+
+## Scoping a LAND scan to one worldspace
+<a id="land-scan-scoping"></a>
+
+**Code:** `scan_land_file` in `asset_convert/lod/terrain_lod.py`.
+
+`known_wrld_fid` is the target worldspace's FormID as resolved from the file
+that DEFINES it. An override plugin edits a master's worldspace through the
+master's GRUPs — its records sit under a type-1 GRUP labelled with the master's
+WRLD FormID — while shipping no WRLD record of its own. Passing the master's
+FormID in is what lets those edits be scoped correctly instead of falling back
+to a wildcard.
+
+`allow_unscoped` decides what "this file has no such WRLD record, and no FormID
+was supplied" means:
+
+- **True** (the default, correct for the file the worldspace is sourced FROM)
+  keeps the historical fallback: take every LAND record, because a file scanned
+  for its own worldspace may name it differently, and returning nothing would
+  silently produce no terrain at all.
+- **False** is mandatory for OVERLAYS, where the same fallback is a
+  data-corruption bug: it imports the plugin's OTHER worldspaces as if they
+  were this one. `Morrowind_ob.esm` ships no `TES4Tamriel` WRLD, so all **5,796
+  of its Vvardenfell cells** were collected into Cyrodiil's heightmap,
+  overwriting **5,787 of Oblivion's own Tamriel cells** and stamping
+  Vvardenfell across central Cyrodiil's distant terrain.
+
+A CELL record an override ships carries only the fields its author changed, so
+its XCLC grid coords may be absent. Coordinates are resolved against the coords
+already learned from earlier files in load order before falling back to this
+file's own.
+
+## LODGen rejects poisoned floats, and drops the whole worldspace
+<a id="lodgen-poisoned-floats"></a>
+
+**Code:** `finite` in `asset_convert/lod/esm_scan.py`.
+
+LODGen's C# parser rejects a poisoned line and then emits **NO .bto tiles for
+the entire worldspace**, so one bad REFR costs all of its object LOD. Two
+distinct poisons appear in real plugins, and they fail differently:
+
+| value | formats as | LODGen error |
+|---|---|---|
+| NaN (`0x7FC00000`) | `nan` | "Input string was not in a correct format" |
+| `-FLT_MAX` (`0xFF7FFFFF`) | a 40-digit literal | "Value was either too large or too small for a Single" |
+
+The second is **finite**, so an `isfinite()` check alone lets it straight
+through — hence the magnitude bound as well. `_PLACEMENT_LIMIT` is 1e9;
+Oblivion's largest worldspace spans ~2e6 units, so a sane coordinate never
+comes close.
+
+TWMP Valenwood/Elsweyr ships **505 REFRs** carrying one or the other in DATA's
+RotZ. A MASTER's record reaches this parser without passing the import-side
+`get_float` clamp, so both screens are needed here too.
+
+## Level 16 is gated by size, not a header flag
+<a id="level-16-is-gated-by-size"></a>
+
+**Code:** `lod_gen._lod_meshes_for`, `lod_far_gen.generate_far_nifs`.
+
+Level 16 is the world-map ring. It used to be gated on record flag
+`0x10000000`, which the import set on every STAT/TREE over 1024 units as
+"Show in World Map". That flag does not exist (Skyrim.esm sets it on 143 FURN
+and 1 STAT of 9,720 — see
+[ck_vs_game_missing_objects.md](ck_vs_game_missing_objects.md#no-show-in-world-map-flag)),
+so the import stopped writing it. The LOD stage kept gating on it, and from
+that commit on every worldspace baked all-empty level-16 tiles: WrldMorrowind
+produced 87 tiles of 236 bytes each, and the LODGen input carried zero level-16
+model paths across 286,612 rows.
+
+The gate is now the same size gate level 8 uses (`LOD8_MIN_SIZE`): anything
+large enough to be baked two cells out is baked into the far ring as well,
+using its `_far16` tier when one was derived. Trees already worked this way.
+
+## The parsed-ESM cache
+<a id="parsed-esm-cache"></a>
+
+**Code:** `parse_esm_cached` in `asset_convert/lod/esm_scan.py`.
+
+`generate_lod()` is called ONCE PER WORLDSPACE and used to re-parse the whole
+plugin every time. Oblivion.esm ships 18 worldspaces and the parse is **5.7 s
+over 613 MB (1,017,612 refs)**, so ~103 s of the object-LOD stage was spent
+re-deriving byte-for-byte identical data.
+
+Keyed on `(path, mtime_ns, size)` so a rebuilt ESM is re-parsed rather than
+served stale.
+
+The cache holds the BASE plugin and its OVERLAYS together. It used to keep a
+single entry, which made the two uses evict each other: the overlay merge
+parses every overlay once per worldspace, so a 1-entry cache serving only the
+base still re-parsed ~930 MB of overlays 18 times — **114 s measured on the
+12-plugin selection, of which 4 s was useful.**
+
+The bound is the number of plugins in one run (a dozen), not a byte budget:
+these are compact index structures, and the raw `bytes` object is released
+inside `parse_esm` as soon as the scan finishes.
+
+🔴 The returned structures are treated as **READ-ONLY** by callers.
+`write_lodgen_input` builds its own per-worldspace views and `generate_lod`
+merges overlays into a COPY. If that ever stops being true this must hand out
+deep copies instead — the overlay merge in particular MUST NOT mutate what it
+is handed, now that the same object is served to the next worldspace.
+
+### The topology-aware budget
+<a id="qem-topology-budget"></a>
+
+A flat share of the vertex count assumes every model simplifies equally well,
+and they do not. A rock is one closed blob: **12%** of its vertices sit on an
+open rim, so almost every vertex is interior and free to collapse. A building
+is a pile of open sheets — `piratecabin01` is **30%** boundary,
+`ruinshallnxdeadenda01` **47%** — and those rim vertices are pinned by the
+open-rim guard.
+
+Give both the same 5% and the rock lands on a clean silhouette while the
+building runs out of collapsible interior and tears itself apart. Measured on
+the cabin, open edges went **11.5% (source) → 21% → 43%** as the target dropped
+500 → 300 → 54.
+
+So the budget scales by how much of the model is rim:
+
+```
+topo_scale   = 1.0 + TOPO_BOUNDARY_WEIGHT * boundary_fraction
+total_target = clamp(weld_nodes * ratio * topo_scale, _MIN_TOTAL_TARGET, cap)
+```
+
+A mostly-closed model keeps the base ratio; a rim-heavy one gets
+proportionally more vertices, which is what it needs to still read as itself.
+
+## The DDS block codec
+<a id="dds-block-codec"></a>
+
+**Code:** `asset_convert/texture/dds_codec.py`
+
+Split out of `terrain_lod.py`: nothing in it knows about terrain, every entry
+point takes a pixel array and returns bytes.  It lives under `texture/` because
+the parallax height-map writer shares its BC4 encoder.
+
+### <a id="dxt1-is-vectorised-over-blocks"></a>DXT1 is vectorised over blocks
+
+For each 4×4 block the encoder takes the per-channel min and max as the DXT1
+endpoints (`c0 > c1`, opaque 4-colour mode) and assigns each pixel the nearest
+of the four interpolated colours. The palette is re-expanded **from** 565 — the
+scalar version built its palette from `c565_to_rgb` of the quantised endpoints,
+and matching that is what keeps the output byte-identical.
+
+A 1024² tile is ~65k blocks, and the old per-block Python loop was the single
+hottest function in terrain LOD: **1.4s per LOD16 tile, ~33% of all tile time.**
+
+### <a id="dxt1-chunking-is-a-memory-fix"></a>The nearest-palette search is CHUNKED, and that is not an optimisation
+
+The whole-array form allocates `(N,16,4,3)` for the differences plus an
+`(N,16,4)` reduction, and `sum` promotes int32 to int64, so a 1024² tile
+(65,536 blocks) transiently needs **~80 MB**. That is survivable alone and fatal
+in parallel: with one worker per core, **29 of them peaked together and every
+level-16 tile died** on `Unable to allocate 32.0 MiB for an array with shape
+(65536, 16, 4)`.
+
+Chunking bounds the peak per worker regardless of tile size, and the explicit
+int32 accumulator halves what remains. The squared distance maxes at
+`3 × 255² = 195,075`, so int32 cannot overflow.
+
+### <a id="bc4-index-selection"></a>BC4 picks each index by NEAREST VALUE, not by arithmetic
+
+`encode_bc4_channel` argmins over the eight palette entries. The obvious
+cheaper form — quantise `hi - v` onto sevenths of the range and use the step as
+the index — is **wrong**, and `parallax.py` shipped it until it was measured
+against the format's own decode rule.
+
+The palette entries are integer **floors** of `((7-i)*hi + i*lo)/7`, so the true
+midpoint between adjacent entries sits slightly *below* the exact seventh
+boundary. Rounding onto exact sevenths therefore picks the lower entry for any
+value just under a boundary.
+
+Measured over 4,000 random blocks: argmin hits the theoretical optimum on
+**4000/4000**; the computed index misses on **293** and is never better on any
+block. The error scales inversely with the endpoint range — for endpoints
+108/100 it is wrong on **3 of the 9** representable values.
+
+That regime is exactly a parallax height field, which is downscaled 2× and
+blurred (radius 20/1000) before encoding. On a simulated blurred field
+**64.8% of blocks encoded differently and the computed index carried 73.4% more
+error**; pure gradients were unaffected, which is why it went unnoticed. There
+were no BC4 tests in `tests/test_parallax.py`.
+
+The arithmetic index existed to avoid the cost of searching eight entries in a
+per-texel Python loop, which was a real constraint. Vectorising over blocks
+removes the tradeoff rather than trading against it: on one machine, one
+512² level, the same input, the scalar computed index takes **0.062 s** and the
+vectorised search **0.009 s** — 6.7× faster *and* optimal. (The 0.34 s in the
+original note was a different machine and is not comparable to either.)
+
+### <a id="one-dds-header-builder"></a>One header builder, three formats
+
+`dds_header()` writes the 128-byte header for any compressed square texture,
+parameterised by FourCC and mip count. DXT1 and BC5 (`ATI2`) previously each
+hand-rolled the same layout — three copies, with the field names repeated as
+comments in each. The layout, in order: magic, `dwSize`, `dwFlags`,
+`dwHeight`, `dwWidth`, `dwPitchOrLinearSize` (the TOP mip), `dwDepth`,
+`dwMipMapCount`, `dwReserved1[11]`, the 32-byte pixel format (size, flags,
+FourCC, five unused masks), `dwCaps`, and four trailing reserved words.
+
+Mipmaps run down to 1×1, as vanilla Skyrim terrain LOD DDS files do. Tile size
+matches vanilla per LOD level: 1024 for LOD4/8, 2048 for LOD16/32.

@@ -13,7 +13,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from worker_budget import worker_count  # noqa: E402
+from worker_budget import worker_count
 
 _WORKER_COUNT = worker_count()
 

@@ -21,7 +21,8 @@ and must come through untouched, because its alpha is the entire silhouette.
 import numpy as np
 import pytest
 
-from asset_convert import lod_gen, texture_prune
+from asset_convert.lod import lod_gen
+from asset_convert.texture import texture_prune
 
 PIL = pytest.importorskip('PIL.Image')
 from PIL import Image  # noqa: E402

@@ -27,7 +27,7 @@ from script_convert.tes5.blocks import (
     hoist_quest_start_above_writes,
     scan,
 )
-from output_layout import assets_for  # noqa: E402
+from output_layout import assets_for
 
 
 # ===========================================================================
@@ -225,7 +225,7 @@ def build_script_context(export_dir: str, output_dir: str) -> dict:
     # for every mesh and no trap ever gets its SetMotionType release — see
     # CrossRefGraph.needs_havok_release.
     from tes5_import.mesh_bounds import load_mesh_bounds
-    from asset_convert.collision_extract import bounds_cache_is_current
+    from asset_convert.collision.collision_extract import bounds_cache_is_current
     _bounds_cache = str(assets_for(export_dir) / 'mesh_bounds_cache.json')
     # A cache from before the HELD bit existed loads fine and answers 0 for
     # every mesh, so the release silently vanishes from every converted script.

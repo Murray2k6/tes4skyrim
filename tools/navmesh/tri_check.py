@@ -30,9 +30,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from asset_convert import collision_extract as ce  # noqa: E402
-from tes5_import.navmesh import build, params  # noqa: E402
-from tools.navmesh.probe import load_cell, cell_geometry  # noqa: E402
+from asset_convert.collision import collision_extract as ce
+from tes5_import.navmesh import build, params
+from tools.navmesh.probe import load_cell, cell_geometry
 
 
 def surface_z_index(walk_tris, bucket=128.0):

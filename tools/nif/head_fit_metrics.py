@@ -42,11 +42,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scipy.spatial import cKDTree                                # noqa: E402
+from scipy.spatial import cKDTree
 
-from asset_convert import pyffi_monkey_patch as _patch           # noqa: E402,F401
-from pyffi.formats.nif import NifFormat                          # noqa: E402
-from asset_convert import head_fit                               # noqa: E402
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
+from pyffi.formats.nif import NifFormat
+from asset_convert.character import head_fit
 
 NIF_MAGIC = (b'Gamebryo', b'NetImmer')
 SHIPPED_DIR = os.path.join('output', 'Oblivion.esm', 'meshes', 'tes4',

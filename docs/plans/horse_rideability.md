@@ -30,16 +30,16 @@ per-plugin values from, so this is intentionally a constant, not derived data (s
 category of exception as horse animations, §2.3).
 
 ### Step 3 — Rider-side vanilla asset passthrough
-Add a `mount_assets` stage to `asset_convert/creature_pipeline.py` (horse-only): pull
+Add a `mount_assets` stage to `asset_convert/havok/creature_pipeline.py` (horse-only): pull
 vanilla `actors/character/behaviors/horsebehavior.hkx` +
 `animations/horse_rider/*.hkx` + `actors/horse/behaviors/horsebehavior.hkx` mount/
-dismount/ride-loop clips via `asset_convert/skyrim_assets.py` (cache in
+dismount/ride-loop clips via `asset_convert/sources/skyrim_assets.py` (cache in
 `export/skyrim_assets/`, same contract as every other vanilla-asset pull in this
 project — never touch `references/` at runtime). No conversion needed — these are
 already SSE-loadable Havok/NIF.
 
 ### Step 4 — Horse behavior graph: extend the quadruped template
-In `asset_convert/hkx_behavior.py`, add a `mount` branch to `build_behavior_xml` (only
+In `asset_convert/havok/hkx_behavior.py`, add a `mount` branch to `build_behavior_xml` (only
 emitted when `is_mount`): a `Ridden` state entered/exited by whatever event names
 vanilla actually uses (dump `horsebehavior.hkx` via `hkxcmd convert -v:XML` FIRST —
 don't guess event names, same rule as every other behavior-graph fact in this project)

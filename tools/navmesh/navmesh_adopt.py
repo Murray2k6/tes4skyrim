@@ -99,7 +99,8 @@ def load_plugin(plugin: str, offset: int = 1):
     export_dir = os.path.join('export', plugin)
     im, _bt, door_fids, base_model_by_fid, jobs = _load(export_dir, offset)
     collision = str(assets_for(export_dir) / 'collision_cache.bin')
-    geom_cache = im._navmesh_geom_cache(collision)
+    from tes5_import.navmesh import pool as navm_pool
+    geom_cache = navm_pool.navmesh_geom_cache(collision)
     dcc = str(assets_for(export_dir) / 'door_centers_cache.json')
     navm_worker.init_worker(base_model_by_fid, door_fids, collision, offset,
                             geom_cache, im.get_injected_formids(),

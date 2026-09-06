@@ -422,7 +422,7 @@ def _init_dispatch():
         # mesh with a real per-NPC length (NPC_.LNAM blending the .tri's
         # HairMorph), none of which survives substituting a vanilla Skyrim
         # hairstyle.  The length is baked per variant by
-        # asset_convert.hair_pipeline, which is why one HAIR record can emit
+        # asset_convert.character.hair_pipeline, which is why one HAIR record can emit
         # several HDPTs.
         # NOTE: GMST is skipped WHOLESALE above, but the ambient-dialogue
         # pacing settings are an exception — see AMBIENT_GMST_OVERRIDES below,
@@ -436,32 +436,6 @@ def _init_dispatch():
 
 # ---------------------------------------------------------------------------
 # Ambient-dialogue pacing (GMST)
-# ---------------------------------------------------------------------------
-# Oblivion has NO per-package chatter control (see DEFAULT_INTERRUPT in
-# pack_converter.py). It paces ambient dialogue GLOBALLY with these settings,
-# so they are the ONLY faithful mechanism available — and Skyrim's defaults are
-# dramatically faster, which is why converted NPCs quip constantly:
-#
-#   GMST                                  Oblivion   Skyrim   effect
-#   fAIGreetingTimer                         20.0      5.0    4x more often
-#   fIdleChatterCommentTimer                100.0     10.0    10x more often
-#   fAISocialchanceForConversation          100.0     10.0
-#   fAISocialRadiusToTriggerConversation   1800.0    500.0
-#
-# Oblivion values: the last three are AUTHORED in Oblivion.esm (its GMST
-# records — note Bethesda deliberately raised fIdleChatterCommentTimer from the
-# engine default of 5.0 to 100.0, slowing chatter twentyfold); fAIGreetingTimer
-# is Oblivion.exe's built-in default, read from the settings-registration
-# thunks (`fld dword ptr [const]` + `push <name string>`) by
-# temp/ob_gmst_values.py.
-#
-# Emitted even though 'GMST' is in SKIP_TYPES: the wholesale skip is right for
-# TES4 settings generally (most have no TES5 counterpart or differ in meaning),
-# but these four exist in both engines with the SAME meaning and units, and
-# dropping them silently swaps Oblivion's pacing for Skyrim's.
-#
-# {EditorID: (value, is_float)} — value taken from the TES4 export when the
-# record exists there, else the Oblivion.exe engine default recorded here.
 AMBIENT_GMST_OVERRIDES = {
     'fAIGreetingTimer':                     (20.0,   True),
     'fIdleChatterCommentTimer':             (100.0,  True),

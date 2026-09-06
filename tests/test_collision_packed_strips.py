@@ -24,11 +24,12 @@ import pytest
 
 # The monkey patch must land BEFORE pyffi.formats.nif is imported: pyffi 2.2.3
 # calls time.clock(), which no longer exists.
-import asset_convert.pyffi_monkey_patch  # noqa: F401
+from asset_convert.nif.pyffi_monkey_patch import apply_patches
+apply_patches()
 
 NifFormat = pytest.importorskip('pyffi.formats.nif').NifFormat
 
-from asset_convert import collision  # noqa: E402
+from asset_convert.collision import collision  # noqa: E402
 
 
 def _tri_strips_shape(tris, material=0):
@@ -74,7 +75,7 @@ def _tri_strips_shape(tris, material=0):
     shape.num_data_layers = 1
     shape.data_layers.update_size()
     try:
-        collision._set_havok_material(shape.material, material)
+        collision.set_havok_material(shape.material, material)
     except Exception:
         pass
     shape.scale.x = shape.scale.y = shape.scale.z = 1.0

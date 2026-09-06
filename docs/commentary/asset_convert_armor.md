@@ -1,11 +1,260 @@
-# asset_convert/body_wrap.py — worn armor, skin and fitting
+# asset_convert/character/body_wrap.py — worn armor, skin and fitting
 
-**Code:** `asset_convert/body_wrap.py`, `asset_convert/skin_retarget.py`, `asset_convert/skin_replacement.py`, `asset_convert/inv_marker.py`, `asset_convert/bow_rig.py`
+**Code:** `asset_convert/character/body_wrap.py`, `asset_convert/character/skin_retarget.py`, `asset_convert/character/skin_replacement.py`, `asset_convert/nif/inv_marker.py`, `asset_convert/character/bow_rig.py`
+
+## One offset per NIF, and which slot picks it
+<a id="armor-offset-slot"></a>
+
+**Code:** `_offset_slot` in `asset_convert/nif/nif_converter.py`
+
+ONE offset applies to the whole NIF, so a record claiming a SINGLE biped slot
+answers the question outright. A multi-slot record has no single stated answer —
+the Knight of Order armour is helmet, torso, legs and feet in one mesh, flags
+`0x003D` — and taking its head-ward slot **lifted the entire suit by the
+helmet's dz=+7**: its Foot shape floated from z -1.3 to +5.9.
+
+Those are resolved instead by where the mesh's skinned vertex MASS actually
+sits, which is the rig the artist authored. Per-SHAPE slotting is handled
+separately inside the retarget.
+
+The same rule governs the body-splice fill: a fill partition takes the piece's
+primary biped slot, because an ARMA only renders partitions for slots it claims
+— a slot-44 pants ARMA culls a partition-32 fill, leaving invisible skin holes.
+
+## Head gear is fitted by MEASUREMENT, not by a scale
+<a id="head-gear-fit"></a>
+
+**Code:** `_apply_head_and_offsets`, `_retarget_worn_armor` in
+`asset_convert/nif/nif_converter.py`
+
+The two skulls differ in SHAPE, not by a factor. In world space the Oblivion
+head spans z **106.84..126.04** (19.20 tall) and the Skyrim head z
+**109.33..131.85** (22.52) — the Skyrim skull reaches **5.4 further down AND 2.1
+higher at the crown**. No single scale expresses that, which is why the old
+`ARMOR_PIECE_OFFSETS_PRN['helmet']` affine could never stop the back of the head
+poking through.
+
+Every Prn block hanging on the HEAD bone — helmets, hoods, hair — is instead run
+through `head_fit`: each vertex keeps its authored signed distance from the
+Oblivion skin, measured against the real Skyrim head. A helmet authored 2 units
+off the skull stays exactly 2 units off, and the skull can no longer poke
+through anything that covered it in Oblivion. Converted hair is fitted upstream
+in `hair_pipeline.bake_hair_variant` and must not be touched again.
+
+Everything else keeps the previous rules: skinned geometry is exact under the
+wrap (offsets suppressed), non-head Prn pieces such as shields keep their
+near-zero PRN offsets, and the FK-tuned constants remain the fallback whenever
+the fit or field data is unavailable.
+
+**Beast races get their own mesh**, exactly as vanilla ships one. A hood is ONE
+Oblivion record worn by every race, so unlike hair — whose EDID names its race —
+there is nothing on the record to read: the only way to serve a khajiit and a
+human from one source is to write a mesh per race and let the per-race ARMA
+pick. It must be a re-RUN of the whole conversion, not a re-fit of the finished
+mesh: a hood is multi-bone SKINNED geometry (Bip01 Head + Neck + Clavicles), so
+its head fit happens inside the retarget wrap, and there is no later point where
+the head verts can be displaced again without redoing the skin solve.
+
+Ordering inside the retarget is fixed: bones are renamed to Skyrim names only
+AFTER the skin transforms are correct, and the body skin is collected after that
+again, once the vertex positions are in Skyrim skeleton space — the section
+bounding boxes must localise the armour hole in post-retarget coordinates,
+including arm openings that shift ~20 z units.
+
+## Prn attachment: shields, torches and weapons
+<a id="shield-attachment"></a>
+
+**Code:** `_convert_prn` in `asset_convert/character/equipment_rig.py`
+
+The authored `Prn` string names the skeleton node a mesh hangs off. It is
+remapped to the Skyrim node and re-written onto the new root; gear that the
+engine has to resolve an equipped model for also gains a `BSInvMarker`.
+
+**A shield needs a real attach transform.** Oblivion straps it to
+`Bip01 L ForearmTwist` with an identity root transform, while Skyrim glues the
+NIF root to the `SHIELD` bone at the hand grip. `shield_attach_transform()` maps
+between the two attach frames through anatomically corresponding hand frames of
+both skeletons, so the shield sits on the forearm at the handle exactly as it
+did in Oblivion — no per-mesh bbox heuristics. The wrapper pass then detects the
+non-identity rotation and bakes it into an inner NiNode.
+
+### <a id="shield-forearm-clearance"></a>The forearm-clearance correction
+
+**Code:** `shield_attach_transform` in `asset_convert/character/equipment_rig.py`
+
+The base mapping is built from the same three landmarks on each skeleton — hand
+joint, middle-finger base, thumb base — giving an anatomical hand frame per
+game:
+
+```
+T = W_obForearmTwist @ F_ob^-1 @ F_sk @ W_SHIELD^-1
+```
+
+(row-vector convention, matching `skeleton_bones_*.json`.)
+
+That preserves the shield's pose relative to the **Oblivion** forearm, which is
+not where the Skyrim forearm is: the two leave the hand at different angles,
+measured at **~16°** out of the strap plane, with the elbow at SHIELD-local
+**z = +7.2** against a shield back face at **z ≈ +2**. The arm pokes through the
+shield.
+
+The fix rotates about the grip (the origin) so the mapped Oblivion forearm axis
+lands on the actual Skyrim forearm axis — the shield lies along the real arm and
+the hand position is unchanged. The Rodrigues construction is transposed from
+the standard column form, because everything here is row-vector.
+
+Validated against vanilla `ironshield.nif`: the result lands on the Skyrim
+convention (face in the XY plane, dome toward -Z, grip near the origin) within a
+few units.
+
+The whole thing degrades to `None` when the skeleton JSONs are unavailable, and
+the shield then keeps its Oblivion orientation rather than getting a guess.
+
+**A TORCH also hangs off the SHIELD node** — Skyrim carries it in the off-hand —
+**but it is not a shield and must NOT get that transform.** A torch is authored
+at the grip in BOTH games: vanilla `meshes\weapons\torch\torch.nif` is
+identity rotation, zero translation, geometry at identity. Applying the shield
+transform threw it ~65° off with a -20.5 forearm-strap offset, which in game
+read as a torch at a completely wrong orientation. It still needs its own
+`BSInvMarker`, because `SHIELD` is in `_EQUIPPED_PRN_VALUES` and the per-mesh
+inventory pass skips it — vanilla's values are rot (4712, 0, 0), zoom 0.82: a
+shield's orientation, pulled back slightly.
+
+### <a id="prn-remap-table"></a>The Prn remap table is authored, not derived
+
+**Code:** `_PRN_REMAP`, `_WEAPON_FILENAME_PRN`, `_remap_prn` in
+`asset_convert/character/equipment_rig.py`
+
+Oblivion node names do not map onto Skyrim's by any rule, so the table is data:
+
+| Oblivion `Prn` | Skyrim node | Why |
+|---|---|---|
+| `BackWeapon` | `WeaponBack` | 2H weapons; bows refine to `WeaponBow` |
+| `SideWeapon` | `WeaponSword` | all Oblivion 1H; refined by filename |
+| `Quiver` | `QUIVER` | case differs |
+| `Shield` | `SHIELD` | case differs |
+| `Bip01 L ForearmTwist` | `SHIELD` | Oblivion uses the forearm bone |
+| `Bip01 Head` | `NPC Head [Head]` | helmets |
+| `Torch` | `SHIELD` | Skyrim carries the torch off-hand |
+
+**The 1H refinement is by filename keyword** because Oblivion has one node for
+every 1H weapon while Skyrim has one per type: `dagger`→`WeaponDagger`,
+`mace`/`club`/`hammer`→`WeaponMace`, `waraxe`/`axe`→`WeaponAxe`,
+`staff`→`WeaponStaff`, everything else staying on `WeaponSword`.
+
+**Shortswords are deliberately absent from that list.** The record converter
+maps TES4 `Blade1H` to Skyrim `OneHandSword`, and the draw animation only finds
+the weapon at the node matching the record's `AnimationType` — so
+`Prn=WeaponDagger` on a Sword-type record renders the weapon INVISIBLE while
+held. The same keyword refinement therefore runs on both sides, keyed on the
+same model basename so the two can never diverge.
+
+### <a id="weapon-attachment"></a>Side-carried weapons flip 180° about Y
+
+Skyrim's `WeaponAxe` attachment node has a different local orientation from
+Oblivion's `SideWeapon`, so the blade appears on the wrong side. A 180° rotation
+around Y — the handle-blade axis — corrects it without flipping the weapon
+upside-down, which a 180° Z rotation would do. The wrapper pass bakes the
+resulting non-identity rotation into an inner NiNode so Skyrim applies it to
+static geometry.
+
+**Bows are excluded.** Oblivion bows already match the Skyrim `WeaponBow` frame,
+with the string side at -X: the Oblivion steel bow's string is at x = -15.7 and
+vanilla `steelbow`'s string bones at x = -13.7. Flipping them held the bow
+backwards, with the curve facing the archer.
+
+## Weight-slider variants
+<a id="weight-slider-variants"></a>
+
+**Code:** `_write_weight_variants` in `asset_convert/nif/nif_converter.py`
+
+Biped wearables get vanilla-style `_0` / `_1` variants: the ARMA records for
+body, hands and feet gear reference `<name>_1.nif` with the weight slider
+enabled, and the engine lerps the pair per-vertex.
+
+**That lerp REQUIRES identical topology, so the `_1` file is never a second
+independent conversion.** Converting twice makes the body splice clip
+differently and the pair explodes at intermediate slider values. `_1` is the
+finished weight-0 mesh post-morphed by the fitted `_0`→`_1` Skyrim body morph
+(`body_wrap.morph_converted_to_weight1`), with rigid PRN blocks untouched. When
+there is no morph to apply — a PRN-only piece — the `_1` file is an identical
+copy, so the ARMA's path always resolves.
+
+**Which variants exist is the plugin's call, not the path's.** Gear without the
+slider (helmets, shields, rings) is referenced as the plain mesh and gains
+nothing from a pair, while slider gear never uses the plain mesh unless it also
+serves as a ground model. `wearable_plan` derives this from the same records the
+importer writes, so only referenced files are emitted, and `variants_for`
+returns BASE for anything no ARMO/CLOT record names — which keeps
+non-wearables on their plain conversion while gear filed outside `meshes\armor`
+still gets the pair its ARMA asks for.
+
+A beast-race head variant is a copy of ONE mesh, never a weight pair: head gear
+has the slider off, and `_0`/`_1` would collide with the race suffix.
+
+### <a id="prn-bone-fallback"></a>A worn piece with no Prn and no skin
+
+`BODY_PART_FALLBACK_PRN_BONE` maps a Skyrim body part onto the Oblivion bone
+that piece rigidly attaches to. It is used ONLY when a worn NIF carries no `Prn`
+extra data AND no skin at all: those meshes fell straight out of `add_prn_skin`
+and shipped with no skin instance, so they never left Oblivion object space —
+Morroblivion's `cryohelm.nif` rendered at z −5..27 instead of ~115..133, i.e. on
+the floor.
+
+The fallback is keyed off the wearing record's BMDT biped flags — the plugin's
+own statement of what the item is — never off the filename.
+
+## Splicing body geometry into a worn piece
+<a id="body-splice-fill-partition"></a>
+
+**Code:** `_convert_nif` in `asset_convert/nif/nif_converter.py`
+
+The splice runs AFTER the retarget and the bone rename, so the bone `NiNode`s in
+the armor NIF already carry Skyrim names to match against.
+
+It is always the **_0 fill**: the _1 variant is generated afterwards by
+post-morphing the finished mesh, which is what keeps the pair
+topology-identical (see [weight-slider variants](#weight-slider-variants)).
+
+**The fill partition takes the piece's primary biped slot.** An ARMA only renders
+partitions for the slots it claims, so a slot-44 pants ARMA culls a partition-32
+fill and leaves invisible skin holes. The slot is resolved by the same rule as
+the offset: a single-slot record states it, a multi-slot one is resolved from
+where the skinned vertex mass sits.
+
+## Rigid Prn skinning
+<a id="rigid-prn-skinning"></a>
+
+**Code:** `add_prn_skin` in `asset_convert/character/prn_skin.py`
+
+Oblivion attaches some armor pieces — helmets above all — rigidly to a bone
+through a `Prn` NiStringExtraData on the root, instead of skeleton skinning.
+Skyrim requires all worn-armor geometry to carry a `BSDismemberSkinInstance`,
+so the piece is given a one-bone skin: a NiNode placeholder for the target bone
+(matched by NAME against the skeleton at load) with every vertex at weight 1.0.
+
+**The per-bone bind transform is IDENTITY, and that is correct here.** The
+caller runs `_bake_node_transforms_into_verts` first, which leaves the verts in
+bone-LOCAL space — verified on the converted dog, whose Head centroid is
+(2.8, 14.5, 0), a bone-local coordinate rather than the (0, 42, 57) bind-world
+of `Bip01 Head`. So `vert · I · boneWorld` places the part correctly and it
+tracks the bone under both animation and ragdoll.
+
+**The per-bone bounding sphere must be real.** The engine visibility-culls
+skinned geometry by these spheres, moving each one by its live bone every
+frame, so a zero-radius sphere is never visible in game — even though NifSkope
+ignores the field and renders the mesh fine. With an identity bind the sphere
+is just the vertex bounds in mesh space.
+
+The bone name picks the biped slot; note that vanilla Skyrim puts **helmets on
+the HAIR slot (131)**, which is why a head or neck bone maps there rather than
+to a head slot.
 
 ## Contents
 
 - [NIF worn armor conversion](#nif-worn-armor-conversion)
-- [Body-wrap armor fitting (2026-07-10/11, asset_convert/body_wrap.py)](#body-wrap-armor-fitting)
+- [Closing the last ~10% cuirass-edge gap](#cuirass-edge-gap-ideas)
+- [Body-wrap armor fitting (2026-07-10/11, asset_convert/character/body_wrap.py)](#body-wrap-armor-fitting)
 - [NIF weapon Prn (attach node) contract](#nif-weapon-prn-contract)
 - [NIF torch Prn — Skyrim carries the torch on the SHIELD node (SOLVED 2026-08-01)](#nif-torch-prn-skyrim-carries)
 - [NIF shield conversion](#nif-shield-conversion)
@@ -14,6 +263,25 @@
 - [NIF skin retargeting (Oblivion → Skyrim skeleton)](#nif-skin-retargeting)
 - [Distorted worn clothing — nested bones placed with the wrong operand order (SOLVED 2026-08-25)](#distorted-worn-clothing-nested-bones)
 - [Creature skin render crash — >80 skin bones per shape (SOLVED 2026-07-10)](#creature-skin-render-crash-80)
+
+## <a id="morrowind-armor-assembly"></a>Morrowind armor assembly
+
+**Code:** `asset_convert/character/morrowind_armor.py`.
+
+Morrowind has no single worn-armor mesh. A cuirass is a SET of body-part NIFs
+(chest, per-side pauldron, upper arm...) named by the ARMO record's index
+list, so the converter assembles one wearable from several files before any of
+the Oblivion armor path applies.
+
+Each assembled part is classified by how it is bound, not by its name: a part
+carrying `Prn` is a rigid attachment and takes the Prn path
+([#prn-attached-rigid-pieces](#prn-attached-rigid-pieces)); a skinned part is
+re-bound to the shared skeleton ([#nif-skin-retargeting](#nif-skin-retargeting)).
+Shields are never skinned -- the root carries `Prn=Shield` and the Oblivion
+shield path takes it ([#shield-attachment](#shield-attachment)).
+
+The result is written as a Morrowind-version NIF beside the source meshes, so
+every downstream stage sees the same shape of input it always has.
 
 ## NIF worn armor conversion
 <a id="nif-worn-armor-conversion"></a>
@@ -29,22 +297,22 @@
 - **Shoes vs boots calves slot**: Shoes (clogs, sandals) should NOT claim Calves(38) in ARMA. Only boots get calves. Detection: `'boot' in model_path`. Clothing foot items without 'boot' are shoes.
 - **Oblivion alpha-BLENDS surfaces it also alpha-TESTS; Skyrim must not (fixed 2026-07-27, `_skyrim_alpha_property`)**: Oblivion ships cutout geometry as `NiAlphaProperty` flags **0x12ED** (blend bit 0 SET + test bit 9 set). Skyrim reads the blend bit as "draw in the transparent pass", so an opaque diffuse authored that way renders wrong — this is why the **Shivering Isles Dark Seducer body armor was invisible when worn while its ground model was fine** (SI armor is one all-in-one ARMO covering slots 32/33/37/44; its `armor.dds` is DXT3 but **99.5% fully opaque**, so it should be a plain cutout). Vanilla uses **0x12EC** — the identical value with blending CLEAR — on **188/193** surveyed shapes that enable alpha testing (`references/Skyrim Meshes` armor + landscape + architecture + clutter). So whenever the test bit is on, the blend bit is dropped. This is a GENERAL TES4→TES5 rule, not an SI quirk; `grass_profile.py` had already learned the same thing for grass (`0x12ED`→blend clear) and this generalises it to every converted mesh.
 - **Blend-on/test-OFF is real transparency EXCEPT under `APPLY_HILIGHT2` (fixed 2026-07-27)**: see-through SI mania/dementia rocks ship `0x00ED` (blend on, test off) — but so do gems, bottles, curtains, posters and potion liquids, which must keep blending, and a flawed emerald has *byte-identical* alpha flags to a rock overlay. The discriminator is **`NiTexturingProperty.apply_mode`**: the rocks use **APPLY_HILIGHT2 (4)**, which is Oblivion's **parallax** switch — that alpha is a HEIGHT FIELD, not transparency and not a blend weight (see the parallax section; the mid-tone-dominant profile the census measured is exactly a height map's) (SI `DMRockSideRoot01.dds`: 0% opaque / 99% partial). Skyrim has no equivalent mode, so it blends the mask across the whole surface → you see through the rock. Census over ~1,000 source meshes (rocks, clutter, architecture, dungeons, plants): **all 5** blend-on HILIGHT2 shapes are the SI rock overlays; **none** of the other 142 blend-on shapes use HILIGHT2 (they are MODULATE=2 or HILIGHT=3). Everything else is left exactly as authored. Do NOT try to classify these by texture alpha percentages — potion liquids measure 100% partial alpha and would be wrongly turned opaque.
-  - **The remedy is to DROP the NiAlphaProperty (`hilight2_alpha_dropped`), not to reinterpret it.** Two earlier attempts are recorded because neither is in the code and both are worth not repeating: the first version of this fix turned HILIGHT2+blend+no-test into a threshold-128 cutout, which replaced see-through rock with **completely invisible sections** — these overlay masks are soft gradients with NO fully-opaque texels at all, so a cutout deletes a quarter to a half of the surface outright (`DMRockSideRoot01` peaks at alpha **221** with 29% of texels below 128; `DMRockSideMudBase01` peaks at 238, 26% below; `mrock01worn` 47% below). The second attempt was `slsf_1_decal` + `slsf_1_dynamic_decal` with blending KEPT. 🛑 **Neither shipped** — grep for `slsf_1_decal` or `0x10ED` in `nif_converter.py` and you will find nothing; `_process_geometry` drops a blend-enabled NiAlphaProperty under HILIGHT2 outright and the rock renders solid. Vanilla census (400 random meshes, all block types): blend-on/test-off is a perfectly legal Skyrim mode (370 shapes), and **142/206 blend-on shapes carrying the decal pair all ship alpha flags exactly `0x10ED`** — Oblivion's own `0x00ED` plus the no-sort bit `0x1000`. Vanilla agrees with the drop: across 600 landscape/clutter meshes, 1088/1313 shapes ship no NiAlphaProperty at all and the commonest value on the rest is `0x12EC` (test, blend OFF). Vanilla rock does not alpha-blend.
+  - **The remedy is to DROP the NiAlphaProperty (`hilight2_alpha_dropped`), not to reinterpret it.** Two earlier attempts are recorded because neither is in the code and both are worth not repeating: the first version of this fix turned HILIGHT2+blend+no-test into a threshold-128 cutout, which replaced see-through rock with **completely invisible sections** — these overlay masks are soft gradients with NO fully-opaque texels at all, so a cutout deletes a quarter to a half of the surface outright (`DMRockSideRoot01` peaks at alpha **221** with 29% of texels below 128; `DMRockSideMudBase01` peaks at 238, 26% below; `mrock01worn` 47% below). The second attempt was `slsf_1_decal` + `slsf_1_dynamic_decal` with blending KEPT. 🛑 **Neither shipped** — grep for `slsf_1_decal` or `0x10ED` in `nif_converter.py` and you will find nothing; `process_geometry` drops a blend-enabled NiAlphaProperty under HILIGHT2 outright and the rock renders solid. Vanilla census (400 random meshes, all block types): blend-on/test-off is a perfectly legal Skyrim mode (370 shapes), and **142/206 blend-on shapes carrying the decal pair all ship alpha flags exactly `0x10ED`** — Oblivion's own `0x00ED` plus the no-sort bit `0x1000`. Vanilla agrees with the drop: across 600 landscape/clutter meshes, 1088/1313 shapes ship no NiAlphaProperty at all and the commonest value on the rest is `0x12EC` (test, blend OFF). Vanilla rock does not alpha-blend.
   - **The same overlay breaks OBJECT LOD even with NO alpha property at all (fixed 2026-08-20)**: the two fixes above both hang off `alpha_prop is not None`, so a HILIGHT2 shape that ships no `NiAlphaProperty` was untouched — correct up close (nothing samples the channel) but see-through at LOD range. `RockGreatForest645` is the reference case: `apply_mode=4`, no alpha property, and its diffuses `GreatForestRock03/01.dds` measure alpha mean 101.6/157.2 with only 0.5%/0.0% of texels fully opaque — a blend WEIGHT, not a mask. Cause: LODGen stamps `slsf_2_lod_objects` on every shape it bakes (`num2 = 5U` in `LODApp.cs`), and the LOD object shader reads diffuse alpha as opacity. Confirmed in the artifacts — `TES4Tamriel.4.4.-12.bto` has 13 shapes and **zero** `NiAlphaProperty` blocks, and 154 shapes across 75 sampled VANILLA `.bto` tiles carry zero between them: vanilla object LOD is opaque, always.
     - LODGen cannot be told otherwise — it writes the shader itself, and it only harvests `NiAlphaProperty` in its `fo4`/`merge5` modes (`ShapeDesc.cs:369`), never the `tes5`/`sse` mode we run, so `isAlpha` stays false and the emit path writes `SetBSProperty(1, -1)`.
     - The texture cannot be flattened in place either — **unless `--parallax` carried the height out to a `_p.dds` first**, which is the one case where the full mesh no longer needs that channel (the height then lives in slot 3, where Skyrim's shader actually reads it). Without `--parallax`, or for a texture the height classifier rejects (92 of Nehrim's 130 flagged diffuses hold no usable height), the full-size mesh still needs the alpha. So mesh conversion records every HILIGHT2 diffuse to `export/<plugin>/overlay_diffuses.txt` (`texture_prune.OVERLAY_MANIFEST_NAME`) and `lod_gen._force_opaque_lod_diffuses` writes an alpha-flattened COPY into the LOD mod's texture tree at the same relative path the tiles reference. Data holds one file per path and that tree shadows the plugins', so tiles get the opaque copy and full meshes keep theirs.
     - **The discriminator is the AUTHORED `apply_mode`, never the pixels.** A genuine cutout mask ships MODULATE (2), is absent from the manifest, and is left alone. Measuring alpha instead flattens tree billboards and cobwebs into solid rectangles — DXT5 leaves a billboard with ~0% of texels at exactly 255 even though it is unambiguously a mask. (Same trap the bullet above warns about for potion liquids.) Measured: 94 overlay diffuses across the 4 Tamriel contributors; `cobweb01.nif` (MODULATE) correctly reports none.
 - **Body skin splice section_bboxes coordinate space**: OB body skin sections are in OB skeleton space; SK body NIF verts are in SK skeleton space. These are DIFFERENT frames. The OB arm area (z≈98–105) is at SK z≈72–92 after retarget. **Always use POST-RETARGET section_bboxes** from `collect_skin_info()` — these are in SK world space and correctly localise both arm openings and neck. Pre-retarget bboxes (source OB verts) only work for neck/collar (small-x geometry that happens to be at the same world z in both skeletons) but MISS the arms (which are displaced ~20 Z units by skeleton frame differences). SK male body max arm reach (|x|>20) sits at z=75–97 world, exactly within the post-retarget 'Arms' bbox z=72–92. Use `bbox_pad=1.0` to stay under 25% of total body verts spliced.
 
-## Body-wrap armor fitting (2026-07-10/11, `asset_convert/body_wrap.py`)
+## Body-wrap armor fitting (2026-07-10/11, `asset_convert/character/body_wrap.py`)
 <a id="body-wrap-armor-fitting"></a>
-- **Architecture: FK base + measured-error correction field.** FK (animation DQS) is locally smooth but lands armor 0.5-2.5 units off the SK body (the in-game clipping). The wrap field measures FK's error EXACTLY by running the actual OB body meshes (upperbody/lowerbody/hand/foot) through the very same FK retarget, then fitting them onto the real Skyrim body NIFs via iterative closest-point projection with topology-aware delta smoothing (never bleeds between the legs) + limb-segment length prescaling. Fits BOTH weight-slider targets (`malebody_0` AND `malebody_1` etc.); cached per gender in `generated/body_wrap_{male,female}.npz` (src/fkp/dst0/dst1/tris/vert_bc/part). Runtime: FK first, then each armor vertex gets `delta = dst[w] - fkp` interpolated from the K=40 nearest body triangles (Gaussian distance + skin-weight bone-centroid gating + wrong-side penalty), then a clearance-enforcement push. Rebuild with `python -m asset_convert.body_wrap` (uses `allow_wrap=False` internally -- the field must never bootstrap from a previous field).
+- **Architecture: FK base + measured-error correction field.** FK (animation DQS) is locally smooth but lands armor 0.5-2.5 units off the SK body (the in-game clipping). The wrap field measures FK's error EXACTLY by running the actual OB body meshes (upperbody/lowerbody/hand/foot) through the very same FK retarget, then fitting them onto the real Skyrim body NIFs via iterative closest-point projection with topology-aware delta smoothing (never bleeds between the legs) + limb-segment length prescaling. Fits BOTH weight-slider targets (`malebody_0` AND `malebody_1` etc.); cached per gender in `generated/body_wrap_{male,female}.npz` (src/fkp/dst0/dst1/tris/vert_bc/part). Runtime: FK first, then each armor vertex gets `delta = dst[w] - fkp` interpolated from the K=40 nearest body triangles (Gaussian distance + skin-weight bone-centroid gating + wrong-side penalty), then a clearance-enforcement push. Rebuild with `python -m asset_convert.character.body_wrap` (uses `allow_wrap=False` internally -- the field must never bootstrap from a previous field).
 - **_0/_1 weight variants (2026-07-11)**: `convert_nif` writes `<name>_0.nif`/`<name>_1.nif` for every biped wearable (any non-`_gnd` mesh the wearable plan names — see the folder-vs-plugin note below). **The _1 file is NEVER a second independent conversion** — the engine lerps the pair per-vertex, so the pair must be topology-identical; a reconversion clips the body splice differently and mid-slider values vertex-explode (observed in game). Instead `body_wrap.morph_converted_to_weight1` post-morphs the finished _0 mesh with the fitted `dst1 - dst0` body morph (built from the REFERENCE Skyrim bodies — the modified output bodies have bugs and are never used for weights); spliced fill lies on the _0 surface so it gets the exact body morph, rigid PRN blocks are untouched. tes5_import ARMA enables the weight slider + `<name>_1.nif` path ONLY for gear covering TES4 biped bits 2-5 (upper/lower body, hand, foot) — vanilla helmets (IronHelmetAA) and shields (IronShieldAA) have the slider DISABLED and a plain path, and slider-on shields misbehaved in game.
 - **What counts as worn gear is the PLUGIN's call, not the folder's (2026-08-08)**: `_convert_nif` used to decide with `'armor' in src_path or 'clothes' in src_path`. That holds for vanilla Oblivion, which files every wearable under `meshes\armor` or `meshes\clothes`, but it is a guess about a naming convention. Nehrim files 88 worn meshes under its own folders (`eyren/`, `spinat/`, `nehrim/`, `skeletonk/`, `dwemertechnology/`, `ttbeards/`, `mr_siika/`, `suedland_set/`) and every one of them was converted as a **world object**: BSFadeNode root instead of NiNode, plain NiSkinInstance instead of BSDismemberSkinInstance, no retarget onto the Skyrim skeleton — and, because the same substring gated the variant writer, no `_0`/`_1` pair, so 52 of the 61 unresolvable ARMA paths were simply never written and the engine drew nothing (guards with a head and hands but no torso). The authored answer is the plugin's own biped model references: `wearable_plan` now sets a `WORN` bit on every path an ARMO/CLOT names as a biped model, and `wearable_plan.is_worn` answers the question. The folder test survives only as the fallback for meshes no record references. Verified byte-identical output for `armor/` and `clothes/` controls (mesh conversion is **not reproducible across processes** unless `PYTHONHASHSEED` is fixed — set/dict iteration order leaks into the written bytes, so any A/B of NIF output must pin it). The remaining 9 misses are dead references: those meshes exist in no Nehrim BSA and no loose file, i.e. they were broken in the original game too.
 - **🔴 Body-skin identity comes from the BONES, not the texture name (2026-08-09)**: Oblivion bakes the wearer's skin into a wearable; the converter strips it and splices Skyrim body geometry back, choosing which body NIF by a keyword in the texture path (`_SKIN_TEX_TO_BODY_NIF`). That is the author's *label*, not what the geometry *is*. Nehrim ships 18 wearables whose torso skin carries a foot or hand texture — the Silverlight cuirass (`Foot:Body`, 3321 verts, weighted to Spine/Spine1/Spine2/Clavicle/Neck/Pelvis, textured `characters\imperial\female\footfemale.dds`) and the entire female Eyren set (four battledresses at 3321 verts plus four greaves). The keyword picked `femalefeet_0.nif`, which contains no torso, so the stripped chest was never spliced back: the armour renders as plates with see-through gaps and the actor looks half-invisible rather than naked. `collect_skin_info` now overrides a hands/feet classification when the skin instance is weighted to **spine, clavicle or neck**. Those three are deliberately the only test — a gauntlet legitimately reaches the forearm and a boot the calf, so including those bones produced 9 false positives on correctly-named vanilla gauntlets; spine/clavicle/neck produced zero. Survey any plugin with `python tools/body_skin_audit.py [plugin] [--all]`. **Diagnostic trap:** the symptom reads as a texture or alpha problem — the source NIF genuinely does have `NiAlphaProperty flags=0x00ed blend=True` on several shapes — so it invites an alpha investigation. Compare the source's shape list against the converted one first; a missing body shape is instantly visible and the alpha is a red herring.
 - **Cross-block solve is mandatory**: `deform_geoms_wrap` concatenates ALL non-PRN blocks into ONE weld/correction/diffusion system. Per-block solving gave coincident seam verts across blocks (cuirass/pauldron boundary) different corrections — visible seam splits. `weld_groups` is true distance welding (KDTree pairs + union-find), not grid rounding (rounding-boundary twins split).
-- **Head gear (hair, Prn helmets, AND skinned helmets/hoods) is fitted by `asset_convert/head_fit.py`'s scalp displacement field (v3, 2026-08-24, after two in-game round trips)**: rigid head gear's verts are **bone-local (face-space)** while the wrap field lives in world space, so a field query for them lands on nothing. The v1 fit oversized every mesh in game — its affine carrier was measured from a WORLD-frame ICP fit and claimed sx 1.18 / sz 1.24; the x was ICP stretching the earless OB head over the SK EARS, the z conflated bone placement with head size. **Measured in head-LOCAL frames the two human skulls are the SAME width (OB x ±5.59, SK ±5.51 male / ±5.58 female earless) with local scalp deltas of only mean 0.96 / max 2.8** (crown ~2 DOWN, occiput/nape ~2-3.4 further back). Vanilla SK head parts (hair01.nif etc.) are stored head-bone-local, same convention as our output. NEVER fit a carrier in world frames.
-  - **The v3 mechanism — one smooth scalp-to-scalp displacement field, sampled per vertex.** At BUILD (`build_arrays`, run by `python -m asset_convert.body_wrap`): for every OB head vertex, where its matching SK skin point is. Init = NEAREST POINT from the identity carrier; then FIELD_CYCLES of graph smoothing + reprojection ALONG THE OB VERTEX NORMALS (`_project_ray` — nearest-point reprojection exits sideways from inside the SK nape bulge; normal rays reach it and cannot drift laterally). The final step is a projection, so **every field target lies exactly ON the SK skin**. At RUNTIME (`fit_head_gear`/`field_deltas`): each vertex samples the field at its closest scalp point (Gaussian blend that widens with standoff — exact on the skin, smooth far off), so by construction: a vertex ON the skin lands ON the new skin (hairline edges exactly at the skin line), a vertex N units off stays exactly N off (helmets keep authored standoff), and everything over one scalp region moves identically (headbands/eye-coverings never stretch; the only deformation is the real anatomy gradient). Verts >4 units off (ponytails, domes) take their deltas by graph DIFFUSION from the near verts — per-vertex re-sampling at range measured 19% edge stretch on the lengthened style01 tail; diffusion restores 0%. Sweep over all 57 hairs x genders + every PRN helmet (164 meshes): flush err mean 0.05-0.08 / p95 <=0.25, |dlen| p99 <=1.0 human.
+- **Head gear (hair, Prn helmets, AND skinned helmets/hoods) is fitted by `asset_convert/character/head_fit.py`'s scalp displacement field (v3, 2026-08-24, after two in-game round trips)**: rigid head gear's verts are **bone-local (face-space)** while the wrap field lives in world space, so a field query for them lands on nothing. The v1 fit oversized every mesh in game — its affine carrier was measured from a WORLD-frame ICP fit and claimed sx 1.18 / sz 1.24; the x was ICP stretching the earless OB head over the SK EARS, the z conflated bone placement with head size. **Measured in head-LOCAL frames the two human skulls are the SAME width (OB x ±5.59, SK ±5.51 male / ±5.58 female earless) with local scalp deltas of only mean 0.96 / max 2.8** (crown ~2 DOWN, occiput/nape ~2-3.4 further back). Vanilla SK head parts (hair01.nif etc.) are stored head-bone-local, same convention as our output. NEVER fit a carrier in world frames.
+  - **The v3 mechanism — one smooth scalp-to-scalp displacement field, sampled per vertex.** At BUILD (`build_arrays`, run by `python -m asset_convert.character.body_wrap`): for every OB head vertex, where its matching SK skin point is. Init = NEAREST POINT from the identity carrier; then FIELD_CYCLES of graph smoothing + reprojection ALONG THE OB VERTEX NORMALS (`_project_ray` — nearest-point reprojection exits sideways from inside the SK nape bulge; normal rays reach it and cannot drift laterally). The final step is a projection, so **every field target lies exactly ON the SK skin**. At RUNTIME (`fit_head_gear`/`field_deltas`): each vertex samples the field at its closest scalp point (Gaussian blend that widens with standoff — exact on the skin, smooth far off), so by construction: a vertex ON the skin lands ON the new skin (hairline edges exactly at the skin line), a vertex N units off stays exactly N off (helmets keep authored standoff), and everything over one scalp region moves identically (headbands/eye-coverings never stretch; the only deformation is the real anatomy gradient). Verts >4 units off (ponytails, domes) take their deltas by graph DIFFUSION from the near verts — per-vertex re-sampling at range measured 19% edge stretch on the lengthened style01 tail; diffusion restores 0%. Sweep over all 57 hairs x genders + every PRN helmet (164 meshes): flush err mean 0.05-0.08 / p95 <=0.25, |dlen| p99 <=1.0 human.
   - **Landmark ground truth (measured on the raw local-frame meshes)**: scalps SAME width, but the SK jaw/cheek is 1-1.6 WIDER per side (OB max|x| 3.0-4.5 vs SK 4.6-5.4 band-by-band), the SK nose tip and crown sit 2.1 LOWER, the occiput/nape 2-3.5 further BACK, and the under-occiput hollow and lip profiles differ by ~3 at fixed heights. So converted gear legitimately widens at cheek guards and deepens at the nape — that is flush-to-skin, not oversizing.
   - **The FaceGen UV correspondence is an ICP SEED, never a field init.** Tried and REJECTED for v3: the two layouts' v-coordinates differ by up to 0.042 at the same landmark (back of head OB v 0.506 vs SK 0.464), which read as a systematic ~2-unit downward drag on top of the real anatomy (field dz mean -3.9 vs a measured landmark shift of -2.1) — and vanilla SK helmets sit at the same local heights as OB ones, so the drag is parameterization bias, not anatomy.
   - **The OB head's INTERIOR geometry (mouth bag, inner structures) is excluded from the field domain** (`_visible_exterior`, radial occlusion test): its correspondences form +-3-unit dipoles (bag maps forward onto the lips, inner column backward onto the skull) that tore 4.9-unit edge strain into face-covering masks (darkbrotherhood cowl). Interior verts get their dv in-filled from the exterior field.
@@ -75,7 +343,7 @@
 - **Shortswords stay on WeaponSword** (they're Sword-type records); **daggers get Prn=WeaponDagger AND the WEAP record refined to AnimationType Dagger (2)** — the filename-keyword refinement runs on BOTH sides (`_remap_prn` in nif_converter.py and `convert_WEAP` in tes5_import/record_types/equipment.py) keyed on the model basename so they can never diverge.
 - **Bows must get Prn='WeaponBow'** (vanilla ironbow.nif), NOT 'WeaponBack' — Oblivion uses 'BackWeapon' for both 2H weapons and bows, so `_remap_prn` refines by filename ('bow' in basename).
 - **Bows are exempt from the blanket weapon 180° Y-flip** (the war-axe orientation fix applied to every `_WEAPON_PRN_VALUES` mesh): Oblivion bows already match the Skyrim WeaponBow frame — string plane at x≈-15.7 vs vanilla string bones at x≈-13.7, limbs along ±Y. The flip held them backwards (curve toward the archer).
-- **Bow bend rig (`asset_convert/bow_rig.py`)**: converted bows get the exact vanilla 7-bone chain (Bow_MidBone → Lo/Up chains → StringBones; locals lifted from vanilla steelbow.nif — the rig is the animation contract, BowProject.hkx clips store absolute local bone transforms) + BGED `Weapons\Bow\BowProject.hkx` + BSXFlags Animated bit (0x08). Geometry is skinned with plain NiSkinInstance (vanilla bows never use BSDismember) using the measured vanilla weight profile (Mid→B1 crossfade |y| 4-16, B1→B2 20-36, tips ~58/42 B2/StringBone; string = SB1↔SB2 lerp). String verts are identified from the Oblivion NiGeomMorpherController draw morph (string moves ~28 units vs limb ~7-10; capture BEFORE controllers are stripped) — verified on all 8 vanilla Oblivion bows.
+- **Bow bend rig (`asset_convert/character/bow_rig.py`)**: converted bows get the exact vanilla 7-bone chain (Bow_MidBone → Lo/Up chains → StringBones; locals lifted from vanilla steelbow.nif — the rig is the animation contract, BowProject.hkx clips store absolute local bone transforms) + BGED `Weapons\Bow\BowProject.hkx` + BSXFlags Animated bit (0x08). Geometry is skinned with plain NiSkinInstance (vanilla bows never use BSDismember) using the measured vanilla weight profile (Mid→B1 crossfade |y| 4-16, B1→B2 20-36, tips ~58/42 B2/StringBone; string = SB1↔SB2 lerp). String verts are identified from the Oblivion NiGeomMorpherController draw morph (string moves ~28 units vs limb ~7-10; capture BEFORE controllers are stripped) — verified on all 8 vanilla Oblivion bows.
 - **SLSF1_Skinned (shader_flags_1 bit 0x02) is mandatory on the bow shape's BSLightingShaderProperty** — without it the renderer never applies bone deforms: the bow renders frozen in bind pose while the graph animates the bones (string never draws, limbs never bend). Shader conversion runs before the rig exists, so `add_bow_rig` sets the flag itself after skinning (vanilla steelbow SF1=0x82400383 has it set).
 
 ## NIF torch Prn — Skyrim carries the torch on the SHIELD node (SOLVED 2026-08-01)
@@ -105,7 +373,7 @@
   otherwise ship none. Vanilla values rot (4712, 0, 0) **zoom 0.82** (shield is
   the same rotation but zoom 1.0) → `TORCH_INV_MARKER_*` in `skyrim_overrides.py`.
 - Verified against `references/Skyrim Meshes` — **not** the SSE BSAs, which are
-  off-limits (see CLAUDE.md); `asset_convert/skyrim_assets.py` is for the
+  off-limits (see CLAUDE.md); `asset_convert/sources/skyrim_assets.py` is for the
   runtime pipeline only, never for "what does vanilla do here?" debugging.
 
 ## NIF shield conversion
@@ -131,10 +399,10 @@
 ## BSInvMarker inventory orientation (learned 2026-07-18)
 <a id="bsinvmarker-inventory-orientation"></a>
 - **Engine convention** (derived empirically with `tools/inv_marker_survey.py` (removed 2026-08-25) across ~500 vanilla meshes, mean alignment 0.97+): stored ushort angles are milliradians; the inventory view rotates the model by `M = Rx(-rx/1000) @ Ry(-ry/1000) @ Rz(-rz/1000)` (column-vector, XYZ order, negated angles) and the camera looks along **+Y** with **+Z as screen-up** (screen-right = X). Reproduces vanilla exactly: ironshield (4712,0,0) = −Z face toward camera; cuirassgnd (1570,0,0) = +Z face toward camera with model −Y at screen-up; iron weapons (4712,6283,0) ≈ pure Rx.
-- **Per-mesh computation** (`asset_convert/inv_marker.py`): the finalize pass at the end of `_convert_nif` orients each mesh so the side with the greatest front-facing projected area (of the six area-weighted PCA axis directions of the triangle soup) faces the camera. Screen roll keeps model +Z at screen-up (upright items stay upright); when the view normal is ±Z (items modeled lying flat: books, pelts, plates, gnd armor) it follows the vanilla cuirassgnd rule (−Y up for face-up items, +Y for face-down). Hidden geometry (flags & 1), `Blood*` decal shapes and EditorMarkers are excluded from the analysis.
+- **Per-mesh computation** (`asset_convert/nif/inv_marker.py`): the finalize pass at the end of `_convert_nif` orients each mesh so the side with the greatest front-facing projected area (of the six area-weighted PCA axis directions of the triangle soup) faces the camera. Screen roll keeps model +Z at screen-up (upright items stay upright); when the view normal is ±Z (items modeled lying flat: books, pelts, plates, gnd armor) it follows the vanilla cuirassgnd rule (−Y up for face-up items, +Y for face-down). Hidden geometry (flags & 1), `Blood*` decal shapes and EditorMarkers are excluded from the analysis.
 - **Scope**: applied to every non-creature, non-skinned BSFadeNode root — a marker is inert on meshes never shown in inventory, and clutter/books/ingredients/keys/soul gems have no reliable path signature. Existing markers (gnd) are recomputed; missing ones are added (zoom 1.0).
 - **Weapons/shields/quivers are exempt** (`_EQUIPPED_PRN_VALUES`, matched on the post-remap Prn): conversion normalizes them into vanilla attachment frames (Prn node convention / SHIELD attach transform), so the vanilla-derived constants are already exact. The computed value would also flip shields: a shield's concave strap side genuinely has more visible area than its display face.
-- Geometry math uses PyFFI's row-vector transform convention throughout — the survey validated stored-marker ↔ pyffi-space relationships end-to-end, so the generator must use the same gather code (`_gather_area_normals`).
+- Geometry math uses PyFFI's row-vector transform convention throughout — the survey validated stored-marker ↔ pyffi-space relationships end-to-end, so the generator must use the same gather code (`gather_area_normals`).
 
 ## NIF skin retargeting (Oblivion → Skyrim skeleton)
 <a id="nif-skin-retargeting"></a>
@@ -148,7 +416,7 @@
   6. Pre-computes delta matrices `inv(rest_world) @ anim_world` per bone, saved to `asset_convert/generated/best_animation_pose.json`
   7. `skin_retarget.py` Phase B.1: loads pre-computed deltas, applies standard LBS using OB skin weights: `v' = Σ w_i * (v @ delta_i)`
   8. Phase A: repositions bones to Skyrim skeleton positions
-  9. Phase C+D: recomputes bind matrices (`_manual_update_bind_position`) and skin partitions
+  9. Phase C+D: recomputes bind matrices (`manual_update_bind_position`) and skin partitions
   10. **FK+Gaussian double-deformation MUST be avoided** — Gaussian spatial blend only runs when FK was NOT applied.
 - **FK results**: Post-mirror RMSD 9.64 (was 9.73 corpus-only). Legs: 2.8/1.8→1.08/1.08 (62% improvement). Arms: 4.4→4.0 (10%). 37/37 tests pass, 396 armor NIFs 0 errors.
   - **`_mat3_to_quat` NIF convention**: This function expects a column-vector convention matrix. PyFFI Matrix33 / NIF matrices use row-vector convention so `_mat3_to_quat(NIF_Matrix)` returns the CONJUGATE. In `skin_retarget.py` the delta matrices are numpy column-convention, so pass `_mat3_to_quat(delta[:3,:3].T)` (transpose, no sign flip). For collision baking this is moot — **do not apply _mat3_to_quat to bhkRigidBodyT at all**.
@@ -162,7 +430,7 @@
 - Skeleton data: `asset_convert/generated/skeleton_bones_skyrim_{male,female}.json` and `skeleton_bones_oblivion.json`
 - Female armor detected via `/f/` in path → uses female skeleton data
 - PRN meshes (single bone, identity B) are NOT reposed — they're rigidly attached to one bone
-- **Critical**: ALWAYS use `_manual_update_bind_position()` instead of PyFFI's `update_bind_position()`. PyFFI's version computes wrong B values when geometry has a non-identity local transform. The manual numpy version handles this correctly.
+- **Critical**: ALWAYS use `manual_update_bind_position()` instead of PyFFI's `update_bind_position()`. PyFFI's version computes wrong B values when geometry has a non-identity local transform. The manual numpy version handles this correctly.
 - **Test suite**: `tests/test_skin_retarget.py` — 37 tests covering skeleton loading, bone mapping, MBW=I, vertex deformation, bone position accuracy, edge length preservation (<10% failure for cuirass, <5% for boots), full converter integration, skin partitions, PRN handling, BSDismemberSkin. All 37 pass.
 - **Previous approaches that FAILED** (16+ attempts):
   - v2 bind-matrix-only (no vertex deformation): Arms stuck in A-pose at rest.
@@ -180,7 +448,7 @@
   Nehrim's `LowerShirt10` ("Flickweste", `Clothes\LowerClass\10\M\shirt.NIF`).
 - **Cause**: Phase A of `retarget_skin_to_skyrim` computed a nested bone's local
   transform as `inv(parent_W) @ W_sk` — the COLUMN-vector form. This module is
-  row-vector throughout (`_m44_to_np` puts translation in row 3, and
+  row-vector throughout (`m44_to_np` puts translation in row 3, and
   `get_transform` composes `world = local @ parent`), so the correct expression
   is `W_sk @ inv(parent_W)`. Now `skin_retarget.local_for_world`, guarded by
   `tests/test_skin_retarget.py::TestLocalForWorld`.
@@ -199,7 +467,7 @@
   162.78, Hand 275.97, Spine2 20.76 units — and the wrong operand order
   reproduces those four numbers to four decimals.
 - 🔴 **Why no structural check could see it, and what to check instead.**
-  `_manual_update_bind_position` derives the bind matrices FROM these node
+  `manual_update_bind_position` derives the bind matrices FROM these node
   positions, so the file stays internally consistent: weight pairs (587/587),
   `_0`/`_1` rig equality, skin partitions, dismember slots, bone names, no
   missing bones, and `S @ B_i @ W_i = I` all pass. The game animates the
@@ -263,3 +531,101 @@ the heads in their respective head-pivot frames, measured from
 OB headhuman.nif vs SK malehead.nif (see docs/commentary/asset_convert_nif.md):
   skull top   OB +13.6  SK +11.5  -> dz = -2.1
   Y span      OB [-3.75, +11.31]  SK [-5.97, +11.58] -> the SK skull
+
+
+## Closing the last ~10% cuirass-edge gap — 17 ideas, 11 measured failures
+<a id="cuirass-edge-gap-ideas"></a>
+
+Moved out of `skin_retarget.py`, where it was 260 lines of comment above the
+first statement. Baseline at the time: **cuirass 10.80%, gauntlets 2.43%,
+boots 0.45%** edge failure (thresholds 15% / 15% / 10%).
+
+Root cause, measured: 418/418 UpperBody failures are Clavicle-adjacent
+(238 Clavicle-Clavicle + 104 Clavicle-UpperArmTwist + 76
+UpperArmTwist-UpperArmTwist). Adjacent vertices carry different bone-weight
+ratios, so DQS gives them slightly different effective rotations and the edge
+between them stretches. The residual arm RMSD ~4.0 is a rotation-only floor:
+UpperArmTwist (err 13.4) and ForearmTwist (err 9.4) are ~56% of arm cost and
+come from bone LENGTH differences, which rotation cannot fix.
+
+**Tried and reverted — do not retry without new evidence:**
+
+| Idea | Approach | Result |
+|---|---|---|
+| 1 | Pre-FK per-chain bone-length scaling | reverted |
+| 5 | Post-FK per-chain Procrustes/Kabsch snap | reverted |
+| 7 | Targeted twist-bone delta propagation | reverted |
+| 8 | Factored global+local FK | cuirass 10.80% -> 13.8% |
+| 9 | Edge spring relaxation, bone-dominance anchored | 10.80% -> 8.83%, but UV-seam twin vertices tore visible holes; DISABLED |
+| 10 | Laplacian deformation, bone-position constrained | all variants reverted; uniform Laplacian unsuitable |
+| 11 | Virtual intermediate shoulder-blend bone | 10.80% -> 10.04%, worse than spring |
+| 13 | ARAP | cuirass -> 36.21%, boots -> 18.79% |
+| 14 | Weight sharpening, gamma sweep 1.5-4.0 | reverted to gamma=1.0 |
+| 15 | Cotangent Laplacian correction | cuirass -> 32.5%, catastrophic |
+| 16 | Anchor co-rotation prediction (deformation transfer) | 9.05% -> 9.91% |
+
+**Never tried** (predictions only, no measurement): Gaussian pre-warp (2),
+thin-plate-spline warp (3), ARAP as originally framed (4), chain-level affine
+FK with shear (6), seam-welded spring relaxation (12), anchor-constrained
+spring with co-rotation targets (17).
+
+The pattern across 11 failures: any method that lets non-rigid deformation
+touch the mesh globally trades a small edge-length win for large distortion
+elsewhere. Idea 9 is the only one that ever improved the number, and it
+shipped disabled because the artifact it introduced was worse than the metric
+it fixed.
+
+## `retarget_skin_to_skyrim` — the four phases, and why the order is fixed
+<a id="retarget-phase-order"></a>
+
+`skin_retarget.retarget_skin_to_skyrim` runs four phases in a fixed order.
+Each ordering constraint below was paid for by a real defect.
+
+### Phase 0 — bake geometry into skeleton space
+
+Everything downstream (the FK deform, the body wrap, and Phase C's bind-matrix
+rewrite) assumes a geometry's stored vertices ALREADY sit in skeleton space.
+**That is not part of the skinning contract.** NifSkope renders a skinned mesh
+as `bone_world * skin_transform * vertex`, so the authored frame is arbitrary
+and it is the bind matrices that stand the mesh up.
+
+Most Oblivion armor happens to be authored with that product ≈ identity, so the
+distinction never surfaced — but **81 of 171 Morroblivion clothing meshes** store
+geometry in a genuinely different frame.
+
+Phase C (`manual_update_bind_position`) unconditionally rewrites the bind
+matrices to `B_i = G @ inv(W_i)`, which FORCES `S @ B_i @ W_i = I`. The
+transforms that were standing those meshes upright get destroyed, and the
+authored frame cannot be recovered afterwards. So the mesh must be baked into
+skeleton space up front — which also makes the raw coordinates mean what every
+later stage already assumes they mean.
+
+### Phase B — vertex deformation, BEFORE bone repositioning
+
+The preferred path is the surface-relative wrap: an exact fit onto the Skyrim
+body that preserves each vertex's authored clearance from the body surface.
+`weight` picks the `_0`/`_1` Skyrim body target for the weight-morph variants.
+
+**The FK animation deform is not dead code superseded by the wrap — it is the
+wrap's foundation.** `deform_geoms_wrap` runs `deform_vertices_animation_fk`
+internally as its smooth base and only adds the measured correction on top. The
+field BUILD itself FK-poses the Oblivion body meshes through this exact path
+(with `allow_wrap=False`, so the wrap can never bootstrap from a previous
+field), and FK remains the fallback when no wrap field exists for a gender.
+
+### Phase A — move bone NiNodes to Skyrim positions
+
+Bones are processed root-to-leaf (sorted by depth) so a parent's transform is
+already set when its children are computed. See `local_for_world` for the
+row-vector operand order and why reversing it stayed invisible until the bone
+tree became nested.
+
+`manual_update_bind_position` then derives the bind matrices FROM these node
+positions, so **a wrong position leaves the file internally consistent** and no
+structural check can catch it. In game the engine uses the actor's skeleton
+instead, and the vertices shoot off as spikes.
+
+### Phase C+D — recompute skin data, regenerate partitions
+
+A PRN piece hangs off ONE bone: in Oblivion the whole piece is parented to it,
+and each shape's node transform positions it within that bone's frame.

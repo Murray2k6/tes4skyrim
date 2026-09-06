@@ -70,7 +70,7 @@ This is the real failure mode, and it is measurable **before** shipping anything
 - **Vanilla**: every Skyrim record carries `OBND` (an AABB) in the dump.
 - **Oblivion**: TES4 has *no* OBND — but the pipeline already measures every
   converted mesh into `export/<plugin>/mesh_bounds_cache.json`
-  (`asset_convert.collision_extract.scan_mesh_data` →
+  (`asset_convert.collision.collision_extract.scan_mesh_data` →
   `tes5_import/mesh_bounds.py`). That is the Oblivion-side size, already on disk.
 
 So the comparison is free. **Measured across the 54 name-matched items that have

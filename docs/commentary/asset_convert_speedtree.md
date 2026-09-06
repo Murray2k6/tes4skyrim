@@ -1,6 +1,6 @@
-# asset_convert/spt_generator.py - SpeedTree conversion
+# asset_convert/speedtree/spt_generator.py - SpeedTree conversion
 
-**Code:** `asset_convert/spt_generator.py`, `asset_convert/spt_engine_geom.py`, `asset_convert/spt_parser.py`, `tools/disasm/oblivion_disasm.py`
+**Code:** `asset_convert/speedtree/spt_generator.py`, `asset_convert/speedtree/spt_engine_geom.py`, `asset_convert/speedtree/spt_parser.py`, `tools/disasm/oblivion_disasm.py`
 
 ## Contents
 
@@ -257,7 +257,7 @@ Ranked by effect on silhouette / distribution.
 ### Finding A — level-1 stem cap destroys conifer silhouette (WORST)
 
 `MAX_STEMS_PER_LEVEL = {1: 64, 2: 260, 3: 320}`
-([spt_generator.py:90](../../asset_convert/spt_generator.py#L90)).
+([spt_generator.py:90](../../asset_convert/speedtree/spt_generator.py#L90)).
 
 **31/139 trees exceed the level-1 cap; 53/117 exceed level 2; 6/6 exceed level 3.**
 Level 1 IS the silhouette on a conifer (many short whorled boughs):
@@ -326,7 +326,7 @@ Vertical distribution is more defensible (deciles peak mid-crown), but the
 ### Finding C — Placement Distance applied at a random azimuth
 
 Leaves-level 6004 (Placement/Distance) IS read
-([spt_generator.py:771](../../asset_convert/spt_generator.py#L771)) but offsets the
+([spt_generator.py:771](../../asset_convert/speedtree/spt_generator.py#L771)) but offsets the
 card at `rng.uniform(0, 2pi)` around the twig, so it puffs symmetrically rather
 than directionally.
 
@@ -340,7 +340,7 @@ correct behaviour.
 ### Finding D — leaf window silently clamped off the twig base
 
 `lx0 = np.clip(carrier_lv.child_first, 0.02, 0.95)`
-([spt_generator.py:731](../../asset_convert/spt_generator.py#L731)).
+([spt_generator.py:731](../../asset_convert/speedtree/spt_generator.py#L731)).
 **4 of 7 sampled trees author `child_first = 0.00`** (white pine, quaking
 aspen, willow, azalea) and get 0.02. `lx1 = max(lx1, lx0+0.05)` is a second
 unauthored widening of narrow windows.
@@ -348,8 +348,8 @@ unauthored widening of narrow windows.
 ### Finding E — golden-angle azimuth has NO basis in the engine
 
 `golden = pi*(3-sqrt(5))`, used as `az = golden*ci + rng.uniform(-0.35,0.35)`
-([spt_generator.py:582](../../asset_convert/spt_generator.py#L582),
-[:638](../../asset_convert/spt_generator.py#L638)).
+([spt_generator.py:582](../../asset_convert/speedtree/spt_generator.py#L582),
+[:638](../../asset_convert/speedtree/spt_generator.py#L638)).
 
 Scanned the whole binary for the phyllotaxis constants:
 
@@ -364,7 +364,7 @@ spiral. Our spiral imposes a regular helical rhythm the engine never produces.
 
 ### Finding F — `cnt = max(cnt, 4)` fabricates foliage
 
-[spt_generator.py:789](../../asset_convert/spt_generator.py#L789) forces ≥4 leaf
+[spt_generator.py:789](../../asset_convert/speedtree/spt_generator.py#L789) forces ≥4 leaf
 attachments per carrier even when `child_freq * stored_length` rounds to 0.
 dbush03 generates 2.2× its authored leaf count as a result.
 
@@ -373,7 +373,7 @@ dbush03 generates 2.2× its authored leaf count as a result.
 | field | set in | consequence |
 |---|---|---|
 | `size_variance` (2007) | **132/139** (median 10) | every instance of a tree type is identically sized; the engine varies them (ck-cmd passes `fVariance`) |
-| `orientation_var` (4002) | **138/139** (median 0.20) | used, but scaled by an invented `*90.0` at [spt_generator.py:1093](../../asset_convert/spt_generator.py#L1093); spec says percent |
+| `orientation_var` (4002) | **138/139** (median 0.20) | used, but scaled by an invented `*90.0` at [spt_generator.py:1093](../../asset_convert/speedtree/spt_generator.py#L1093); spec says percent |
 | `seg_pack` (16002) | **80/139** | vertex packing along length ignored |
 | `blossom_depth` (3001) | **57/139** | blossom depth rule unimplemented |
 
@@ -385,13 +385,13 @@ be handled for third-party plugins): `gen_dist` (26007), `gen_depth` (26008),
 `orientation_angle` (74002), fronds (13xxx/14xxx).
 
 > **Floor (27000) matters**: our crown-floor percentile heuristic
-> ([spt_generator.py:934-956](../../asset_convert/spt_generator.py#L934-L956))
+> ([spt_generator.py:934-956](../../asset_convert/speedtree/spt_generator.py#L934-L956))
 > duplicates an authored mechanism that **0/139 vanilla trees enable**. The
 > authored answer is "no floor" — so that cull removes foliage Oblivion keeps.
 
 ### Finding H — leaf-collision mode 2 modelled as poisson-disk thinning
 
-[spt_generator.py:837-868](../../asset_convert/spt_generator.py#L837-L868) affects
+[spt_generator.py:837-868](../../asset_convert/speedtree/spt_generator.py#L837-L868) affects
 **124/139 trees** (mode 2; 15 are mode 1). Blue-noise spacing is not what the
 engine does — it prunes leaves that intersect geometry. Tolerance (3007)
 median 0.32, range 0.00–0.60.
@@ -399,7 +399,7 @@ median 0.32, range 0.00–0.60.
 ### NON-defects (checked, do not "fix")
 
 - **Radius-profile `*1.05` monotone clamp**
-  ([spt_generator.py:404](../../asset_convert/spt_generator.py#L404)): every
+  ([spt_generator.py:404](../../asset_convert/speedtree/spt_generator.py#L404)): every
   sampled `radius_profile` (6006) is monotone-decreasing (max increase negative
   on all 7 trees), so the clamp never fires. Not a defect.
 - **Segment caps** `_CROSS_CAP`/`_RING_CAP`: mostly already under the caps.
@@ -820,7 +820,7 @@ then an orientation draw:
 ```
 i.e. **the leaf's orientation is a uniform draw between two authored per-map
 bounds**, not a `±(var*90°)` tilt as we currently model it
-([spt_generator.py:1093](../../asset_convert/spt_generator.py#L1093)).
+([spt_generator.py:1093](../../asset_convert/speedtree/spt_generator.py#L1093)).
 
 Then, at `0x79a348`:
 ```
@@ -1089,8 +1089,8 @@ map `x` onto the ring array by simple index scaling. It calls a bracket search:
 
 My first reading of this was that our index-linear interpolation
 (`fi = x * (len(points)-1)` at
-[spt_generator.py:764](../../asset_convert/spt_generator.py#L764) and
-[:626](../../asset_convert/spt_generator.py#L626)) would drift from the engine's
+[spt_generator.py:764](../../asset_convert/speedtree/spt_generator.py#L764) and
+[:626](../../asset_convert/speedtree/spt_generator.py#L626)) would drift from the engine's
 arc-length parametrisation on curved stems. **That is wrong.**
 
 `_grow_stem` advances by a **fixed step**:
@@ -1234,7 +1234,7 @@ Across all 139 Oblivion trees, 401 branch levels:
    the stem, so packing shifts the bend toward the tip.
 
 Our `_grow_stem` uses a **uniform** `t = i / n_rings`
-([spt_generator.py:357](../../asset_convert/spt_generator.py#L357)) and ignores
+([spt_generator.py:357](../../asset_convert/speedtree/spt_generator.py#L357)) and ignores
 `seg_pack` entirely. On the 23% of levels that author it, both the taper
 profile and the bend distribution are placed at the wrong points along the
 limb.
@@ -1441,7 +1441,7 @@ direction as well as a magnitude.
 This is the engine's disturbance model: **two independent variance-carrying
 samples of curve 6000 per ring, applied as a two-angle rotation**. Our
 generator instead uses a single deterministic sine "snake" with a per-stem
-random phase ([spt_generator.py:346-350](../../asset_convert/spt_generator.py#L346-L350)),
+random phase ([spt_generator.py:346-350](../../asset_convert/speedtree/spt_generator.py#L346-L350)),
 which is a different construction.
 
 ## 6q. 🛑 THE COMPLETE GRAVITY BEND MODEL — CLOSED
@@ -1497,7 +1497,7 @@ frame = Rodrigues(axis, angle_deg) * frame      ; 0x78f160 -> 0x78edd0
 - **`torque = 1 - |theta - 90|/90`** — the classic gravity moment: **1 when the
   limb is horizontal, 0 when it points straight up or straight down.** Note it
   is a **LINEAR falloff in degrees**, not the `sin(theta)` our generator uses
-  ([spt_generator.py:369-376](../../asset_convert/spt_generator.py#L369-L376)).
+  ([spt_generator.py:369-376](../../asset_convert/speedtree/spt_generator.py#L369-L376)).
 - **`theta_deg`** appears as a *second*, independent factor — so the bend scales
   with the angle from the pole **and** with the torque falloff.
 - **Everything is in DEGREES**; `0x78f160` divides by 57.2957802 internally.
@@ -1530,7 +1530,7 @@ result stored back, so **curvature accumulates ring over ring**. The
 disturbance rotation at `0x793280` operates on the same `ebx`.
 
 This matches our `_grow_stem`, which also rotates a running direction
-([spt_generator.py:356-396](../../asset_convert/spt_generator.py#L356-L396)) —
+([spt_generator.py:356-396](../../asset_convert/speedtree/spt_generator.py#L356-L396)) —
 that structural choice is correct; only the torque curve, the axis, and the
 magnitude terms differ (§6q).
 
@@ -1598,7 +1598,7 @@ The corrected map and the algorithm are in §6s.
    counts (section 6w, fully decompiled). What is NOT known is which authored
    section reaches those two slots — three candidate mappings were tested and
    all three falsified (see 6w). Our `orientation_var * 90` plus the
-   `uniform(-0.3, 0.3)` / `uniform(-0.25, 0.25)` fudges in `_leaf_card` remain
+   `uniform(-0.3, 0.3)` / `uniform(-0.25, 0.25)` fudges in `leaf_card` remain
    **invention** and are deliberately left unchanged rather than replaced by a
    fourth guess.
 2. **Leaf quad CORNER construction.** Card *dimensions* are settled (6t) and
@@ -2052,7 +2052,7 @@ camera-facing billboard per leaf, which Skyrim cannot render, so each centre
 becomes **two crossed quads** — the sanctioned deviation. Card size follows
 section 6t (`size.x/size.y * K * 0.5`); map choice follows 6g (uniform modulo,
 no blossom weighting). Implemented in
-`asset_convert/spt_engine_geom.py::_leaf_groups_from_centres`.
+`asset_convert/speedtree/spt_engine_geom.py::_leaf_groups_from_centres`.
 
 Shipped output verified: leaf card count is exactly 2x the engine leaf count
 (ginkgo 940 = 2x470, dogwood 2406 = 2x1203, dbush03 200 = 2x100).
@@ -2436,7 +2436,7 @@ Every store the branch getter makes into the caller's out-struct (`edi`):
 `tools/lod/spt_engine_to_nif.py` turns the result into a Skyrim NIF.
 The harness now lives in `native/src/spt_engine/` and its built .exe is
 committed to `native/dist/` (see that README) so end users need no C++
-toolchain; `asset_convert/spt_engine_geom.py` loads it from there.
+toolchain; `asset_convert/speedtree/spt_engine_geom.py` loads it from there.
 The engine path is the **DEFAULT** for SpeedTree conversion; the Python
 generator in `spt_generator.py` is the per-tree FALLBACK for anyone with no
 Oblivion install or no harness. Force it with `--no-engine-branches`.

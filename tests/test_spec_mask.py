@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import spec_mask                              # noqa: E402
+from asset_convert.texture import spec_mask
 
 
 def _hdr(w, h, fourcc):
@@ -102,7 +102,7 @@ class TestSpecularMaskDetection:
     def test_the_height_classifier_is_not_reused_wholesale(self):
         # parallax.classify_alpha calls the DXT3 sample above 'quantised' and
         # refuses it; spec_mask must not inherit that verdict
-        from asset_convert import parallax
+        from asset_convert.texture import parallax
         blob = _dxt3(8, 8, [0, 2, 4, 6, 8, 10, 12, 14,
                             15, 13, 11, 9, 7, 5, 3, 1])
         assert parallax.classify_alpha(blob).kind != 'height'

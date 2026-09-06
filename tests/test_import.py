@@ -43,6 +43,7 @@ from tes5_import.text_reader import (
     parse_record_block,
     unescape_value,
 )
+from tes5_import.tes5_reader import records as reader_records
 from tes5_import.writer import (
     FORM_VERSION_SSE,
     GROUP_HEADER_SIZE,
@@ -874,7 +875,7 @@ class TestConverters:
     def test_book_inventory_art_uses_generated_rig(self):
         """With a writer, INAM must reference a companion STAT pointing at the
         generated reading-rig mesh (meshes\\tes4\\clutter\\books\\inv\\
-        <model basename>.nif, built by asset_convert/book_inam.py), and books
+        <model basename>.nif, built by asset_convert/ui/book_inam.py), and books
         sharing the same TES4 model must share one STAT."""
         class _FakeWriter:
             def __init__(self):
@@ -1411,23 +1412,11 @@ class TestSkyrimRecordFormat:
 
     def _read_record(self, fid):
         """Read a record by FormID from Skyrim.esm."""
-        import mmap
         with open(self.SKYRIM_ESM, 'rb') as f:
-            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            pos = 0
-            while pos < len(mm) - 24:
-                sig = mm[pos:pos+4]
-                if sig == b'GRUP':
-                    pos += 24
-                    continue
-                sz = struct.unpack_from('<I', mm, pos+4)[0]
-                rec_fid = struct.unpack_from('<I', mm, pos+12)[0]
-                if rec_fid == fid:
-                    rec = bytes(mm[pos:pos+24+sz])
-                    mm.close()
-                    return rec
-                pos += 24 + sz
-            mm.close()
+            data = f.read()
+        for rec in reader_records(data, bodies=()):
+            if rec.form_id == fid:
+                return data[rec.offset:rec.end]
         return None
 
     def test_skyrim_dialogue_generic_qust(self):
@@ -1467,7 +1456,7 @@ class TestSkyrimRecordFormat:
 # Voice file naming tests
 # ---------------------------------------------------------------------------
 
-from asset_convert.audio_converter import _VOICE_FILENAME_RE, _TES4_VOICE_TYPE_MAP
+from asset_convert.audio.audio_converter import VOICE_FILENAME_RE, TES4_VOICE_TYPE_MAP
 
 
 class TestVoiceFileNaming:
@@ -1475,7 +1464,7 @@ class TestVoiceFileNaming:
 
     def test_regex_captures_prefix(self):
         """Regex must capture quest_topic prefix as group(1)."""
-        m = _VOICE_FILENAME_RE.match('arenaannouncer_announcer_0004216e_1.mp3')
+        m = VOICE_FILENAME_RE.match('arenaannouncer_announcer_0004216e_1.mp3')
         assert m is not None
         assert m.group(1) == 'arenaannouncer_announcer'
         assert m.group(2) == '0004216e'
@@ -1484,7 +1473,7 @@ class TestVoiceFileNaming:
 
     def test_regex_complex_prefix(self):
         """Regex handles multi-underscore prefixes correctly."""
-        m = _VOICE_FILENAME_RE.match('ms45_dar_ma_00012345_2.wav')
+        m = VOICE_FILENAME_RE.match('ms45_dar_ma_00012345_2.wav')
         assert m is not None
         assert m.group(1) == 'ms45_dar_ma'
         assert m.group(2) == '00012345'
@@ -1492,24 +1481,24 @@ class TestVoiceFileNaming:
 
     def test_regex_uppercase_formid(self):
         """Regex is case-insensitive for FormID hex digits."""
-        m = _VOICE_FILENAME_RE.match('questname_topicname_0004ABCD_1.xwm')
+        m = VOICE_FILENAME_RE.match('questname_topicname_0004ABCD_1.xwm')
         assert m is not None
         assert m.group(2) == '0004ABCD'
 
     def test_regex_fuz_extension(self):
         """Regex matches .fuz files."""
-        m = _VOICE_FILENAME_RE.match('quest_topic_00001234_1.fuz')
+        m = VOICE_FILENAME_RE.match('quest_topic_00001234_1.fuz')
         assert m is not None
         assert m.group(4) == 'fuz'
 
     def test_regex_rejects_short_formid(self):
         """Regex requires exactly 8 hex chars for FormID."""
-        m = _VOICE_FILENAME_RE.match('quest_topic_01234_1.mp3')
+        m = VOICE_FILENAME_RE.match('quest_topic_01234_1.mp3')
         assert m is None
 
     def test_regex_rejects_no_prefix(self):
         """Regex requires at least one underscore-separated prefix."""
-        m = _VOICE_FILENAME_RE.match('00012345_1.mp3')
+        m = VOICE_FILENAME_RE.match('00012345_1.mp3')
         assert m is None
 
     def test_voice_type_map_coverage(self):
@@ -1520,16 +1509,16 @@ class TestVoiceFileNaming:
         ]
         for race in playable_races:
             for gender in ('M', 'F'):
-                assert (race, gender) in _TES4_VOICE_TYPE_MAP, \
+                assert (race, gender) in TES4_VOICE_TYPE_MAP, \
                     f"Missing voice type for ({race}, {gender})"
 
     def test_voice_type_map_sheogorath(self):
         """Sheogorath has Male voice type only."""
-        assert ('Sheogorath', 'M') in _TES4_VOICE_TYPE_MAP
+        assert ('Sheogorath', 'M') in TES4_VOICE_TYPE_MAP
 
     def test_voice_type_naming_convention(self):
         """All voice types follow TES4{Male|Female}Race naming."""
-        for (race, gender), vtype in _TES4_VOICE_TYPE_MAP.items():
+        for (race, gender), vtype in TES4_VOICE_TYPE_MAP.items():
             sex = 'Male' if gender == 'M' else 'Female'
             assert vtype.startswith(f'TES4{sex}'), \
                 f"Voice type {vtype} for ({race}, {gender}) has wrong prefix"
@@ -1591,7 +1580,7 @@ class TestFurnConversion:
     """FURN MNAM/FNPR must index the converted NIF's clustered seat positions.
 
     The seat list is derived from the source NIF with the shared algorithm in
-    asset_convert/furniture_markers.py; MNAM bit i enables NIF position i, so
+    asset_convert/nif/furniture_markers.py; MNAM bit i enables NIF position i, so
     dangling bits would seat NPCs at garbage positions in-game.
     """
 
@@ -1677,7 +1666,7 @@ class TestFurnConversion:
         if not hasattr(time, 'clock'):
             time.clock = time.perf_counter
         from pyffi.formats.nif import NifFormat as NF
-        from asset_convert.nif_converter import convert_nif
+        from asset_convert.nif.nif_converter import convert_nif
         from tes5_import.record_types.items import _FURN_SEATS, _furn_model_key
 
         key = _furn_model_key('Furniture\\LowerClass\\LowerClassBench01.NIF')
@@ -4832,7 +4821,7 @@ class TestSkyMeshShaders:
     """
 
     def test_sky_meshes_are_classified_by_type(self):
-        from asset_convert.nif_converter import (
+        from asset_convert.nif.geometry_shader import (
             sky_object_type_for, SKY_STARS, SKY_CLOUDS, SKY_BASE)
         assert sky_object_type_for('export/x/meshes/sky/stars.nif') == SKY_STARS
         assert sky_object_type_for('export/x/meshes/sky/clouds.nif') == SKY_CLOUDS
@@ -4840,7 +4829,7 @@ class TestSkyMeshShaders:
         assert sky_object_type_for(r'export\x\meshes\Sky\Stars.NIF') == SKY_STARS
 
     def test_non_sky_meshes_are_not_misclassified(self):
-        from asset_convert.nif_converter import sky_object_type_for
+        from asset_convert.nif.geometry_shader import sky_object_type_for
         assert sky_object_type_for('meshes/clutter/barrel01.nif') is None
         # must key on the sky/ DIRECTORY, not just the basename
         assert sky_object_type_for('meshes/architecture/sky/wall.nif') is None
@@ -6575,7 +6564,7 @@ class TestMeshBoundsCacheSchema:
 
     def test_preschema_cache_reports_stale(self):
         """The exact shape of the shipped bug: 6-element entries, no stamp."""
-        from asset_convert.collision_extract import bounds_cache_is_current
+        from asset_convert.collision.collision_extract import bounds_cache_is_current
         with tempfile.TemporaryDirectory() as td:
             p = self._write(td, {'tes4/dungeons/caves/mines/'
                                  'mwallplankbreakaway01.nif':
@@ -6583,7 +6572,7 @@ class TestMeshBoundsCacheSchema:
             assert bounds_cache_is_current(p) is False
 
     def test_stamped_cache_reports_current(self):
-        from asset_convert.collision_extract import (bounds_cache_is_current,
+        from asset_convert.collision.collision_extract import (bounds_cache_is_current,
                                                      BOUNDS_SCHEMA_VERSION)
         with tempfile.TemporaryDirectory() as td:
             p = self._write(td, {'tes4/a.nif': [0, 0, 0, 1, 1, 1, 2],
@@ -6592,7 +6581,7 @@ class TestMeshBoundsCacheSchema:
 
     def test_older_schema_version_reports_stale(self):
         """Bumping the version must invalidate caches written at the old one."""
-        from asset_convert.collision_extract import (bounds_cache_is_current,
+        from asset_convert.collision.collision_extract import (bounds_cache_is_current,
                                                      BOUNDS_SCHEMA_VERSION)
         with tempfile.TemporaryDirectory() as td:
             p = self._write(td, {'tes4/a.nif': [0, 0, 0, 1, 1, 1, 2],
@@ -6600,7 +6589,7 @@ class TestMeshBoundsCacheSchema:
             assert bounds_cache_is_current(p) is False
 
     def test_missing_and_corrupt_cache_report_stale(self):
-        from asset_convert.collision_extract import bounds_cache_is_current
+        from asset_convert.collision.collision_extract import bounds_cache_is_current
         with tempfile.TemporaryDirectory() as td:
             assert bounds_cache_is_current(
                 os.path.join(td, 'nope.json')) is False
@@ -6611,7 +6600,7 @@ class TestMeshBoundsCacheSchema:
 
     def test_schema_key_is_not_loaded_as_a_mesh(self):
         """The stamp is not a path key and must never become a bounds entry."""
-        from asset_convert.collision_extract import BOUNDS_SCHEMA_VERSION
+        from asset_convert.collision.collision_extract import BOUNDS_SCHEMA_VERSION
         from tes5_import.mesh_bounds import (load_mesh_bounds, get_mesh_obnd,
                                              get_mesh_physics_flags)
         with tempfile.TemporaryDirectory() as td:
@@ -6623,7 +6612,7 @@ class TestMeshBoundsCacheSchema:
 
     def test_scan_stamps_the_schema(self):
         """Whatever scan_mesh_data writes must read back as current."""
-        from asset_convert.collision_extract import (scan_mesh_data,
+        from asset_convert.collision.collision_extract import (scan_mesh_data,
                                                      bounds_cache_is_current)
         with tempfile.TemporaryDirectory() as td:
             meshes = os.path.join(td, 'meshes')

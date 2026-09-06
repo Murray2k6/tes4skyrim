@@ -1,6 +1,6 @@
-# asset_convert/audio_converter.py - sound and music
+# asset_convert/audio/audio_converter.py - sound and music
 
-**Code:** `asset_convert/audio_converter.py`, `asset_convert/music_convert.py`, `asset_convert/door_sounds.py`
+**Code:** `asset_convert/audio/audio_converter.py`, `asset_convert/audio/music_convert.py`, `asset_convert/audio/door_sounds.py`
 
 ## Contents
 
@@ -409,3 +409,67 @@ With `tes4DataPath` empty, a bare CLI run registry-detects Oblivion and finds
 none of Nehrim's BSAs or its loose `Music\`. That is a configuration state, not
 a bug: set the path (or use the GUI) and both the BSA pass and the loose-music
 ingest resolve correctly.
+
+## Voice conversion: the LipGenerator Fonix mutex
+<a id="lipgenerator-fonix-mutex"></a>
+
+`LipGenerator.exe` is single-threaded *for the whole machine*, not per process.
+The Fonix engine inside it serializes every instance through a named mutex
+(`FonixMemoryMutex`), so aggregate throughput caps at **~8 lips/s** no matter
+how many processes run. The visible symptom is dozens of LipGenerator processes
+each sitting at ~0.1% CPU, ~97% idle waiting their turn.
+
+The mutex guards nothing shared: the exe creates no file mapping, and each
+process's Fonix state is private. Renaming the mutex in per-worker copies of the
+exe lets them run genuinely in parallel.
+
+**Measured: ~8.5 → ~105 lips/s with 32 workers.** Per-call latency also drops
+from 6–9 s to ~0.3 s, because the tool's own 1 s poll loop was itself waiting on
+the contended mutex.
+
+`build_lipgen_pool()` makes the per-worker copies; each lands in its own
+subdirectory with `FonixData.cdf` hard-linked beside it, since the exe loads the
+`.cdf` relative to its own location.
+
+## Voice file naming: the Oblivion prefix cannot be trusted
+<a id="voice-file-naming-prefix"></a>
+
+The two engines name voice files differently, and the difference is not
+recoverable from the filename alone:
+
+| | Pattern |
+|---|---|
+| Oblivion | `<quest>_<topic>_<infoFID8hex>_<idx>.<ext>` |
+| Skyrim | `<prefix>_<InfoFormID>_<RespNum>.<ext>` |
+
+Skyrim builds `<prefix>` **at runtime** from the converted plugin's own
+owning-quest and topic EditorIDs, applying its own truncation rules (see
+`dialog_converter.voice_file_prefix`). The Oblivion filename prefix encodes
+*Oblivion's* truncation of the *original* quest name, so it will not match.
+
+Files are therefore renamed through the voicemap the importer emits, keyed on
+the InfoFormID with the load-order byte stripped (a 24-bit value). The voicemap
+line may also carry a tab-separated VTYP list naming the folder(s) the speaker
+actually resolves to when that differs from the Oblivion source race folder —
+Arvena Thelas is a Dark Elf whose recordings sit under `high elf/f/`. An empty
+list means keep the source race folder, which is correct for generic lines
+recorded once per race.
+
+`TES4_VOICE_TYPE_MAP` maps (TES4 race folder, gender) to the custom TES5
+VoiceType EditorID, and must stay in step with the VTYP records
+`import_main._create_vtyp_records()` creates. It carries alternate spellings
+(`high elf` as well as `HighElf`) because Oblivion's BSA folder names are
+inconsistent.
+
+## Pruning stale voice output
+<a id="pruning-stale-voice-output"></a>
+
+`prune_stale_voice_files()` deletes output files this run did not want, and the
+ordering around it is load-bearing in two places:
+
+- **Prune even when every file already exists.** "Nothing to convert" is exactly
+  the state a re-run lands in after a rename, with the OLD names still sitting
+  alongside the new ones.
+- **Prune AFTER conversion, never before.** A job that fails never writes its
+  output; pruning first would delete the previous run's still-usable file and
+  leave nothing in its place.

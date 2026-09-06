@@ -1,6 +1,6 @@
 # tes5_import/record_types/magic.py - magic conversion
 
-**Code:** `tes5_import/record_types/equipment.py`, `tes5_import/record_types/magic.py`, `tes5_import/vanilla_mgef_data.py`, `asset_convert/skyrim_overrides.py`
+**Code:** `tes5_import/record_types/equipment.py`, `tes5_import/record_types/magic.py`, `tes5_import/vanilla_mgef_data.py`, `asset_convert/character/skyrim_overrides.py`
 
 ## Contents
 

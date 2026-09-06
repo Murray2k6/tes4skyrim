@@ -5,7 +5,7 @@
             those actually carry height data.  This is the measurement that
             decides how much there is to convert; over half the flagged
             textures normally have nothing in them, which is not a defect (see
-            asset_convert/parallax.py).
+            asset_convert/texture/parallax.py).
 
   verify  — read the CONVERTED meshes: is every parallax shape built the way
             Skyrim wants it (shader type 3, SLSF1_Parallax, height in slot 3,
@@ -45,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, '.')
 
-from asset_convert import parallax as px            # noqa: E402
+from asset_convert.texture import parallax as px
 
 _DXGI_BC4_UNORM = 80
 
@@ -56,7 +56,8 @@ _DXGI_BC4_UNORM = 80
 
 def scan_source(path):
     """(shape name, diffuse path, has vertex colors) for each flagged shape."""
-    from asset_convert import pyffi_monkey_patch      # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     out = []
     try:
@@ -85,8 +86,8 @@ def scan_source(path):
 
 
 def census(plugin, subdir, mx, workers, show_all):
-    from asset_convert.nif_converter import (_resolve_source_texture,
-                                             _rewrite_tex_path)
+    from asset_convert.nif.nif_converter import (resolve_source_texture,
+                                             rewrite_tex_path)
     meshes = Path('export') / plugin / 'meshes'
     if subdir:
         meshes = meshes / subdir
@@ -136,7 +137,7 @@ def census(plugin, subdir, mx, workers, show_all):
     shapes_per_kind = Counter()
     per_tex = {}
     for low, (tex, any_path) in sorted(by_tex.items()):
-        src = _resolve_source_texture(_rewrite_tex_path(tex.encode()), any_path)
+        src = resolve_source_texture(rewrite_tex_path(tex.encode()), any_path)
         if src is None:
             info_kind, fmt = 'unresolved', '-'
         else:
@@ -194,7 +195,8 @@ def census(plugin, subdir, mx, workers, show_all):
 
 def scan_output(path):
     """(shape name, problem or None, slot0, slot3) per parallax shape."""
-    from asset_convert import pyffi_monkey_patch      # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
     out = []
     try:

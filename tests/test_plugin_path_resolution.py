@@ -75,22 +75,22 @@ ALLOWED = {
     ('output_layout.py', 'plugin_out_root'),
     ('output_layout.py', 'asset_root'),
     ('output_layout.py', 'record_dir'),
-    ('asset_convert/source_registry.py', 'asset_root'),
-    ('asset_convert/source_registry.py', 'record_dir'),
-    ('asset_convert/source_registry.py', 'source_dir'),
-    ('asset_convert/source_registry.py', 'plugin_binary'),
-    ('asset_convert/sibling_lod.py', '_record_dir'),
-    ('asset_convert/sibling_lod.py', '_out_root'),
+    ('asset_convert/sources/source_registry.py', 'asset_root'),
+    ('asset_convert/sources/source_registry.py', 'record_dir'),
+    ('asset_convert/sources/source_registry.py', 'source_dir'),
+    ('asset_convert/sources/source_registry.py', 'plugin_binary'),
+    ('asset_convert/lod/sibling_lod.py', 'record_dir'),
+    ('asset_convert/lod/sibling_lod.py', 'out_root'),
     ('asset_convert/asset_pipeline.py', '_asset_root'),
-    ('asset_convert/asset_pipeline.py', '_record_dir'),
-    ('asset_convert/asset_pipeline.py', '_out_root'),
-    ('asset_convert/audio_converter.py', '_asset_root'),
-    ('asset_convert/audio_converter.py', '_out_root'),
-    ('asset_convert/book_inam.py', '_record_dir'),
-    ('asset_convert/book_inam.py', '_asset_root'),
-    ('asset_convert/book_inam.py', '_out_root'),
-    ('asset_convert/bsa_pack.py', '_out_root'),
-    ('asset_convert/terrain_lod.py', '_master_record_dir'),
+    ('asset_convert/asset_pipeline.py', 'record_dir'),
+    ('asset_convert/asset_pipeline.py', 'out_root'),
+    ('asset_convert/audio/audio_converter.py', '_asset_root'),
+    ('asset_convert/audio/audio_converter.py', 'out_root'),
+    ('asset_convert/ui/book_inam.py', 'record_dir'),
+    ('asset_convert/ui/book_inam.py', '_asset_root'),
+    ('asset_convert/ui/book_inam.py', 'out_root'),
+    ('asset_convert/sources/bsa_pack.py', 'out_root'),
+    ('asset_convert/lod/terrain_lod.py', '_master_record_dir'),
     ('tes5_import/overrides.py', '_master_export_dir'),
     ('tes5_import/master_manifest.py', '_master_export_dir'),
     ('convert.py', 'record_dir'),
@@ -98,8 +98,8 @@ ALLOWED = {
 
     # mod_ingest BUILDS the group folder, so it necessarily joins a name it
     # computed itself onto the export root.
-    ('asset_convert/mod_ingest.py', 'ingest'),
-    ('asset_convert/mod_ingest.py', 'remove'),
+    ('asset_convert/sources/mod_ingest.py', 'ingest'),
+    ('asset_convert/sources/mod_ingest.py', 'remove'),
 
     # The migration tool's whole job is walking the OLD per-plugin folders.
     ('tools/esm/migrate_group_layout.py', 'migrate'),
@@ -131,7 +131,7 @@ def _root_name(node):
     """The ROOT variable `node` denotes, if any.
 
     `Path(export_dir)` counts -- it is still the root. A CALL to a resolver
-    (`_out_root(...) / name`) does NOT: that has already resolved the group
+    (`out_root(...) / name`) does NOT: that has already resolved the group
     folder, and joining the plugin file onto it is exactly right.
     """
     if isinstance(node, ast.Name):
@@ -291,11 +291,11 @@ ASSET_ALLOWED = {
     # assets_for IS the mapping from a record dir to its asset tree.
     ('output_layout.py', 'assets_for'),
     # These receive an already-resolved asset root, not a record dir.
-    ('asset_convert/collision_extract.py', 'scan_mesh_data'),
+    ('asset_convert/collision/collision_extract.py', 'scan_mesh_data'),
     ('tes5_import/pgrd_to_navm.py', '_door_axis_map'),
     ('tes5_import/pgrd_to_navm.py', '_bounds_map'),
     # animdata_base is a PER-PLUGIN cache and correctly sits in the record dir.
-    ('asset_convert/creature_pipeline.py', 'merge_animdata_singlefiles'),
+    ('asset_convert/havok/creature_pipeline.py', 'merge_animdata_singlefiles'),
 }
 
 
@@ -394,7 +394,7 @@ def test_the_two_output_scanners_agree(tmp_path):
     """
     import json
     import gui
-    from asset_convert.sibling_lod import converted_plugins
+    from asset_convert.lod.sibling_lod import converted_plugins
 
     out = tmp_path / 'output'
     # A group folder holding two plugins, plus a solo conversion.
@@ -421,7 +421,7 @@ def test_texture_manifests_live_beside_the_meshes_they_describe(tmp_path):
     in a folder the prune never reads, which made `build_refs` abort the whole
     BSA pack with "no mesh texture manifest".
     """
-    from asset_convert import texture_prune
+    from asset_convert.texture import texture_prune
     from output_layout import assets_for
 
     # A record dir nested inside a mod folder.

@@ -13,49 +13,8 @@ Usage:
 
 import argparse
 import struct
-import zlib
 
-
-def _iter_records(data, start, end):
-    """Yield (sig, formid, flags, body_bytes) for records under [start,end),
-    recursing into GRUP groups. Decompresses compressed records."""
-    off = start
-    while off + 24 <= end:
-        sig = data[off:off + 4]
-        size = struct.unpack_from('<I', data, off + 4)[0]
-        if sig == b'GRUP':
-            grp_end = off + size
-            yield from _iter_records(data, off + 24, min(grp_end, end))
-            off = grp_end
-            continue
-        flags = struct.unpack_from('<I', data, off + 8)[0]
-        formid = struct.unpack_from('<I', data, off + 12)[0]
-        body = data[off + 24:off + 24 + size]
-        if flags & 0x00040000:  # Compressed
-            try:
-                body = zlib.decompress(body[4:])
-            except zlib.error:
-                pass
-        yield sig.decode('latin1'), formid, flags, body
-        off += 24 + size
-
-
-def _iter_subrecords(body):
-    """Yield (sig, data_bytes) honoring the XXXX oversized protocol."""
-    off = 0
-    override = None
-    while off + 6 <= len(body):
-        sig = body[off:off + 4].decode('latin1')
-        size = struct.unpack_from('<H', body, off + 4)[0]
-        off += 6
-        if sig == 'XXXX':
-            override = struct.unpack_from('<I', body, off)[0]
-            off += size
-            continue
-        real = override if override is not None else size
-        override = None
-        yield sig, body[off:off + real]
-        off += real
+from tes5_import.tes5_reader import records, subrecords
 
 
 def _hex(b, limit=None):
@@ -143,9 +102,9 @@ def main():
         want.add('NAVM')
 
     count = {s: 0 for s in want}
-    for sig, formid, flags, body in _iter_records(data, start, len(data)):
-        if sig not in want:
-            continue
+    for rec in records(data, *(s.encode('latin1') for s in want)):
+        sig, formid, flags, body = (rec.sig.decode('latin1'), rec.form_id,
+                                    rec.flags, rec.body)
         if count[sig] >= args.max:
             if all(count[s] >= args.max for s in want):
                 break
@@ -153,7 +112,8 @@ def main():
         count[sig] += 1
         print(f"\n=== {sig} 0x{formid:08X} flags=0x{flags:08X} "
               f"bodylen={len(body)} ===")
-        for ssig, sdata in _iter_subrecords(body):
+        for stag, sdata in subrecords(body):
+            ssig = stag.decode('latin1')
             print(f"  {ssig} ({len(sdata)}): {_hex(sdata, args.hexlimit)}")
             if ssig == 'NVNM' and args.nvnm_decode:
                 try:

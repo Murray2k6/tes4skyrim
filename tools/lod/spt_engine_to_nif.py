@@ -5,7 +5,7 @@
 statically linked into Oblivion.exe and writes the engine's own vertex buffers
 to a `.bin`.  This turns that dump into a Skyrim-format NIF, so the ENGINE's
 branch geometry can be inspected and compared against
-`asset_convert/spt_generator.py` output byte-for-byte instead of by eye.
+`asset_convert/speedtree/spt_generator.py` output byte-for-byte instead of by eye.
 
 The .bin layout (written by spt_engine_dump.cpp):
 
@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from asset_convert.spt_converter import _make_shape, NifFormat  # noqa: E402
+from asset_convert.speedtree.spt_converter import make_shape, NifFormat
 
 
 def read_dump(path: Path):
@@ -98,7 +98,7 @@ def build_nif(co, no, uv, tris, texture: str, name: str) -> bytes:
     t[~np.isfinite(t)] = 0.0
 
     colors = np.ones((len(v), 4), np.float32)
-    shape = _make_shape(name.encode(), v, nrm, t, colors, f, texture, '')
+    shape = make_shape(name.encode(), v, nrm, t, colors, f, texture, '')
 
     root = NifFormat.NiNode()
     root.name = name.encode()

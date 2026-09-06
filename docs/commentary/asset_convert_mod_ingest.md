@@ -1,6 +1,6 @@
-# asset_convert/mod_ingest.py - mod archive ingest
+# asset_convert/sources/mod_ingest.py - mod archive ingest
 
-**Code:** `asset_convert/bsa_extract.py`, `asset_convert/mod_ingest.py`, `asset_convert/source_registry.py`, `tes5_import/overrides.py`
+**Code:** `asset_convert/sources/bsa_extract.py`, `asset_convert/sources/mod_ingest.py`, `asset_convert/sources/source_registry.py`, `tes5_import/overrides.py`
 
 ## Contents
 
@@ -147,12 +147,12 @@ like everything else. Add the `tkinterdnd2` row to the README's optional table
 | # | Assumption | Where | Why an archive breaks it |
 |---|---|---|---|
 | A1 | Plugin binary is at `<tes4DataPath>/<file_name>` | `phase_export` ([convert.py:209](../../convert.py#L209)), `topological_order` ([convert.py:173](../../convert.py#L173)) | An archive's ESP is not in `Data`, and must never be copied there |
-| A2 | Assets come from BSAs found by plugin name | `_get_bsa_files` ([asset_convert/bsa_extract.py:150](../../asset_convert/bsa_extract.py#L150)) | Loose-file mods have no BSA; Elsweyr's BSAs live in an archive, not `Data` |
+| A2 | Assets come from BSAs found by plugin name | `get_bsa_files` ([asset_convert/sources/bsa_extract.py:150](../../asset_convert/sources/bsa_extract.py#L150)) | Loose-file mods have no BSA; Elsweyr's BSAs live in an archive, not `Data` |
 | A3 | `tes4DataPath` is one global path per run | `get_paths` ([convert.py:129](../../convert.py#L129)) | Mixing `Oblivion.esm` with an imported mod needs two sources |
 
 Everything downstream is already safe. The BSA extractor writes to
 `export/<plugin>/{meshes,textures,sound,trees,misc}`
-([bsa_extract.py:378-390](../../asset_convert/bsa_extract.py#L378-L390)) — exactly the
+([bsa_extract.py:378-390](../../asset_convert/sources/bsa_extract.py#L378-L390)) — exactly the
 shape a loose-file mod has. Masters resolve as **sibling directories under
 `export/`** ([overrides.py:73-80](../../tes5_import/overrides.py#L73-L80)).
 
@@ -173,14 +173,48 @@ Per spec, exactly two shapes:
 > archive root.**
 
 Shallowest `Data` wins, so a mod shipping `Docs\Data\` beside a real `Data\`
-resolves deterministically. Equal-depth ties are reported, never guessed.
+resolves deterministically. Equal-depth ties are reported, never guessed —
+unless every tied folder is an installer sub-package, which is the case below.
 Everything outside the payload root is ignored — readmes, screenshots,
 Elsweyr's `00 …ReadMe-Quests-Guide\`.
 
-Inside it, entries use the **same category split as the BSA extractor**,
-lower-cased: `meshes\`, `trees\`, `textures\`, `sound\`, everything else →
-`misc/`. Elsweyr's `DistantLOD\` lands in `misc/DistantLOD/` — where the BSA
-path would have put it.
+#### <a id="payload-roots"></a>BAIN sub-packages
+
+A BAIN "complex" package has no folder named `Data` at all. It ships each
+installable option in its own top-level folder, and the installer merges the
+ones the user picks:
+
+    00 Data Files\                  meshes, textures, icons, sound...
+    01 Data Files - Normal Maps\    textures
+
+**The numeric prefixes are cosmetic.** Wrye Bash never parses them — it sorts
+sub-packages by name and nothing more. The real rule is structural, taken from
+`Installer._reset_cache` in Wrye Bash's `Mopy/bash/bosh/bain.py`:
+
+* **Type 1 (simple)** — a loose file of an installable type at the archive
+  root, or a top-level folder that is itself a recognised data dir. The payload
+  is the archive root and there are no sub-packages. This check WINS: one loose
+  `.esp` at the root demotes the whole archive.
+* **Type 2 (complex)** — otherwise, every top-level folder whose own second
+  level is a recognised data dir, or which holds a top-level installable file.
+  All of them are payload roots.
+
+`DATA_DIRS` is Wrye Bash's `GameInfo.Bain.data_dirs`, the union of its Oblivion
+and Morrowind sets, so this works for both games.
+
+One deliberate divergence: Wrye Bash also accepts a docs-only folder as a
+sub-package, because it skips the docs afterwards. We drop docs outright, so a
+`ReadMe-Quests-Guide\` folder that qualified here would install as an empty
+sub-package — `_is_subpackage` requires a real asset or plugin.
+
+Because several roots can be active, `payload_root` is a LIST; a single `Data`
+folder is the one-element case, `[]` means the archive root, and an ordinary
+equal-depth `Data` tie is still reported as ambiguous rather than merged.
+
+Measured on Tamriel Data (HD) (2.3 GB, 46,864 files): with the old exact-`Data`
+rule no root matched and the whole tree landed in `misc/00 Data Files/…`, where
+no asset stage could see it. Now it reads as 30,930 meshes, 9,246 textures,
+1,565 sound, 5,122 misc.
 
 ### 3.2 Nested archives
 
@@ -285,7 +319,7 @@ feature half-works:
 
 ### 3.7 Ingest module
 
-**`asset_convert/mod_ingest.py`**
+**`asset_convert/sources/mod_ingest.py`**
 
 ```python
 def inspect(path, *, max_depth=3) -> ArchiveManifest   # read-only, fast
@@ -302,7 +336,7 @@ confirms.**
 loose wins) → recurse nested archives → copy plugin(s) to `_source/` → retain
 the archive → write `sources.json` + `.mod_ingest_manifest.json`, keyed on
 SHA-1 + size so a re-run is a cached no-op, mirroring
-[bsa_extract.py:346-353](../../asset_convert/bsa_extract.py#L346-L353).
+[bsa_extract.py:346-353](../../asset_convert/sources/bsa_extract.py#L346-L353).
 
 **Path safety is mandatory.** Member names are attacker-controlled and these
 files come off the internet. Every write goes through one `_safe_join`
@@ -496,12 +530,12 @@ python convert.py -f ElsweyrAnequina.esp        # converts like any plugin
 
 | File | Change |
 |---|---|
-| `asset_convert/mod_ingest.py` | **New.** Inspect, layout rule, nested archives, safe extraction, routing, archive retention, manifest |
+| `asset_convert/sources/mod_ingest.py` | **New.** Inspect, layout rule, nested archives, safe extraction, routing, archive retention, manifest |
 | `asset_convert/fomod.py` | **New.** `ModuleConfig.xml` → option tree → file mapping; BAIN numbered folders |
-| `asset_convert/source_registry.py` | **New.** Read/write `export/sources.json` |
+| `asset_convert/sources/source_registry.py` | **New.** Read/write `export/sources.json` |
 | `convert.py` | `resolve_plugin_path`; route `topological_order` + `phase_export`; `phase_extract` branch; `--import-mod` / `--list-mods` / `--remove-mod` |
 | `gui.py` | Source-scope selector, sidebar drop zone + cursor, optional `tkinterdnd2` root, `Mods` menu, import + FOMOD dialogs, `_select_converted` registry branch, validation widening |
-| `asset_convert/bsa_extract.py` | Extract `_should_extract_file` + the category-routing split into reusable helpers (currently inline in `extract_bsa`) so ingest cannot drift from it |
+| `asset_convert/sources/bsa_extract.py` | Extract `should_extract_file` + the category-routing split into reusable helpers (currently inline in `extract_bsa`) so ingest cannot drift from it |
 | `preflight.py` | `_pip` entries for `py7zr` / `rarfile` / `tkinterdnd2` |
 | `README.md` | Optional-dependency table rows + the `pip install` line |
 | `docs/reference/python_tools.md` | New modules + flags (**required same pass**, per CLAUDE.md) |
@@ -529,7 +563,7 @@ Synthetic in-memory zips, well under the 120 s limit.
 5. **Nested archive** — zip-in-zip ingested; depth cap enforced.
 6. **Multiple plugins** — a two-ESP archive registers both against one shared
    payload with a common `group_id`.
-7. **`.lip` exclusion** parity with `_should_extract_file`.
+7. **`.lip` exclusion** parity with `should_extract_file`.
 8. **Idempotence** — re-ingest of an unchanged archive writes nothing.
 9. **Additive guarantee** — with an empty registry, `resolve_plugin_path` and
    `phase_extract` reproduce today's behaviour exactly.
@@ -590,8 +624,8 @@ and the drop zone is presentation over an already-working import.
 
 ## BSA naming per game
 
-**Code:** `_get_bsa_files` and `_EXTRA_BSA_BASES` in
-`asset_convert/bsa_extract.py`
+**Code:** `get_bsa_files` and `_EXTRA_BSA_BASES` in
+`asset_convert/sources/bsa_extract.py`
 
 Archive discovery builds candidate filenames from the plugin stem, which holds
 for Oblivion but not for every game:

@@ -1,6 +1,6 @@
 """An overlay must never import its OWN worldspaces into the target one.
 
-`_scan_land_file` historically treated "this file has no such WRLD record" as
+`scan_land_file` historically treated "this file has no such WRLD record" as
 "no filter — take every LAND record". For the file a worldspace is sourced FROM
 that fallback is a reasonable last resort. For an OVERLAY it is data corruption:
 an override plugin routinely edits a master's worldspace through the master's
@@ -25,8 +25,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import terrain_lod
-from asset_convert.terrain_lod import _scan_land_file
+from asset_convert.lod import terrain_lod
+from asset_convert.lod.terrain_lod import scan_land_file
 
 
 def _rec(sig: bytes, fid: int, body: bytes) -> bytes:
@@ -81,10 +81,10 @@ TARGET_FID = 0x0100003C
 # 01 is Oblivion.esm; `_norm` states that mapping explicitly rather than
 # hard-coding whatever integer the global table happens to assign.
 def _norm(fid: int, masters=('Skyrim.esm', 'Oblivion.esm')) -> int:
-    from asset_convert.lod_gen import _global_file_index
+    from asset_convert.lod.esm_scan import global_file_index
     owner = (masters[fid >> 24] if (fid >> 24) < len(masters) else None)
     assert owner is not None, 'test ids should name a declared master'
-    return _global_file_index(owner.lower()) << 24 | (fid & 0x00FFFFFF)
+    return global_file_index(owner.lower()) << 24 | (fid & 0x00FFFFFF)
 
 
 @pytest.fixture
@@ -105,7 +105,7 @@ class TestOverlayScoping:
              [_cell(0x02380100, 5, 5), _cell(0x02380200, 6, 6)]),
         ])
         lands = {}
-        _scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
+        scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
                         allow_unscoped=False,
                         known_wrld_fid=_norm(TARGET_FID))
         assert lands == {}, (
@@ -120,7 +120,7 @@ class TestOverlayScoping:
              [_cell(0x02380100, 5, 5), _cell(0x02380200, 6, 6)]),
         ])
         lands = {}
-        _scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
+        scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
                         allow_unscoped=True)
         assert set(lands) == {(5, 5), (6, 6)}, (
             'the unscoped fallback is what the overlay path must NOT use')
@@ -137,7 +137,7 @@ class TestOverlayScoping:
             (0x02380000, 'SomeOtherWorld', [_cell(0x02380100, 5, 5)]),
         ])
         lands = {}
-        _scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
+        scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
                         allow_unscoped=False,
                         known_wrld_fid=_norm(TARGET_FID))
         assert set(lands) == {(1, 2)}, (
@@ -151,7 +151,7 @@ class TestOverlayScoping:
             (0x02380000, 'Other', [_cell(0x02380100, 5, 5)]),
         ])
         lands = {}
-        _scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {})
+        scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {})
         assert set(lands) == {(1, 2)}
 
     def test_no_formid_and_no_fallback_takes_nothing(self, plugin_file):
@@ -159,7 +159,7 @@ class TestOverlayScoping:
             (0x02380000, 'Other', [_cell(0x02380100, 5, 5)]),
         ])
         lands = {}
-        _scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
+        scan_land_file(esm, 'TES4Tamriel', lands, {}, {'default': None}, {},
                         allow_unscoped=False, known_wrld_fid=None)
         assert lands == {}
 
@@ -174,7 +174,7 @@ class TestParseLandRecords:
         overlay = plugin_file('Foreign.esm', [
             (0x02380000, 'WrldMorrowind', [_cell(0x02380100, 5, 5)]),
         ])
-        lands, _water, _wh = terrain_lod._parse_land_records(
+        lands, _water, _wh = terrain_lod.parse_land_records(
             base, 'TES4Tamriel', [overlay])
         assert set(lands) == {(1, 2)}, (
             'the overlay\'s own worldspace leaked into the merged heightmap')

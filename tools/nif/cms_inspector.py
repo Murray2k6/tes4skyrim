@@ -17,7 +17,7 @@ if not hasattr(time, 'clock'):
     time.clock = time.perf_counter  # PyFFI 2.2.3 uses removed time.clock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from asset_convert.cms import decode_cms  # noqa: E402
+from asset_convert.collision.cms import decode_cms
 
 
 def _vec(v):

@@ -244,7 +244,7 @@ from comparing two conversion runs.
   The fix is not "return nothing when the WRLD is absent", which would throw
   away the edits that must survive: DLCBattlehornCastle regrades 10 Tamriel
   cells while shipping no WRLD either, and its records sit under a type-1 GRUP
-  labelled with the MASTER's WRLD FormID. So `_parse_land_records` resolves the
+  labelled with the MASTER's WRLD FormID. So `parse_land_records` resolves the
   FormID once from the file that DEFINES the worldspace and passes it to every
   overlay as `known_wrld_fid`; only the base file keeps `allow_unscoped=True`.
   The object-LOD path (`lod_gen`) was never affected — it resolves `wrld_fid`
@@ -259,7 +259,7 @@ from comparing two conversion runs.
   This is the same defect the importer fixed in four places (see the
   master-index routing entry above), and it was still live in the LOD stage.
   `generate_lod` merges overlays into one reference pool keyed by FormID, and
-  `_scan_land_file`/`_scan_cell_coords` accumulate several files into one
+  `scan_land_file`/`_scan_cell_coords` accumulate several files into one
   cell table — all on the RAW id. But the index byte is an offset into the
   file's OWN `MAST` list, so the same integer names different records in
   different plugins, and one record has different integers in different
@@ -294,12 +294,12 @@ from comparing two conversion runs.
   included). Synthetic test plugins must declare a `MAST` list or every id
   resolves to the file itself.
 - <a id="create-lod-order"></a>**`create_lod_order` deliberately differs from
-  `_load_order`, and the difference is CONSENT.** LOD is generated for the
+  `load_order`, and the difference is CONSENT.** LOD is generated for the
   whole load order in one pass (`tools/release/create_lod.py`, the GUI's *Create LOD*
   button) and that dialog SHOWS the order, lets the user drag it, and does
   nothing until they press Generate. So the rule is the one the user asked
   for: everything `plugins.txt` lists comes FIRST in its own order, and
-  everything else is appended at the BOTTOM. `_load_order`'s
+  everything else is appended at the BOTTOM. `load_order`'s
   unlisted-plugins-first rule is right for a merge nobody looked at — an
   unpositioned plugin must not silently outrank a positioned one — but wrong
   once the list is on screen and confirmed.
@@ -832,3 +832,133 @@ The fix is the one the importer already applies when writing overrides (see
 docs/commentary/tes5_import_override.md, "the same bug existed in FOUR places"): resolve
 every id to (owning FILE, local id) by looking the index byte up in the file's
 master list BY NAME, and merge on that pair instead.
+
+## GRUP path caching
+<a id="group-path-caching"></a>
+
+`MasterIndex._scan` records the GRUP nesting of every record, so `group_path`
+can reproduce a master's exact hierarchy in an override (a CELL written flat is
+never indexed by the engine — see "group_path" above).
+
+The nesting is a property of the GROUP, not the record, so building it per
+record is pure waste: `output/Oblivion.esm` holds 1,185,504 records under
+74,297 GRUPs, i.e. ~16 records share every path tuple. `GroupStack.path()`
+therefore memoises on the stack and drops the cache in `_walk`'s push/pop,
+which is the only place the stack changes.
+
+`Record` carries its own `size` for the same reason: `_scan` needs each
+record's total byte extent, and re-reading the size field with a second
+`struct.unpack_from` duplicates what `read_record` already did.
+
+### The walk is flat and inline
+<a id="the-walk-is-flat-and-inline"></a>
+
+`_walk` is one iterative generator that unpacks both headers with a
+module-level `struct.Struct` and never calls a per-record helper. It looks
+less tidy than a recursive walk delegating to `read_record`/`read_group`, and
+that shape was measured and rejected.
+
+Measured on `output/Oblivion.esm` (1,185,504 records), walking with no body
+reads:
+
+| | time |
+|---|---:|
+| raw inline loop, no object per record | 0.23s |
+| + a `Record` dataclass per record — **the floor for this API** | 0.36s |
+| + `__slots__` instead of a dataclass | 0.35s |
+| recursive generator calling `read_record`/`read_group` | 0.72s |
+| **flat inline generator (shipped)** | **0.46s** |
+
+So the object costs 0.13s and is worth it, `__slots__` buys nothing over a
+dataclass, and the recursive-with-helpers shape cost **0.37s of pure
+overhead** — more than the parsing and the object combined. Two causes, both
+per record: a recursive generator's `yield from` chain re-enters once per
+enclosing GRUP (**7.6M frames for 1.19M records**), and each record paid two
+Python-level calls whose bodies are three lines of `unpack_from`.
+
+The shipped walk is 0.10s over the floor, so there is no further win here
+worth chasing: a caller still slower than the old hand-rolled loop it replaced
+is spending the difference in ITS OWN loop, not in the reader.
+
+`read_record` and `read_group` remain as the public single-record entry
+points; they are simply not on the hot path any more.
+
+Two related measurements, so they are not re-derived:
+
+- **One combined `struct.Struct` beats three `unpack_from` calls by 2.3x**
+  (0.10s vs 0.23s over 1.19M headers). `_REC` is `<4s4IHH` — note the FOUR
+  u32s: `vcs1` is a full u32 at offset 16, and `form_version` is the u16 at
+  offset 20. Getting that wrong reads vcs1 as the form version and every
+  record reports version 0.
+- **`GroupStack` memoises `path()` and `of_type()`**, dropped in `_walk` at
+  every push and pop. Both answer questions about the GRUP chain, which
+  changes only at a group boundary, so an uncached lookup rescans the stack
+  per record: `of_type` alone was called 2.37M times (worldspace + topic, plus
+  `cell` scanning again) for 1.19M records.
+- **`cell` scans the stack ONCE inward, it does not call `of_type` per type.**
+  Asking `of_type` for each of the four cell-children types looks tidier and
+  reuses the cache, but it costs four calls per record — 4.3M over a 717k
+  record plugin, 0.81s of a 1.58s parse. The single reversed scan is 0.4s
+  cheaper and returns the same group.
+
+### The signatures you ask for drive everything
+<a id="the-signatures-drive-everything"></a>
+
+`walk(raw, *sigs)` takes WHAT you want, not how to get it. An earlier shape
+had three independent knobs — `sigs=` to filter, `bodies=` to control
+decompression, `prune=` to skip subtrees — and every one of them was added
+after a call site regressed. They encode the same fact three times and can
+silently disagree: filtering to CELL while still decompressing all 1,185,504
+bodies cost **4.00s against the old reader's 2.13s**, an 88% regression that
+looked like the shared reader being slow when it was really the caller holding
+two knobs out of step.
+
+With one input the walk derives all three:
+
+- **which records yield** — the signature test,
+- **whose body is decompressed** — only a record that will be yielded, so an
+  unwanted record never pays for `zlib`,
+- **which top-level GRUPs are entered** — a top-level GRUP's label IS a record
+  signature, so a search for `DOBJ` skips every other block outright without
+  reading a single record header inside it.
+
+The last one is why `top_group()` is gone: scoping a search to one block was a
+separate call the caller had to remember, and is now just what asking for a
+signature means. `WRLD`, `CELL` and `DIAL` are exempt from the skip because
+their blocks nest records of other types (a REFR lives under WRLD, an INFO
+under DIAL).
+
+`bodies=` is the one genuinely separate axis — "I need to SEE every record but
+not all their contents" — because it cannot be derived from a signature list.
+
+**Filtering OUTSIDE the walk is the mistake this shape exists to prevent.**
+`PluginWriter._collect_overridden_temporary` first walked everything and
+tested `rec.sig not in ONAM_SIGNATURES` in Python: **0.58s against the old
+hand-rolled walk's 0.31s**. Naming those signatures instead — `walk(blob,
+*ONAM_SIGNATURES, bodies=())` — took it to **0.34s** for a byte-identical
+648,592-FormID result, because the walk then skips the non-matching records
+without building a `Record` for each. Prefer `stack.of_type()` over
+`has_type()` in the same loop: `of_type` memoises per stack, `has_type`
+rescans it per record.
+
+### Benchmarking this scan: build ONE index per process
+<a id="benchmark-one-index-per-process"></a>
+
+**A second 1.19M-entry index built in the same process pays for the first
+one's heap, and the effect swamps the thing being measured.** Timing HEAD's
+scan and the shared reader's back-to-back showed a 3.7x "regression" that did
+not exist; running HEAD's own scan twice in one process measured **2.03s then
+9.75s for identical work**. Whichever implementation runs second loses.
+
+Two wrong diagnoses came out of that polluted comparison before the cause was
+found — a callback walk instead of the generator (measured 1.5% faster, not
+worth a second public API, and was reverted) and the cost of `stack.path()`
+(removing it made the run *slower*). cProfile misleads the same way here: it
+inflates per-call cost, so a reader with one call per record looks far worse
+under it than it is.
+
+Measured one-per-process on `output/Oblivion.esm`, `MasterIndex` costs
+**2.61s against the old hand-rolled scan's 2.13s** (+23%). The traversal
+itself is **0.46s** against a 0.36s floor, so the reader is not where that
+goes: it is the caller's own per-record work, and it buys a scan that reads
+XXXX payloads correctly and cannot leak a parent id.

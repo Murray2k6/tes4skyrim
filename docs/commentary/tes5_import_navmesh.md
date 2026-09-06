@@ -1,6 +1,6 @@
 # tes5_import/navmesh/ - PGRD to NAVM, LAND and worldspace
 
-**Code:** `tes5_import/import_main.py`, `asset_convert/collision_extract.py`, `asset_convert/worldmap_clouds.py`, `tes4_export/record_types/world.py`
+**Code:** `tes5_import/import_main.py`, `asset_convert/collision/collision_extract.py`, `asset_convert/lod/worldmap_clouds.py`, `tes4_export/record_types/world.py`
 
 ## Contents
 
@@ -230,7 +230,7 @@ reorders triangles, so indices captured before it stay valid.
 
 Which local axis a door's threshold runs along decides the whole quad's
 orientation. It is read from the door's **collision panel** — the body the
-engine collides with — in `asset_convert.collision_extract.door_panel_axis_from_data`,
+engine collides with — in `asset_convert.collision.collision_extract.door_panel_axis_from_data`,
 cached to `door_panel_axis_cache.json` by `tools/generators/build_door_axis_cache.py`:
 
 > A door panel is thin THROUGH the opening and wide ACROSS it. The panel's thin
@@ -266,7 +266,7 @@ assassins never got a valid package at all.
 Three traps, all of which silently dropped real doors:
 * **CMS must be unwrapped.** Converted doors ship `bhkMoppBvTreeShape` →
   `bhkCompressedMeshShape`; 85 vanilla models (every Cheydinhal/Bravil/Leyawiin
-  and castle-tower door) arrive that way. Decode with `asset_convert.cms.decode_cms`.
+  and castle-tower door) arrive that way. Decode with `asset_convert.collision.cms.decode_cms`.
 * **A zero-thickness collision sheet is legal.** `cathedraldoor02`,
   `priorydoor01`, `weynondoor01`, `skdoormiddle01`, `icwalldoor01` ship a flat
   plane where the ZERO axis *is* the swing direction. Rejecting `min(ex,ey)==0`
@@ -509,7 +509,7 @@ function of the door, computed in `corridor_doors` and passed through
   `(lx·c + ly·s, −lx·s + ly·c)`; threshold `(sin rz, cos rz)`; facing
   `(cos rz, −sin rz)`.
 * **The door cache measures the ORIGINAL NIF at the CLOSED pose**
-  (`asset_convert.collision_extract.door_closed_geometry`, built by
+  (`asset_convert.collision.collision_extract.door_closed_geometry`, built by
   `tools/generators/build_door_axis_cache.py` from `export/<plugin>/meshes`; the
   converted-mesh scan no longer writes it).  The 'Close' controller
   sequence's FINAL key values override the animated nodes, and the union
@@ -722,6 +722,61 @@ cache hits are byte-identical to cold builds. FormID-dependent parts (NVNM
 parent, door links, ONAM, water flags) are recomputed every run so load-order
 changes can't bake in.
 
+### <a id="pool-orchestration"></a>Pool orchestration (`navmesh/pool.py`)
+
+**Code:** `navmesh/pool.py`. The parent-side scheduling around `navm_worker` —
+gathering jobs, the indexes their carving needs, the cache tag, and the pool.
+
+**Why the tag excludes collision.** It hashes the navmesh generator SOURCES
+only, so editing any navmesh code (params included) invalidates every entry
+automatically. Collision deliberately does NOT enter here. It used to, as
+(size, mtime) of `collision_cache.bin`, which was wrong twice over: mtime is
+machine-local and survives neither git nor an archive round-trip, so the tag
+differed on every machine and a published cache would have missed 100% for
+every downloader; and whole-file granularity meant replacing ONE mesh
+invalidated all ~8,200 Oblivion entries. Collision now enters per-cell and
+per-mesh via `pgrd_to_navm._geom_hash`, so a changed mesh only misses the cells
+that place it.
+
+**Why the tag is stamped only after a generation pass.** Merely asking for the
+tag must not certify a cache as current, or a tool that reads the stamp would
+mark a stale cache fresh. Nothing in the import reads `CACHE_TAG` — every entry
+self-validates — but the pre-push gate and publish manifest rely on it, and
+mtimes cannot answer the question (a checkout, branch switch or unzip rewrites
+them).
+
+**Masters are REQUIRED for the base-model and door indexes.** A dependent plugin
+overwhelmingly places its MASTER's statics — 83% of
+TWMP_ValenwoodImproved.esp's 129,371 placements name a base that exists only in
+Oblivion.esm. Without the master export every such REFR resolves to no model
+key and carves NOTHING, so actors path straight through the master's buildings
+and rocks. Masters go in FIRST so the plugin's own records win the key. The same
+holds for DOOR bases (2,165 placements there): membership of the door map IS the
+"is this a DOOR" test, so missing them means the navmesh neither chokes nor
+links at those doorways.
+
+**Exterior teleport doors are PERSISTENT refs** parented to the worldspace's
+dummy cell, so the grid cell they physically stand in never lists them.
+Exterior navmeshes got no door triangles (89/6,516 vs 1,612/1,640 interiors)
+and cross-door pathing broke at every house door and city gate. Each
+worldspace's persistent door refs are bucketed by the grid square their POSITION
+falls in, and the matching cell's job stamps and links them like its own.
+
+**Job order mirrors the group builders exactly** — interiors by block/sub-block,
+then exteriors per worldspace — so the FormIDs handed out match single-threaded
+allocation.
+
+**A process pool, not threads:** `convert_PGRD` is dominated by pure-Python work
+holding the GIL (only scipy's Delaunay releases it). The worker lives in the
+light `navm_worker` module so each spawned child avoids re-importing the whole
+pipeline, and takes no writer, so nothing unpicklable crosses the boundary.
+`max_tasks_per_child` recycles workers so scipy allocator fragmentation cannot
+grow unbounded across 8k+ cells. The initializer also runs ONCE IN THE PARENT:
+an exception inside a pool `initializer=` cannot be returned (the worker dies
+first, and `subprocess_flags` points multiprocessing at pythonw.exe, so its
+stderr goes nowhere), which is why a failure there once produced a log with no
+cause in it.
+
 ### Mesh the SPAN GRAPH, never contours (the decisive fix)
 
 A contour is a **height map** — one Z per (cx,cy) column — and a building is not.
@@ -780,7 +835,7 @@ uncovered** (was 2.5% uncovered / 2452 broken pathgrid edges with contours).
   are walked over, tables/barrels are routed around, with NO size gate or rug
   list. Collision meshes are ORIGIN-CENTERED, so any per-mesh height rule is
   meaningless (a table's local extent says nothing about how high it stands).
-- **Collision cache**: `asset_convert/collision_extract.py` reads the CONVERTED
+- **Collision cache**: `asset_convert/collision/collision_extract.py` reads the CONVERTED
   `output/.../meshes/tes4/**.nif` (collision is root-mounted there; the CMS is a
   flat triangle soup — no NiNode-transform walk needed). `scan_collision` →
   `export/<plugin>/collision_cache.bin` (binary, ~15MB, ~2 min one-time).
@@ -1321,6 +1376,34 @@ VTEX[i]=FormID
 - Persistent worldspace cell classification: use `RecordFlags & 0x400`, NOT `XCLC.X == ''`. Persistent cells often have XCLC=(0,0) so the empty-string check mis-classifies them as exterior cells, putting them in the wrong block/sub-block structure and breaking all exterior cell loading.
 - …but a NON-persistent cell with no XCLC is **not** a persistent cell: it is a real exterior cell at grid (0,0) whose coords Oblivion omitted. Stamp `XCLC=(0,0)` and leave it in the block tree — moving it out punches a null grid hole. See below.
 
+### <a id="exterior-block-ordering"></a>Exterior block order is unsigned (X, Y) — X MAJOR
+
+**Code:** `navmesh/pool.py::grid_sort_key`, `navmesh/pool.py::ensure_cell_grid`.
+
+A block / sub-block GRUP label is `struct.pack('<hh', Y, X)` — Y in the LOW
+word — but vanilla orders the groups by the UNSIGNED 16-bit halves with **X
+major, Y minor**. Census of the real Skyrim.esm: all 168 blocks of worldspace
+0000003C sort by unsigned (X, Y) and by no other key; the same holds for every
+sub-block and for all 37 worldspaces in the file.
+
+Sorting on the label's own word order gives (Y, X) — the TRANSPOSE — and that is
+what shipped: TWMP_ValenwoodImproved emitted its Tamriel blocks as (-1,0),
+(-2,-3), (-2,-2), (-1,-2), (-2,-1), (-1,-1), where X descends and re-ascends.
+The engine walks this list to build the worldspace's cell grid while PARSING the
+file, so a non-monotonic run never terminates: the game hung on the main menu
+with no crash and no log, xEdit called the file clean, and deleting exterior
+blocks in xEdit made it load again — each deletion shortens the list until what
+remains happens to be monotonic.
+
+**Never census our own converted output for this:** it carries the same bug,
+which is precisely how the transposed key was mistaken for vanilla's.
+
+`ensure_cell_grid` is the companion: Oblivion omits XCLC when a cell sits at
+grid (0,0), and the coordinate must be stamped before bucketing so the job
+gatherer and the group builders agree on which block a cell belongs to. Writing
+the default is faithful, not a patch — every ref in all 30 affected cells floors
+to (0,0). Details in the section below.
+
 ### 🔴 A worldspace CELL with no XCLC is a real (0,0) cell — STAMP IT (2026-08-10)
 
 Crash `crash-2026-08-09-23-15-19` / `-23-34-53` / `crash-2026-08-10-00-00-48`,
@@ -1481,7 +1564,7 @@ DNAM and MNAM), else a HARDCODED `Meshes\Sky\SkyrimWorldMapCloudBank.nif`.
 Oblivion has no world-map cloud layer and vanilla Skyrim authors no MODL
 either (0 of 35 uncompressed Skyrim.esm WRLDs carry one), so without this every
 converted worldspace inherits a bank sized for Skyrim's Tamriel.
-`asset_convert/worldmap_clouds.py` emits one per worldspace and points MODL at
+`asset_convert/lod/worldmap_clouds.py` emits one per worldspace and points MODL at
 `meshes\tes4\worldmapclouds\<edid>.nif` (under `tes4\`, never `sky\`, so a
 generated bank can never shadow the vanilla file the weather system loads by
 name).

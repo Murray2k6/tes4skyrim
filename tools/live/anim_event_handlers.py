@@ -36,8 +36,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tools.live.game_bridge import Bridge, BridgeError  # noqa: E402
-from tools.live.graph_vars import Mem, actor_ptr  # noqa: E402
+from tools.live.game_bridge import Bridge, BridgeError
+from tools.live.graph_vars import Mem, actor_ptr
 
 
 def rtti_name(m: Mem, obj: int) -> str:

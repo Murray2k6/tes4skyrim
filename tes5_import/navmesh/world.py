@@ -6,7 +6,7 @@ Produces the input the voxelizer rasterizes:
     blocking  (M,3,3) float32   walls, pillars, railings, crate sides
 
 Each placed REFR contributes its base mesh's cached collision soup
-(asset_convert.collision_extract), transformed by the ref's full rotation,
+(asset_convert.collision.collision_extract), transformed by the ref's full rotation,
 scale and position.  The old converter applied only RotZ, which silently
 mis-oriented every tilted/ramped static; we apply the full X*Y*Z rotation.
 

@@ -26,53 +26,11 @@ FormIDs are the OUTPUT (load-order) ids, e.g. 0102DC01 for Oblivion.esm cell
 import argparse
 import struct
 import sys
-import zlib
 from collections import defaultdict, deque
 
 import numpy as np
 
-
-# ---------------------------------------------------------------------------
-# ESM walking
-# ---------------------------------------------------------------------------
-
-def _iter_records(data, start, end, want):
-    off = start
-    while off + 24 <= end:
-        sig = data[off:off + 4]
-        size = struct.unpack_from('<I', data, off + 4)[0]
-        if sig == b'GRUP':
-            yield from _iter_records(data, off + 24, min(off + size, end), want)
-            off += size
-            continue
-        flags = struct.unpack_from('<I', data, off + 8)[0]
-        fid = struct.unpack_from('<I', data, off + 12)[0]
-        if sig in want:
-            body = data[off + 24:off + 24 + size]
-            if flags & 0x00040000:
-                try:
-                    body = zlib.decompress(body[4:])
-                except zlib.error:
-                    body = b''
-            yield sig, fid, body
-        off += 24 + size
-
-
-def _iter_subrecords(body):
-    off = 0
-    override = None
-    while off + 6 <= len(body):
-        sig = body[off:off + 4]
-        size = struct.unpack_from('<H', body, off + 4)[0]
-        off += 6
-        if sig == b'XXXX':
-            override = struct.unpack_from('<I', body, off)[0]
-            off += size
-            continue
-        real = override if override is not None else size
-        override = None
-        yield sig, body[off:off + real]
-        off += real
+from tes5_import.tes5_reader import walk as walk_plugin
 
 
 # ---------------------------------------------------------------------------
@@ -276,60 +234,24 @@ def main():
     ref_pos = {}
     ref_parent = {}
     ref_xtel = {}
-    # Track the current CELL/WRLD context while walking records in order.
-    cur_cell = [None]
-    cur_wrld = [None]
-
-    def walk(d, s, e):
-        off = s
-        while off + 24 <= e:
-            sig = d[off:off + 4]
-            size = struct.unpack_from('<I', d, off + 4)[0]
-            if sig == b'GRUP':
-                walk(d, off + 24, min(off + size, e))
-                off += size
-                continue
-            flags = struct.unpack_from('<I', d, off + 8)[0]
-            fid = struct.unpack_from('<I', d, off + 12)[0]
-            if sig == b'CELL':
-                cur_cell[0] = fid
-            elif sig == b'WRLD':
-                cur_wrld[0] = fid
-            elif sig == b'NAVM':
-                body = d[off + 24:off + 24 + size]
-                if flags & 0x00040000:
-                    try:
-                        body = zlib.decompress(body[4:])
-                    except zlib.error:
-                        body = b''
-                for ssig, sd in _iter_subrecords(body):
-                    if ssig == b'NVNM':
-                        try:
-                            meshes[fid] = Mesh(fid, sd)
-                        except (struct.error, IndexError):
-                            pass
-            elif sig in (b'REFR', b'ACHR', b'ACRE'):
-                body = d[off + 24:off + 24 + size]
-                if flags & 0x00040000:
-                    try:
-                        body = zlib.decompress(body[4:])
-                    except zlib.error:
-                        body = b''
-                pos = None
-                xtel = None
-                for ssig, sd in _iter_subrecords(body):
-                    if ssig == b'DATA' and len(sd) >= 12:
-                        pos = struct.unpack_from('<fff', sd, 0)
-                    elif ssig == b'XTEL' and len(sd) >= 4:
-                        xtel = struct.unpack_from('<I', sd, 0)[0]
-                if xtel:
-                    ref_xtel[fid] = xtel
-                if fid in want_refs and pos:
-                    ref_pos[fid] = pos
-                    ref_parent[fid] = (cur_wrld[0], cur_cell[0])
-            off += 24 + size
-
-    walk(data, start, len(data))
+    for rec, stack in walk_plugin(data, b'NAVM', b'REFR', b'ACHR', b'ACRE',
+                                  span=(start, len(data))):
+        subs = rec.sub_map()
+        if rec.sig == b'NAVM':
+            nvnm = subs.get(b'NVNM')
+            if nvnm:
+                try:
+                    meshes[rec.form_id] = Mesh(rec.form_id, nvnm)
+                except (struct.error, IndexError):
+                    pass
+            continue
+        xtel = subs.get(b'XTEL')
+        if xtel and len(xtel) >= 4:
+            ref_xtel[rec.form_id] = struct.unpack_from('<I', xtel, 0)[0]
+        data_sub = subs.get(b'DATA')
+        if rec.form_id in want_refs and data_sub and len(data_sub) >= 12:
+            ref_pos[rec.form_id] = struct.unpack_from('<fff', data_sub, 0)
+            ref_parent[rec.form_id] = (stack.worldspace, stack.cell)
     print(f"meshes={len(meshes)} teleport_doors={len(ref_xtel)}")
 
     for m in meshes.values():

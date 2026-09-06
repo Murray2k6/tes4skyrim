@@ -24,17 +24,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from tes5_import.text_reader import parse_export_file  # noqa: E402
-from tes5_import.skyrim_overrides import (  # noqa: E402
+from tes5_import.text_reader import parse_export_file
+from tes5_import.skyrim_overrides import (
     MGEF_AV_CODE_TO_SKYRIM,
     MGEF_CODE_TO_SKYRIM,
 )
-from tes5_import.record_types.magic import (  # noqa: E402
+from tes5_import.record_types.magic import (
     ARCHETYPE_ASSOC_KIND,
     EFFECT_ARCHETYPES,
     get_archetype,
 )
-from tes5_import.vanilla_mgef_data import VANILLA_MGEF_DATA  # noqa: E402
+from tes5_import.vanilla_mgef_data import VANILLA_MGEF_DATA
 
 EFFECT_RECORD_TYPES = ('SPEL', 'ENCH', 'ALCH', 'INGR', 'SGST', 'LVSP')
 

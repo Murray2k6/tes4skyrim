@@ -21,15 +21,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asset_convert import parallax                                # noqa: E402
-from asset_convert.parallax import (classify_alpha,               # noqa: E402
+from asset_convert.texture import parallax
+from asset_convert.texture.parallax import (classify_alpha,
                                     decode_alpha_plane,
                                     encode_bc4_dds, height_path)
 
 
 # ---------------------------------------------------------------------------
 # Synthetic DDS builders — the classifier reads real block data, so the tests
-# have to hand it real block data rather than a stubbed byte count.
 # ---------------------------------------------------------------------------
 
 def _dds_header(w, h, fourcc, mips=1):
@@ -529,7 +528,7 @@ def nif():
 def _tree(tmp_path, dds_bytes, rel='rocks\\stone.dds'):
     """A minimal source tree: <tmp>/meshes/a.nif beside <tmp>/textures/...
 
-    _resolve_source_texture maps the rewritten path back through exactly this
+    resolve_source_texture maps the rewritten path back through exactly this
     layout, so the test has to reproduce it rather than hand over a bare file.
     """
     tex = tmp_path / 'textures' / Path(rel.replace('\\', '/'))
@@ -566,10 +565,12 @@ def _shape(NifFormat, apply_mode, tex_rel='rocks\\stone.dds',
 
 
 def _convert(shape, src_nif, parallax_on):
-    from asset_convert import nif_converter as nc
-    nc._PARALLAX_ALPHA_CACHE.clear()      # the cache is per process, not per test
+    """Convert one shape, with the per-process alpha cache cleared first."""
+    from asset_convert.nif import nif_converter as nc
+    from asset_convert.nif import shaders
+    shaders._PARALLAX_ALPHA_CACHE.clear()
     stats = {'_src_path': src_nif, '_parallax': parallax_on}
-    ts = nc._process_geometry(shape, fix_textures=True, stats=stats)
+    ts = nc.process_geometry(shape, fix_textures=True, stats=stats)
     return ts, stats
 
 
@@ -599,12 +600,13 @@ class TestParallaxIsOptIn:
         depend on whether meshes or LOD ran last. A height offset at LOD
         distance is invisible anyway.
         """
-        from asset_convert import nif_converter as nc
+        from asset_convert.nif import nif_converter as nc
+        from asset_convert.nif import shaders
         src = _tree(tmp_path, HEIGHT_DDS)
         far = str(Path(src).with_name(name))
-        nc._PARALLAX_ALPHA_CACHE.clear()
+        shaders._PARALLAX_ALPHA_CACHE.clear()
         stats = {'_src_path': far, '_parallax': True}
-        ts = nc._process_geometry(_shape(nif, parallax.APPLY_HILIGHT2),
+        ts = nc.process_geometry(_shape(nif, parallax.APPLY_HILIGHT2),
                                   fix_textures=True, stats=stats)
         shader = ts.bs_properties[0]
         assert shader.skyrim_shader_type == 0
@@ -615,11 +617,11 @@ class TestParallaxIsOptIn:
     def test_a_normal_mesh_named_like_a_farm_still_converts(self, nif,
                                                             tmp_path):
         """The suffix test must not swallow ordinary names ending in 'far'."""
-        from asset_convert import nif_converter as nc
-        assert not nc._is_lod_tier_mesh('meshes\\clutter\\farm.nif')
-        assert not nc._is_lod_tier_mesh('meshes\\x\\barnfar.nif')
-        assert nc._is_lod_tier_mesh('meshes\\x\\wall_far.nif')
-        assert nc._is_lod_tier_mesh('meshes\\x\\WALL_FAR16.NIF')
+        from asset_convert.nif import shaders
+        assert not shaders._is_lod_tier_mesh('meshes\\clutter\\farm.nif')
+        assert not shaders._is_lod_tier_mesh('meshes\\x\\barnfar.nif')
+        assert shaders._is_lod_tier_mesh('meshes\\x\\wall_far.nif')
+        assert shaders._is_lod_tier_mesh('meshes\\x\\WALL_FAR16.NIF')
 
     def test_unflagged_shape_is_untouched_with_the_switch(self, nif, tmp_path):
         """The mesh flag is the AUTHORED intent and is never guessed at: a
@@ -641,7 +643,7 @@ class TestLodMeshesNeverCarryParallax:
         flag and the slot-3 height map straight to the LOD tier — while the
         decimation rebuilds the geometry and drops the vertex colors that
         shader needs. That is what rendered unlit-black."""
-        from asset_convert.lod_far_gen import _strip_parallax
+        from asset_convert.lod.lod_far_gen import strip_parallax
 
         texset = nif.BSShaderTextureSet()
         texset.num_textures = 9
@@ -656,7 +658,7 @@ class TestLodMeshesNeverCarryParallax:
         class _Doc:
             blocks = [shader]
 
-        assert _strip_parallax(_Doc()) == 1
+        assert strip_parallax(_Doc()) == 1
         assert int(shader.skyrim_shader_type) == 0
         assert int(shader.shader_flags_1.slsf_1_parallax) == 0
         assert bytes(texset.textures[3]) == b''
@@ -665,7 +667,7 @@ class TestLodMeshesNeverCarryParallax:
             b'textures\\tes4\\lazeon\\wandb.dds'
 
     def test_a_plain_lod_mesh_is_left_alone(self, nif):
-        from asset_convert.lod_far_gen import _strip_parallax
+        from asset_convert.lod.lod_far_gen import strip_parallax
 
         texset = nif.BSShaderTextureSet()
         texset.num_textures = 9
@@ -677,7 +679,7 @@ class TestLodMeshesNeverCarryParallax:
         class _Doc:
             blocks = [shader]
 
-        assert _strip_parallax(_Doc()) == 0
+        assert strip_parallax(_Doc()) == 0
         assert bytes(texset.textures[0]) == b'textures\\tes4\\rocks\\stone.dds'
 
 
@@ -764,11 +766,6 @@ class TestParallaxShapeConstruction:
 
 # ---------------------------------------------------------------------------
 # Output conditioning: Mitchell halve -> Gaussian blur -> tone curve -> BC4.
-#
-# Skyrim's parallax sampling is coarser than Oblivion's, so every map is
-# smoothed.  What makes that safe without recalibrating is the ORDER:
-# normalise_height fits onto a MEASURED property of its input, so it still
-# lands on TARGET_FLAT_SHARE after the halving and the blur.
 # ---------------------------------------------------------------------------
 
 def _bc1_palette(c0, c1, four_color):
@@ -988,9 +985,6 @@ class TestDiffuseAlphaStrip:
 
 # ---------------------------------------------------------------------------
 # --textures-only: PGPatcher patches the meshes across the player's whole load
-# order, so we ship only what it cannot derive -- the height field hidden in
-# Oblivion's diffuse alpha.  The meshes must still be READ, because the
-# APPLY_HILIGHT2 flag is the only evidence that a diffuse carries one.
 # ---------------------------------------------------------------------------
 
 def _source_nif(nif, tmp_path, apply_mode):
@@ -1015,8 +1009,9 @@ def _source_nif(nif, tmp_path, apply_mode):
 class TestTexturesOnly:
 
     def _run(self, nif, tmp_path, textures_only):
-        from asset_convert import nif_converter as nc
-        nc._PARALLAX_ALPHA_CACHE.clear()
+        from asset_convert.nif import nif_converter as nc
+        from asset_convert.nif import shaders
+        shaders._PARALLAX_ALPHA_CACHE.clear()
         src = _source_nif(nif, tmp_path, parallax.APPLY_HILIGHT2)
         dst = tmp_path / 'out' / 'meshes' / 'tes4' / 'a.nif'
         r = nc.convert_nif(str(src), str(dst), parallax=True,

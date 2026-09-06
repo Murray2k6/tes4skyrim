@@ -141,6 +141,9 @@ def test_directory_listings_are_sorted():
     parse_export_directory sorts os.listdir() so the record list -- and hence
     every conversion loop built on it -- is stable. An unsorted listing that
     feeds conversion would reorder records in the output.
+
+    A BARE `walk(` is tes5_reader's plugin walk, which reads in FILE order and
+    is deterministic; only the attribute form `os.walk` lists a directory.
     """
     offenders = []
     for path in _py_files(IMPORT_PKG):
@@ -151,8 +154,10 @@ def test_directory_listings_are_sorted():
             it = node.iter
             if isinstance(it, ast.Call):
                 fn = it.func
-                name = fn.attr if isinstance(fn, ast.Attribute) \
-                    else getattr(fn, 'id', '')
+                attr = isinstance(fn, ast.Attribute)
+                name = fn.attr if attr else getattr(fn, 'id', '')
+                if name == 'walk' and not attr:
+                    continue
                 if name in ('listdir', 'glob', 'iglob', 'walk', 'iterdir'):
                     offenders.append(
                         f'{_rel(path)}:{node.lineno} — unsorted {name}()')

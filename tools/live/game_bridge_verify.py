@@ -49,7 +49,7 @@ def run(results: list[Check], name: str, fn, critical: bool = True) -> Check:
         c.ok, c.detail = ok, detail
     except BridgeError as exc:
         c.ok, c.detail = False, f"[{exc.code}] {exc}"
-    except Exception as exc:  # noqa: BLE001 - a verifier must not itself crash
+    except Exception as exc:
         c.ok, c.detail = False, f"{type(exc).__name__}: {exc}"
     results.append(c)
     return c

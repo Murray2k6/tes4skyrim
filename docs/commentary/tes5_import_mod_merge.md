@@ -1,12 +1,12 @@
 # tes5_import/master_manifest.py - merging a mod stack
 
-**Code:** `tes5_import/master_manifest.py`, `tes5_import/overrides.py`, `asset_convert/base_plugins.py`
+**Code:** `tes5_import/master_manifest.py`, `tes5_import/overrides.py`, `asset_convert/sources/base_plugins.py`
 
 ## Contents
 
 - [The problem](#problem)
 - [Part 1 — the ordered import](#part-1-ordered-import)
-- [Part 2 — base resolution (asset_convert/base_plugins.py)](#part-2-base-resolution)
+- [Part 2 — base resolution (asset_convert/sources/base_plugins.py)](#part-2-base-resolution)
 - [Part 3 — what is still missing](#part-3-what-still-missing)
 - [Interaction worth knowing](#interaction-worth-knowing)
 
@@ -96,7 +96,7 @@ The one case a single list cannot express is when the two orders genuinely
 assets must win early but whose plugin must load late. Rare; if it ever comes
 up, an optional per-entry field is additive and costs nothing today.
 
-## Part 2 — base resolution (`asset_convert/base_plugins.py`)
+## Part 2 — base resolution (`asset_convert/sources/base_plugins.py`)
 <a id="part-2-base-resolution"></a>
 
 Master-export blindness, the asset half. A mod ships only what it changes;
@@ -112,7 +112,7 @@ Four consumers, all previously blind:
 
 | consumer | symptom when blind | measured |
 |---|---|---|
-| `_resolve_source_texture` | no height map, no specular verdict | 1602 of 3357 referenced texture paths existed only in Nehrim.esm |
+| `resolve_source_texture` | no height map, no specular verdict | 1602 of 3357 referenced texture paths existed only in Nehrim.esm |
 | `wearable_plan.build_plan` | no mesh is WORN → no `_0`/`_1` pair | 0 instead of 1412 entries |
 | `grass_profile` | grass models lose the vanilla shader profile | 0 instead of 94 |
 | `book_inam` | no book inventory art | 0 instead of 43 |

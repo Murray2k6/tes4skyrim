@@ -70,6 +70,37 @@ TES5 loading screens use a 3D model, not a 2D texture: `NNAM` is a required
 FormID → STAT. TES4 has no 3D model reference, so NULL (0) is written. `ICON` is
 omitted for the same reason — it is the 2D path TES5 no longer uses.
 
+## <a id="wrld-climate"></a>WRLD CNAM — the climate a worldspace resolves to
+
+**Code:** `tes5_import/record_types/world.py::_world_climate`.
+
+57 of 84 TES4 worldspaces author no CNAM at all — including Tamriel itself,
+every Imperial City district and every walled city. Oblivion resolves those at
+RUNTIME rather than at load: verified in Oblivion.exe (GOG/Steam 1.2.0.416),
+the sky setup at `0x667688` calls the worldspace's get-climate (`0x4CAF90`)
+and, when it returns null, falls through to `0x543200`, which does
+`LookupForm(0x15F)` — the engine-created `DefaultClimate` form (bootstrap at
+`0x44CCE9` pushes `0x15F` and names it from the string at `0xA37CA0`).
+
+Skyrim has no such fallback, so TES4's DefaultClimate is written explicitly and
+the worldspace keeps Cyrodiil's sun, moons and weather list. SNAM is omitted;
+it references a TES4 record we skip.
+
+### `CNAM.Vanilla` — for a source game with no DefaultClimate
+
+That fallback assumes the conversion contains Oblivion's `0x15F`. Morrowind has
+**no CLMT record at all**, so a Morrowind conversion's CNAM would point at a
+record its output never contains — the engine builds its FormID table while
+parsing, and a dangling reference there is a classic main-menu hang.
+
+`CNAM.Vanilla` is therefore read VERBATIM, with no load-order remapping, so the
+export can name a Skyrim.esm climate directly. Morrowind uses `00000812`
+(SkyrimClimate), which is what vanilla Tamriel itself uses.
+
+Remapping is what makes a separate key necessary: `get_formid` shifts every id
+by the new-master offset, so an exported `CNAM.Climate=00000812` arrives as
+`01000812` — this plugin's own space, where no climate exists.
+
 ## CELL water and music
 
 **Code:** `_cell_water_and_music` in `tes5_import/record_types/world.py`

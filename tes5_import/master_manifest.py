@@ -28,7 +28,7 @@ override's source id directly.
 
 import json
 import os
-from output_layout import paths  # noqa: E402
+from output_layout import paths
 
 MANIFEST_VERSION = 1
 
@@ -56,7 +56,7 @@ class MissingManifestError(RuntimeError):
     """A master's companion manifest is required but absent or stale."""
 
 
-def _master_names(export_dir: str) -> list:
+def master_names(export_dir: str) -> list:
     """A plugin's TES4 master names, in load order, from its export header."""
     header = os.path.join(export_dir, '_HEADER.txt')
     if not os.path.isfile(header):
@@ -110,7 +110,7 @@ def _index_map(export_root: str, name: str, slot: int, slot_of: dict,
     # Not a plain join: an imported mod's plugins live inside their mod's
     # shared folder, so a master that IS exported reads as missing here and the
     # id remap silently falls back to the verbatim merge.
-    own = _master_names(_master_export_dir(export_root, name))
+    own = master_names(_master_export_dir(export_root, name))
     src = {len(own): slot}
     for k, sub in enumerate(own):
         target = slot_of.get(sub.lower())

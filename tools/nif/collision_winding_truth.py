@@ -8,7 +8,7 @@ question:
 
 Method: for every near-horizontal collision face, find the render face
 COINCIDENT with it (same plane, same XY spot -- tolerances matched to
-`_FLOOR_PLANE_DZ` / `_FLOOR_XY` in asset_convert.collision).  The artist's
+`_FLOOR_PLANE_DZ` / `_FLOOR_XY` in asset_convert.collision.collision).  The artist's
 visual winding is correct by construction, so a collision face pointing
 opposite its own render skin is genuinely inverted -- you fall through a
 surface you can see.  Faces with no coincident skin are not counted either way,
@@ -46,7 +46,7 @@ Isles island, is 1480 of 3590 triangles).  The "vanilla Oblivion is authored
 correctly" claim is WITHDRAWN -- see docs/commentary/asset_convert_nif.md "round 3".
 
 NOTE ON USING THIS AS A SCORER.  This tool shares its coincidence rule and its
-constants with asset_convert.collision._component_visual_vote (step 2 of the
+constants with asset_convert.collision.collision._component_visual_vote (step 2 of the
 repair), so scoring a repair variant that CONTAINS step 2 is partly self-
 grading and reads high.  It is a fair referee for the authored-normal step,
 which uses an entirely independent signal.
@@ -74,9 +74,11 @@ _SLAB_EPS = 0.005
 
 
 def _scan(path):
-    from asset_convert import pyffi_monkey_patch  # noqa: F401
+    from asset_convert.nif.pyffi_monkey_patch import apply_patches
+    apply_patches()
     from pyffi.formats.nif import NifFormat
-    from asset_convert import collision as C
+    from asset_convert.collision import collision as C
+    from asset_convert.collision import collision_winding as W
 
     try:
         data = NifFormat.Data()
@@ -116,19 +118,19 @@ def _scan(path):
 
                 grid = {}
                 for vt in vis:
-                    vn = C._face_normal(vt)
+                    vn = W.face_normal(vt)
                     if abs(vn[2]) < _FLAT:
                         continue
-                    vc = C._tri_centroid(vt)
+                    vc = W._tri_centroid(vt)
                     key = (int(vc[0] // _XY), int(vc[1] // _XY))
                     grid.setdefault(key, []).append((vc, vn[2]))
 
                 agree = dis = 0
                 for t in tris:
-                    n = C._face_normal(t)
+                    n = W.face_normal(t)
                     if abs(n[2]) < _FLAT:
                         continue
-                    c = C._tri_centroid(t)
+                    c = W._tri_centroid(t)
                     gx, gy = int(c[0] // _XY), int(c[1] // _XY)
                     best = None
                     for ox in (-1, 0, 1):

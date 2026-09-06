@@ -49,7 +49,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from subprocess_flags import windows_cmd  # noqa: E402
+from subprocess_flags import windows_cmd
 
 MARKER = 'tools/script/script_debug.py'
 

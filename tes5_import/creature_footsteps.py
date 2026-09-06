@@ -148,12 +148,12 @@ def build_creature_footsteps(writer, sound_slots: dict,
     """Phase LAST: one footstep chain per creature folder that has foot sounds.
 
     sound_slots: {folder: {csdt_type: SOUN EditorID}} from the creature
-                 pipeline (asset_convert.creature_pipeline).
+                 pipeline (asset_convert.havok.creature_pipeline).
     sndr_for_soun: callable EditorID -> SNDR FormID (0 when absent).
 
     Returns the number of folders wired.
     """
-    from asset_convert.creature_pipeline import foot_tags
+    from asset_convert.havok.creature_pipeline import foot_tags
 
     _CREA_FSTS_MAP.clear()
     if not sound_slots:

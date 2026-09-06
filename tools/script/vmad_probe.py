@@ -17,38 +17,19 @@ import argparse
 import mmap
 import struct
 import sys
-import zlib
+
+from tes5_import.tes5_reader import records, subrecords
 
 
 def _records(buf):
     """Yield (sig, formid, flags, data) for every record, descending GRUPs."""
-    n = len(buf)
-    pos = 0
-    while pos < n - 24:
-        sig = buf[pos:pos + 4]
-        size = struct.unpack_from('<I', buf, pos + 4)[0]
-        if sig == b'GRUP':
-            pos += 24
-            continue
-        flags = struct.unpack_from('<I', buf, pos + 8)[0]
-        fid = struct.unpack_from('<I', buf, pos + 12)[0]
-        data = buf[pos + 24:pos + 24 + size]
-        if flags & 0x00040000:          # compressed
-            try:
-                data = zlib.decompress(data[4:])
-            except zlib.error:
-                data = b''
-        yield sig, fid, flags, data
-        pos += 24 + size
+    for rec in records(bytes(buf)):
+        yield rec.sig, rec.form_id, rec.flags, rec.body
 
 
 def _subrecords(data):
-    pos = 0
-    while pos < len(data) - 6:
-        sig = data[pos:pos + 4]
-        size = struct.unpack_from('<H', data, pos + 4)[0]
-        yield sig, data[pos + 6:pos + 6 + size]
-        pos += 6 + size
+    """Yield `(tag, data)`; XXXX oversized payloads are already resolved."""
+    return subrecords(data)
 
 
 def _wstring(buf, pos):

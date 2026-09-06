@@ -118,6 +118,7 @@ caching, skipped record types, the export text format, and the directory layout.
 - Deletion and Simplification is an IMPORTANT part of the process. A change that removes or only adds a few total lines of code is FAR SUPERIOR to one that adds many lines. More does not equal better. Strive to have as low of a cyclomatic complexity as possible
 - If the hook triggers for old debt, don't try to get around it as fast as possible or line golf. Take the time to examine the entire surrounding file and fix it properly. You have the time. If you need to separate out a file, pull out the RIGHT thing, not necessaryily the thing you are working on.
 - Docstrings should contain real and important function information. Story content only and always belongs in a see: tag. See tags should ALWAYS have an anchor.
+- Duplicated code is a big no-no. Check if something has been built first and if it has either point to that code instead or pull it out into a shared function
 
 ### <a id="regression-read-the-commits"></a>🛑 IF IT IS A REGRESSION, READ THE COMMITS
 
@@ -270,7 +271,7 @@ real data, or a failing-then-passing test.
   | `tes4_export/` | `python convert.py -f <plugin> --export-only` |
   | `tes5_import/` (records, navmesh, packages, dialogue) | `--import-only` |
   | `script_convert/` | `--scripts-only` (compiles .psc → .pex) |
-  | `asset_convert/nif_converter.py`, collision, skin | `--meshes-only` |
+  | `asset_convert/nif/nif_converter.py`, collision, skin | `--meshes-only` |
   | `spt_*` | `--speedtrees-only` |
   | sound conversion | `--sounds-only` |
   | LOD | `--lod-only` |
@@ -319,7 +320,7 @@ real data, or a failing-then-passing test.
 
 - **`references/` is for comparison/analysis ONLY — the pipeline must NEVER
   resolve runtime assets through it.** Vanilla Skyrim files are fetched via
-  `asset_convert/skyrim_assets.py` (cache in `export/skyrim_assets/`, else
+  `asset_convert/sources/skyrim_assets.py` (cache in `export/skyrim_assets/`, else
   auto-extracted from the SSE BSAs via registry-detected install).
 - `references/` subfolders (`NIFConverter/`, `xEdit/`, `UESP/`, `nifskope`) are
   other projects — reference only. Note that these are not the ONLY references in that folder. Check before guessing
@@ -327,7 +328,7 @@ real data, or a failing-then-passing test.
   Grep it before describing one — never invent semantics.** Oblivion:
   `references/cs_wiki/` (.txt).
 - **LE assets are SSE-compatible.** Never dig through SSE-format assets/BSAs.
-  BSA meshes are SSE-format; read them with `asset_convert/sse_nif.py`
+  BSA meshes are SSE-format; read them with `asset_convert/nif/sse_nif.py`
   (`read_nif` converts BSTriShape graphs to LE NiTriShape graphs in-memory;
   pyffi Patch 8 supplies the SSE read layouts). Output is always written LE
   (uv2=83), which SSE loads natively.
@@ -346,6 +347,11 @@ real data, or a failing-then-passing test.
 - Use multiprocessing, not threads, for pure-Python work; **ThreadPoolExecutor is
   only for I/O and subprocesses.** The output ESM must stay byte-reproducible.
   Rules and measured results: [docs/commentary/performance.md](docs/commentary/performance.md).
+- 🛑 **EVERY `subprocess` CALL IN THE PIPELINE PASSES `**POPEN_FLAGS`**
+  (`subprocess_flags.py`). Without it a per-file stage opens one console window
+  per file under `pythonw`. Loose assets in a shared Data folder belong to the
+  MASTERLESS plugin only — gate on `_is_masterless`, or every expansion
+  re-copies and re-transcodes its master's tree.
 - **Never exhaust memory**: some pool tools load the ~2.1 GB export index per
   worker. Cap `--workers` or run single-process.
 - **<a id="formid-drift"></a>FORMIDS ARE HASHED, NOT COUNTED.**

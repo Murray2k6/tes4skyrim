@@ -19,11 +19,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from asset_convert.music_convert import _track_entry  # noqa: E402
-from tes5_import.record_types.music import (  # noqa: E402
+from asset_convert.audio.music_convert import track_entry
+from tes5_import.record_types.music import (
     build_MUST, build_music_records, is_silent_stem, load_music_manifest)
 
-from pathlib import Path  # noqa: E402
+from pathlib import Path
 
 
 class _Writer:
@@ -116,7 +116,7 @@ class TestMustFltv(unittest.TestCase):
 
     def _build(self, stem):
         rel = Path('Special') / (stem + '.mp3')
-        t = _track_entry(rel, 'Test.esm', duration=42.0)
+        t = track_entry(rel, 'Test.esm', duration=42.0)
         return build_MUST(t, 0x01000001, 'Test.esm')
 
     def _shape(self, blob):
@@ -325,22 +325,22 @@ class TestCombatCuePoints(unittest.TestCase):
             self.assertEqual(self._cues(dur or 0), [])
 
     def test_only_battle_tracks_get_fnam(self):
-        from asset_convert.music_convert import _track_entry
+        from asset_convert.audio.music_convert import track_entry
         from tes5_import.record_types.music import build_MUST
 
         for cat, expect in (('Battle', True), ('Explore', False),
                             ('Public', False), ('Dungeon', False)):
             rel = Path(cat) / 'track_01.mp3'
-            entry = _track_entry(rel, 'Test.esm', duration=75.0)
+            entry = track_entry(rel, 'Test.esm', duration=75.0)
             blob = build_MUST(entry, 0x01000001, 'Test.esm')
             self.assertEqual(b'FNAM' in blob, expect, cat)
 
     def test_battle_track_without_duration_omits_fnam(self):
         """FNAM is optional in xEdit - better absent than zero-length."""
-        from asset_convert.music_convert import _track_entry
+        from asset_convert.audio.music_convert import track_entry
         from tes5_import.record_types.music import build_MUST
 
-        entry = _track_entry(Path('Battle') / 'x.mp3', 'Test.esm')
+        entry = track_entry(Path('Battle') / 'x.mp3', 'Test.esm')
         self.assertNotIn(b'FNAM', build_MUST(entry, 0x01000001, 'Test.esm'))
 
 
@@ -363,15 +363,15 @@ class TestBattleMusicReachability(unittest.TestCase):
 
     def test_build_music_records_exposes_battle_musc(self):
         from tes5_import.record_types.music import build_music_records
-        from asset_convert.music_convert import _track_entry
+        from asset_convert.audio.music_convert import track_entry
 
         class _W:
             def derive_formid(self, site, key):
                 return (abs(hash((site, key))) & 0xFFFFFF) | 0x01000000
 
-        tracks = [_track_entry(Path('Battle') / 'b_01.mp3', 'T.esm',
+        tracks = [track_entry(Path('Battle') / 'b_01.mp3', 'T.esm',
                                duration=70.0),
-                  _track_entry(Path('Explore') / 'e_01.mp3', 'T.esm')]
+                  track_entry(Path('Explore') / 'e_01.mp3', 'T.esm')]
         out = build_music_records({'plugin': 'T.esm', 'tracks': tracks},
                                   _W(), 'T.esm')
         self.assertIsNotNone(out.get('battle'))
@@ -380,7 +380,7 @@ class TestBattleMusicReachability(unittest.TestCase):
 
     def test_no_battle_tracks_means_no_battle_musc(self):
         from tes5_import.record_types.music import build_music_records
-        from asset_convert.music_convert import _track_entry
+        from asset_convert.audio.music_convert import track_entry
 
         class _W:
             def derive_formid(self, site, key):
@@ -388,7 +388,7 @@ class TestBattleMusicReachability(unittest.TestCase):
 
         out = build_music_records(
             {'plugin': 'T.esm',
-             'tracks': [_track_entry(Path('Explore') / 'e.mp3', 'T.esm')]},
+             'tracks': [track_entry(Path('Explore') / 'e.mp3', 'T.esm')]},
             _W(), 'T.esm')
         self.assertIsNone(out.get('battle'))
 
@@ -397,7 +397,7 @@ class TestBattleMusicReachability(unittest.TestCase):
         import struct as _s
         from tes5_import.record_types.music import (
             _read_master_dobj, build_DOBJ_override)
-        from asset_convert.skyrim_assets import find_skyrim_data
+        from asset_convert.sources.skyrim_assets import find_skyrim_data
 
         data = find_skyrim_data()
         esm = os.path.join(data, 'Skyrim.esm') if data else None
