@@ -929,6 +929,10 @@ def gui_main():
     output_var  = tk.StringVar(value=output_path)
     file_var    = tk.StringVar()
     workers_var = tk.IntVar(value=workers_default)
+
+    def out_root() -> Path:
+        """The configured output directory, or the default beside this file."""
+        return Path(output_var.get().strip() or str(SCRIPT_DIR / "output"))
     # Navmesh cache download: ON unless the user turned it off. Persisted, so a
     # metered connection stays opted out across sessions rather than having to
     # be re-set every launch.
@@ -1071,7 +1075,8 @@ def gui_main():
             label=_label, value=_mode, variable=winding_mode_var,
             command=_on_winding_mode_change)
     settings_menu.add_cascade(label="Infer collision winding", menu=winding_menu)
-    _add_morrowind_source_menu(settings_menu, _menu_opts, cfg, load_config, save_config, EXPORT_DIR)
+    _add_morrowind_source_menu(settings_menu, _menu_opts, cfg, load_config,
+                               save_config, EXPORT_DIR, out_root)
 
     # ── Converted ▸ (plugins already in output/) ──────────────────────────────
     # Picking one selects it AND ticks the steps its last conversion still owes,
@@ -2542,16 +2547,13 @@ def gui_main():
     # by _global_cmd. Both on by default.
     convert_ui_opts = {"messagebox": True, "cursor": True}
 
-    def _lod_out_root() -> Path:
-        return Path(output_var.get().strip() or str(SCRIPT_DIR / "output"))
-
     def plugin_masters(name: str) -> list[str]:
         """The MAST list of a converted plugin, or [] if it cannot be read."""
         try:
             sys.path.insert(0, str(SCRIPT_DIR))
             from tools.esm.make_master import read_header, resolve
             _flags, masters = read_header(
-                resolve(name, str(_lod_out_root())))
+                resolve(name, str(out_root())))
             return masters
         except Exception:
             return []
@@ -2565,7 +2567,7 @@ def gui_main():
         """
         try:
             from asset_convert.lod.sibling_lod import converted_plugins
-            names = sorted(converted_plugins(_lod_out_root()))
+            names = sorted(converted_plugins(out_root()))
         except Exception:
             return []
         deps = {n: [m for m in plugin_masters(n) if m in set(names)]
@@ -2596,7 +2598,7 @@ def gui_main():
                                                    create_lod_order)
         except Exception:
             return []
-        return create_lod_order(converted_plugins(_lod_out_root()),
+        return create_lod_order(converted_plugins(out_root()),
                                 SCRIPT_DIR / "export")
 
     def _default_lod_worldspaces(names: list[str]) -> list[str]:
@@ -2605,7 +2607,7 @@ def gui_main():
             from asset_convert.lod.sibling_lod import lod_worldspaces as _lw
         except Exception:
             return []
-        return _lw(names, SCRIPT_DIR / "export", _lod_out_root())
+        return _lw(names, SCRIPT_DIR / "export", out_root())
 
     def _open_make_master_panel(on_apply=None):
         """Pick which converted plugins to flag as masters (ESM).
@@ -2629,7 +2631,7 @@ def gui_main():
             is_esm = {}
             for n in all_names:
                 try:
-                    flags, _m = read_header(resolve(n, _lod_out_root()))
+                    flags, _m = read_header(resolve(n, out_root()))
                     is_esm[n] = bool(flags & FLAG_ESM)
                 except Exception:
                     is_esm[n] = False
@@ -2973,7 +2975,7 @@ def gui_main():
                 merge_worldspaces)
             _deps = dependents_of(all_names, SCRIPT_DIR / "export")
             _ws_by, _ws_why = worldspaces_by_plugin_diagnosed(
-                all_names, SCRIPT_DIR / "export", _lod_out_root())
+                all_names, SCRIPT_DIR / "export", out_root())
         except Exception as _exc:
             _deps = {n: set() for n in all_names}
             _ws_by = {n: [] for n in all_names}
@@ -4184,7 +4186,7 @@ def gui_main():
         (merged LOD) or lives outside output/, so only the run record can speak
         for it.
         """
-        out_dir = output_var.get().strip() or str(SCRIPT_DIR / "output")
+        out_dir = str(out_root())
         # FINISHED_DIR_NAME, not finished_dir(): this only ASKS whether the
         # artefact is there, and the helper would create the folder as a side
         # effect — opening the GUI would leave an empty "Finished Mods"
@@ -4213,7 +4215,7 @@ def gui_main():
         both actions that means the set of converted plugins; "Patch Skyrim"
         additionally depends on the Skyrim load order it patches.
         """
-        out_dir = output_var.get().strip() or str(SCRIPT_DIR / "output")
+        out_dir = str(out_root())
 
         if key == "package_start_mod":
             # Depends on the COMMITTED starter mod, not on anything converted:
@@ -4356,11 +4358,11 @@ def gui_main():
             if lod_worldspaces:
                 parts += ["|"] + list(lod_worldspaces)
             else:
-                out_root = Path(out_dir)
+                root = Path(out_dir)
                 sig = []
                 for n in names:
                     try:
-                        st = _plugin_esm(out_root, n).stat()
+                        st = _plugin_esm(root, n).stat()
                         sig.append(f"{n}:{st.st_size}:{st.st_mtime_ns}")
                     except OSError:
                         sig.append(f"{n}:-")

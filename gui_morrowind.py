@@ -35,8 +35,13 @@ def source_default(cfg: dict) -> str:
 
 
 def add_source_menu(settings_menu, menu_opts: dict, cfg: dict,
-                    load_config, save_config, export_dir) -> tk.StringVar:
-    """Add Settings ▸ Morrowind source as a radio cascade saved on change."""
+                    load_config, save_config, export_dir,
+                    out_root) -> tk.StringVar:
+    """Add Settings ▸ Morrowind source as a radio cascade saved on change.
+
+    `out_root` is called at click time, not read now: the user can retarget the
+    output directory after the menu is built.
+    """
     var = tk.StringVar(value=source_default(cfg))
 
     def _save():
@@ -51,13 +56,13 @@ def add_source_menu(settings_menu, menu_opts: dict, cfg: dict,
                              command=_save)
     menu.add_separator()
     menu.add_command(label="Build compatibility patch...",
-                     command=lambda: build_patch_dialog(settings_menu,
-                                                        str(export_dir)))
+                     command=lambda: build_patch_dialog(
+                         settings_menu, str(export_dir), out_root()))
     settings_menu.add_cascade(label="Morrowind source", menu=menu)
     return var
 
 
-def build_patch_dialog(parent, export_dir: str) -> None:
+def build_patch_dialog(parent, export_dir: str, out_root) -> None:
     """Ask for the Morrowind Data folder, then build the patch in a window.
 
     Morroblivion has to be converted first -- the patch holds what it does NOT
@@ -90,11 +95,11 @@ def build_patch_dialog(parent, export_dir: str) -> None:
             + "\n  ".join(missing))
         return
 
-    _run_build_window(parent, data_dir, export_dir, exports)
+    _run_build_window(parent, data_dir, export_dir, exports, out_root)
 
 
 def _run_build_window(parent, data_dir: str, export_dir: str,
-                      exports: list) -> None:
+                      exports: list, out_root) -> None:
     """Run the build on a worker thread, streaming progress into a window."""
     win = tk.Toplevel(parent)
     win.title("Building compatibility patch")
@@ -106,16 +111,20 @@ def _run_build_window(parent, data_dir: str, export_dir: str,
     def _work():
         """Build, then report the outcome in the same window."""
         try:
-            result = build_patch(data_dir, export_dir, exports, progress=log)
+            result = build_patch(data_dir, export_dir, exports, progress=log,
+                                 out_root=out_root)
         except Exception as exc:
             log(f"FAILED: {exc}")
             return
         if not result["ok"]:
-            log(result["error"])
+            log("")
+            for line in result["error"].splitlines():
+                log(line)
             return
         log("")
         log(f"Done in {result['seconds']:.1f}s -- {result['records']} records, "
             f"{result['assets']} assets.")
+        log(f"Plugin: {result['plugin']}")
         log(f"{PATCH_NAME} is now a master of every Morroblivion-mode "
             f"conversion.")
 

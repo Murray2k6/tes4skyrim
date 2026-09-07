@@ -477,8 +477,50 @@ textures were never extracted and rendered **purple** in game -- measured at
 **2,438** references from converted meshes resolving to a texture present only
 in `export/Morrowind.esm`, plus 308 only in Bloodmoon.
 
-`_extract_textures` therefore writes every `textures\` entry of the vanilla
+`_extract_assets` therefore writes every `textures\` entry of the vanilla
 BSAs, with no reference to what any record or mesh names.
+
+### <a id="the-patch-builds-its-own-plugin"></a>The build produces the PLUGIN, not just its export
+
+**Code:** `_import_records` in `tes4_export/morrowind_patch.py`.
+
+Building the patch is one user action, so it runs the whole chain: export
+records, extract assets, convert assets, and **import the records into the
+plugin itself**. The last step was missing, and its absence was invisible from
+every angle the user could check.
+
+`build_patch` wrote `export/<patch>/` and an asset tree under
+`output/<patch>/`, then reported `records` and `assets` and declared the patch
+"a master of every Morroblivion-mode conversion". No plugin file was ever
+written, because nothing called the import stage for it -- `PATCH_NAME` reached
+`gui_morrowind`, `export_morrowind` and this module, and never `tes5_import`.
+
+Three things hid it:
+
+- **The success message was true of the EXPORT.** `converted_master_dirs` gates
+  on `_HEADER.txt` in the export dir, which `_write_records` does create, so
+  Morroblivion-mode exports stopped reporting the patch missing and the build
+  looked finished.
+- **`output/<patch>/` existed and was full.** `_convert_assets` populated it
+  with meshes and textures, so the folder the user would check was there --
+  just with no plugin in it.
+- **The record count was real.** It counts what was written to text.
+
+So `ok` now means the plugin FILE exists: a build that wrote records and assets
+but no plugin reports failure and says the records survived in `export/`. The
+patch declares no TES4 master and its export carries no `Master[N]=` line, so
+`_reconcile_masters` leaves the list at `Skyrim.esm` and it builds standalone.
+
+The build has two doors, because the refusal that sends a user to it fires on
+the command line too: the GUI menu, and `convert.py --build-morrowind-patch
+"<Morrowind>/Data Files"`. Both run `build_patch`, so neither can drift.
+
+It is written as an **ESP**, like every other converted plugin -- the ESM bit is
+a separate, deliberate user action (`tools/esm/make_master.py`), which enforces
+that a plugin and its masters are flagged together. Because the build now lands
+`<folder>/<folder>` plus a manifest, `converted_plugins` finds the patch, so it
+appears in the converted list, the LOD selection and the make-master panel
+where it previously could not.
 
 ## <a id="tes4-vocabulary"></a>Every exporter speaks the TES4 KEY vocabulary
 

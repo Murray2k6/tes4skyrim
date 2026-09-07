@@ -401,7 +401,8 @@ def test_gap_patch_holds_what_morroblivion_lacks(tmp_path):
     _export(export, 'Morrowind_ob.esm', [_rec('STAT', 'covered_rock')])
 
     result = build_patch(str(data), str(export), ['Morrowind_ob.esm'],
-                         progress=lambda *_: None)
+                         progress=lambda *_: None,
+                         out_root=tmp_path / 'output')
 
     assert result['ok'], result.get('error')
     assert result['records'] == 1, 'only the object Morroblivion lacks'
@@ -414,6 +415,43 @@ def test_gap_patch_holds_what_morroblivion_lacks(tmp_path):
         'ids are case-insensitive')
     assert patch_formid(('SOUN', 'ex_scrapwood01')) != fid, (
         'one id under two types is two records')
+
+
+def test_gap_patch_builds_the_plugin_itself(tmp_path):
+    """A build reports success only when the installable plugin EXISTS.
+
+    The build wrote an export and an asset tree, reported success, and never
+    ran the import -- so `output/` held meshes and textures but no plugin,
+    while every Morroblivion-mode conversion still declared it as a master.
+    See: docs/commentary/tes4_export_morrowind.md#the-patch-builds-its-own-plugin
+    """
+    from asset_convert.lod.sibling_lod import converted_plugins
+    from tools.esm.make_master import read_header
+
+    export = tmp_path / 'export'
+    export.mkdir()
+    data = tmp_path / 'Data Files'
+    data.mkdir()
+    for name in ('Morrowind.esm', 'Tribunal.esm', 'Bloodmoon.esm'):
+        _tes3_records(data / name, [_rec('STAT', 'ex_scrapwood01'),
+                                    _rec('STAT', 'covered_rock')])
+    _export(export, 'Morrowind_ob.esm', [_rec('STAT', 'covered_rock')])
+    out_root = tmp_path / 'output'
+
+    result = build_patch(str(data), str(export), ['Morrowind_ob.esm'],
+                         progress=lambda *_: None, out_root=out_root)
+
+    assert result['ok'], result.get('error')
+    plugin = out_root / PATCH_NAME / PATCH_NAME
+    assert plugin.is_file(), 'the build must leave an installable plugin'
+    assert result['plugin'] == str(plugin), 'the caller is told where it went'
+    assert plugin.read_bytes()[:4] == b'TES4', 'a real plugin, not a stub'
+
+    flags, masters = read_header(str(plugin))
+    assert masters == ['Skyrim.esm'], 'a standalone patch masters nothing else'
+    assert not flags & 0x1, 'built as an ESP, like every other converted plugin'
+    assert PATCH_NAME in converted_plugins(out_root), (
+        'the patch registers as a converted plugin like any other')
 
 
 def test_morroblivion_mode_refuses_without_the_patch(tmp_path):

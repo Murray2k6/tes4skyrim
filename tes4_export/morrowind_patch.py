@@ -17,8 +17,9 @@ any other missing master.
 Only the assets those records name are extracted, so the patch ships the ~10%
 of Morrowind's tree Morroblivion is missing rather than all of it.
 
-`build_patch` runs that whole pass when the user asks for a build; the rest
-answers where the patch is and what it supplies.
+`build_patch` runs that whole pass when the user asks for a build -- export,
+assets AND the plugin itself, because one user action has to leave something
+installable -- and the rest answers where the patch is and what it supplies.
 
 See: docs/commentary/tes4_export_morrowind.md#morroblivion-gap-patch
 """
@@ -30,7 +31,7 @@ import time
 from asset_convert.sources.bsa_extract_morrowind import (is_morrowind_bsa,
                                                          iter_bsa)
 from asset_convert.sources.source_registry import asset_root
-from output_layout import record_dir
+from output_layout import DEFAULT_OUTPUT, plugin_esm, record_dir
 
 from .morrowind_ids import BASE_TYPES, IdIndex, load_index
 from .record_types.morrowind import as_dds
@@ -163,13 +164,18 @@ def _add_asset(wanted: set, rec, sig: str, subtree: str,
 
 
 def build_patch(data_dir: str, export_dir: str, morroblivion_exports,
-                progress=print) -> dict:
+                progress=print, out_root=None) -> dict:
     """Build the shared patch from a Morrowind Data folder; report what it made.
 
     `morroblivion_exports` are the converted Morroblivion plugins whose records
-    define the gap: anything they already supply is not filled.
+    define the gap: anything they already supply is not filled. `out_root` is
+    the output directory the finished plugin and its assets land in.
+
+    `ok` means the plugin FILE exists: a build that wrote records and assets
+    but no plugin is a failure, not a success.
     """
     start = time.time()
+    out_root = out_root or DEFAULT_OUTPUT
     esms, missing = source_paths(data_dir, PATCH_SOURCES)
     if missing:
         return {'ok': False, 'error': _missing_message(data_dir, missing)}
@@ -186,17 +192,49 @@ def build_patch(data_dir: str, export_dir: str, morroblivion_exports,
     progress(f'  {len(gaps)} base records Morroblivion does not supply')
     if not gaps:
         return {'ok': True, 'records': 0, 'assets': 0, 'output': '',
-                'seconds': time.time() - start}
+                'plugin': '', 'seconds': time.time() - start}
 
     out_dir = _write_records(gaps, export_dir, progress)
     assets = _extract_assets(gaps.values(), data_dir, export_dir, progress)
-    _convert_assets(export_dir, progress)
-    return {'ok': True, 'records': len(gaps), 'assets': assets,
-            'output': out_dir, 'seconds': time.time() - start}
+    _convert_assets(export_dir, out_root, progress)
+    plugin, error = _import_records(export_dir, out_root, progress)
+    return {'ok': bool(plugin), 'records': len(gaps), 'assets': assets,
+            'output': out_dir, 'plugin': plugin, 'error': error,
+            'seconds': time.time() - start}
 
 
-def _convert_assets(export_dir: str, progress) -> None:
-    """Convert the extracted patch assets into `output/`.
+def _import_records(export_dir: str, out_root, progress) -> tuple:
+    """Build the patch plugin itself from the records just exported.
+
+    Returns (path, '') on success and ('', refusal) otherwise. An ESP, not an
+    ESM: it declares no TES4 master, and the export it reads carries no
+    `Master[N]=` line, so the importer's own reconciliation leaves the list at
+    Skyrim.esm alone.
+
+    Imported inside the function to keep the export package from loading the
+    whole import stage just to answer where the patch lives.
+    """
+    from tes5_import.import_main import import_plugin
+
+    dest = plugin_esm(out_root, PATCH_NAME)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    progress(f'  Building {PATCH_NAME}')
+    try:
+        _converted, errors = import_plugin(
+            export_dir=patch_dir(export_dir), output_path=str(dest),
+            masters=['Skyrim.esm'], is_esm=False, output_root=str(out_root))
+    except Exception as exc:
+        return '', _import_failed_message(f'{type(exc).__name__}: {exc}')
+    if not dest.is_file():
+        return '', _import_failed_message('the importer wrote no plugin file')
+    if errors:
+        return '', _import_failed_message(f'{errors} record error(s)')
+    progress(f'  Wrote {dest}')
+    return str(dest), ''
+
+
+def _convert_assets(export_dir: str, out_root, progress) -> None:
+    """Convert the extracted patch assets into `out_root`.
 
     Building the patch is ONE user action, so it has to leave installable
     files behind. Extraction alone populates `export/` only, and every texture
@@ -206,7 +244,8 @@ def _convert_assets(export_dir: str, progress) -> None:
     from asset_convert.asset_pipeline import convert_meshes
     progress('  Converting patch assets to output')
     try:
-        stats = convert_meshes(PATCH_NAME, extract_dir=export_dir)
+        stats = convert_meshes(PATCH_NAME, extract_dir=export_dir,
+                               output_dir=out_root)
     except Exception as exc:
         progress(f'  Asset conversion FAILED: {exc}')
         return
@@ -289,6 +328,17 @@ def _missing_message(data_dir: str, missing: list) -> str:
              f'Looked in: {data_dir or "(nothing chosen)"}', '', 'Missing:']
     lines += [f'  {name}' for name in missing]
     return '\n'.join(lines)
+
+
+def _import_failed_message(reason: str) -> str:
+    """The refusal when the records exported but the plugin did not build."""
+    lines = [f'{PATCH_NAME} did not build: {reason}', '',
+             'The records and assets are in export/, so nothing is lost -- '
+             'but no plugin was written, and a Morroblivion-mode conversion '
+             'will still refuse until one is.', '',
+             'Re-run the build; if it fails again the log above names the '
+             'record that stopped it.']
+    return chr(10).join(lines)
 
 
 def _no_morroblivion_message() -> str:

@@ -404,6 +404,37 @@ def _missing_master_exports(results, export_dir: str, tes4_data: str) -> dict:
 
 
 # ===========================================================================
+# Morroblivion compatibility patch
+# ===========================================================================
+
+def _build_morrowind_patch(data_dir: str, export_dir: str,
+                           output_dir: str) -> int:
+    """Build the Morroblivion compatibility patch, then exit.
+
+    The same one action the GUI menu runs. It is the ONLY way to produce a
+    plugin every Morroblivion-mode conversion declares as a master, so a
+    GUI-only door left CLI users with a refusal naming a menu they never open.
+    See: docs/commentary/tes4_export_morrowind.md#the-patch-builds-its-own-plugin
+    """
+    from tes4_export.export_morrowind import morroblivion_exports
+    from tes4_export.morrowind_patch import build_patch
+
+    exports = morroblivion_exports(export_dir)
+    print("Building the Morroblivion compatibility patch")
+    print(f"  Source : {data_dir}")
+    if exports:
+        print(f"  Against: {', '.join(exports)}")
+    result = build_patch(data_dir, export_dir, exports, out_root=output_dir)
+    if not result["ok"]:
+        print(f"ERROR: {result['error']}")
+        return 1
+    print(f"Done in {result['seconds']:.1f}s -- {result['records']} records, "
+          f"{result['assets']} assets.")
+    print(f"  {result['plugin']}")
+    return 0
+
+
+# ===========================================================================
 # Phase 1: Export TES4 RECORDS
 # ===========================================================================
 
@@ -1390,6 +1421,9 @@ def _run_pipeline():
                              "archive (re-importing then needs the original)")
     parser.add_argument("--list-mods",           action="store_true",
                         help="List imported mod archives and exit")
+    parser.add_argument("--build-morrowind-patch", metavar="DATA_FILES",
+                        help="Build the Morroblivion compatibility patch from "
+                             "a Morrowind 'Data Files' folder, then exit")
     parser.add_argument("--remove-mod",          metavar="PLUGIN",
                         help="Remove an imported mod (deletes its export "
                              "folder and registry entry), then exit")
@@ -1451,6 +1485,10 @@ def _run_pipeline():
     os.makedirs(export_dir, exist_ok=True)
     os.makedirs(os.path.join(export_dir, "mappings"), exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
+
+    if args.build_morrowind_patch:
+        return _build_morrowind_patch(args.build_morrowind_patch,
+                                      export_dir, output_dir)
 
     # ── Mod-archive management ───────────────────────────────────────────────
     # These register/inspect conversion SOURCES and exit; they convert nothing,
