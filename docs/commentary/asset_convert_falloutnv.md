@@ -263,3 +263,13 @@ the Oblivion composition `R·(t·s) + T` double-scales it. Every fixed packed
 part is baked into one root triangle soup, which is what the GECK did to the
 render geometry, so no scaled child collision node reaches Skyrim (0 of 179
 vanilla child-collision meshes carry one).
+
+### <a id="fo3-layers"></a>Collision layers
+
+FO3 layers 0-28 are Skyrim's own and 29+ are renumbered, but the Oblivion
+table sent them through Oblivion's enum: 19 DEBRIS_SMALL (truck hulks) became
+31 STAIRHELPER and 26 TRANSPARENT_SMALL (CLFenceDestroyed01, scaffold grates)
+became 41 LINEOFSIGHT, a pick layer with no physical collision, so the player
+walked through them. Census of 1,500 FNV world meshes: layer 1 x373, 4 x32,
+3 x23, 10 x13, 13 x13, 2 x12, 19 x12, 26 x9, 5 x4, 15 x2, 6/9/14 x1.
+`fo3_layer()` passes 0-28 through and renumbers 29+.

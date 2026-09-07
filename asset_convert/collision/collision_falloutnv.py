@@ -1,8 +1,9 @@
 """FO3/FNV collision rules that differ from Oblivion's.
 
 FO3/FNV ignores a NIF root's rotation as Skyrim does, its packed triangle
-winding is random so the render mesh decides it, and a static collection
-hangs one fixed body per part off scaled child nodes.
+winding is random so the render mesh decides it, its collision layers are
+Skyrim's own below 29, and a static collection hangs one fixed body per
+part off scaled child nodes.
 See: docs/commentary/asset_convert_falloutnv.md#collision-rules
 """
 
@@ -20,6 +21,24 @@ _GAME_UNITS_PER_HAVOK = 7.0
 #: Whether the NIF now converting came from FO3/FNV; latched per NIF.
 _SOURCE = [False]
 
+#: FO3 layer -> Skyrim layer where the enums disagree; 0-28 are identical.
+_FO3_TO_SKY_LAYER = {
+    29: 32,   # DEADBIP
+    31: 34,   # AVOIDBOX
+    32: 35,   # COLLISIONBOX
+    33: 36,   # CAMERASPHERE
+    34: 37,   # DOORDETECTION
+    35: 39,   # CAMERAPICK
+    36: 40,   # ITEMPICK
+    37: 41,   # LINEOFSIGHT
+    38: 42,   # PATHPICK
+    39: 43,   # CUSTOMPICK1
+    40: 44,   # CUSTOMPICK2
+    41: 45,   # SPELLEXPLOSION
+    42: 46,   # DROPPINGPICK
+    43: 0,    # NULL
+}
+
 
 def latch_source(data):
     """Record the source game of `data` before the Skyrim version is stamped."""
@@ -29,6 +48,14 @@ def latch_source(data):
 def is_fallout_source() -> bool:
     """True while an FO3/FNV mesh is converting."""
     return _SOURCE[0]
+
+
+def fo3_layer(value: int) -> int:
+    """The Skyrim collision layer for an FO3 layer value.
+
+    See: docs/commentary/asset_convert_falloutnv.md#fo3-layers
+    """
+    return _FO3_TO_SKY_LAYER.get(int(value), int(value))
 
 
 def _packed_shape(body):

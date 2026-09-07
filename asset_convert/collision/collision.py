@@ -12,6 +12,7 @@ from pyffi.formats.nif import NifFormat
 from collision_options import winding_fix_enabled
 
 from asset_convert.collision.cms_builder import build_cms_collision
+from asset_convert.collision.collision_falloutnv import fo3_layer, is_fallout_source
 from asset_convert.collision.collision_hulls import decompose_clutter_hull
 from asset_convert.collision.collision_material import (
     OB_TO_SK_MATERIAL,
@@ -692,7 +693,8 @@ def _remap_world_filter(rb):
                getattr(rb, 'havok_col_filter_copy', None)):
         if hf is None:
             continue
-        hf.layer = _OB_TO_SKY_LAYER.get(int(hf.layer), int(hf.layer))
+        hf.layer = (fo3_layer(hf.layer) if is_fallout_source()
+                    else _OB_TO_SKY_LAYER.get(int(hf.layer), int(hf.layer)))
         hf.flags_and_part_number = 0
         hf.unknown_short = 0   # Group
 
