@@ -203,3 +203,63 @@ stairs CRC of their base, defaulting to stone stairs.
 FO3 collision layers match Skyrim's numbering below 29 and are renumbered from
 29 (DEADBIP) onward; `FO3_TO_SKY_LAYER` maps each FO3 layer to its Skyrim
 `SKYL_*` value and passes unknown values through unchanged.
+
+## <a id="collision-rules"></a>Collision rules that differ from Oblivion
+
+**Code:** `asset_convert/collision/collision_falloutnv.py`
+
+Three FO3/FNV behaviours differ from Oblivion's and were each producing an
+in-game symptom. The source game is latched once per NIF from the header
+(`user_version_2 == 34`) before the Skyrim version is stamped over it.
+
+### <a id="root-rotation-ignored"></a>Root rotation is ignored, as in Skyrim
+
+Oblivion applies a NIF root's rotation; FO3/FNV and Skyrim overwrite the
+root transform with the REFR's. Rotated roots are equally common in all three
+games (Oblivion architecture 22/339, FNV 24/521, vanilla Skyrim 25/489), so the
+rule is per engine. Settled by a seam test (`temp/root_rot_seam_test.py`):
+place each rotated-root kit piece under both hypotheses and count vertices
+coinciding with unambiguous neighbours in the same cell.
+
+| Plugin / cell | root rotation applied | root rotation ignored |
+|---|---:|---:|
+| Oblivion 0001C646 (castle kit) | 285 | 34 |
+| FNV 000FA230 (office hall) | 5 | 31 |
+| FNV 000EC3A2 (vault) | 64 | 438 |
+| FNV 0013BC26 (vault) | 52 | 310 |
+| FNV 00103DF9 (craftsman homes) | 25 | 268 |
+
+So the Oblivion root-rotation wrapper is skipped for FO3/FNV: the root
+rotation is simply zeroed, and nothing is baked into the collision because
+FNV, like Skyrim, already placed the root body at REFR ∘ bodyT. Root
+translations occur only on VATS camera rigs.
+
+### <a id="two-sided-welding"></a>Random winding, repaired from the render mesh
+
+FO3's `hkPackedNiTriStripsData` (20.2.0.7) has no per-triangle normal and its
+winding is random: the render-skin oracle (`collision_winding_truth.py`)
+scores 133 of 267 horizontal road faces inverted, 295 of 652 in nv_rocks;
+the stock detector flags 265 of 290 office-kit meshes. FNV plays on these
+files, so its Havok collides both sides. Skyrim's CMS carries a welding type
+(`hkpWeldingUtility::WeldingType`: ANTICLOCKWISE 0, CLOCKWISE 4, TWO_SIDED 5,
+NONE 6) and vanilla writes 0 in all 346 sampled blocks. Writing TWO_SIDED (5)
+was tried first and the player still fell through roads and floors, so the
+engine does not honour the byte; it is back to 0. FO3/FNV sources instead
+always run the inference winding repair (steps 1-3, `repair_inverted_floors`),
+which is otherwise gated per plugin; the render mesh is the authored surface.
+Scored offline: roads 133 inverted to 0, nv_rocks 295 to 0, office/hallsmall
+2 to 0.
+
+### <a id="static-collection-parts"></a>Static-collection parts
+
+An SCOL hangs one fixed body per part off `HavokN` child nodes carrying
+translation, rotation and scale (0.77 to 1.99 in scolparkinglotchunk03b) plus
+a body transform. The engine formula is
+`T_node + R_node · (s · R_body · v + t_body)`: the scale applies to the shape
+only, and the GECK pre-scaled the body translation (a roadchunk03 instance at
+0.91 stores 0.91 × the standalone body translation). With that formula the
+union of all 14 parts matches the visual bbox within 5 units on every axis;
+the Oblivion composition `R·(t·s) + T` double-scales it. Every fixed packed
+part is baked into one root triangle soup, which is what the GECK did to the
+render geometry, so no scaled child collision node reaches Skyrim (0 of 179
+vanilla child-collision meshes carry one).

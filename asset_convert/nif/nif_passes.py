@@ -12,10 +12,13 @@ from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
 from pyffi.formats.nif import NifFormat
 
+from asset_convert.collision.collision import bake_node_transform_into_body
+from asset_convert.collision.collision_falloutnv import is_fallout_source
 from asset_convert.nif.nif_flags import (BSX_FLAGS_ANIMATED,
                                          BSX_FLAGS_CONSTRAINED,
                                          BSX_FLAGS_DYNAMIC,
-                                         BSX_FLAGS_STATIC)
+                                         BSX_FLAGS_STATIC,
+                                         NIF_FLAGS)
 from asset_convert.nif.sequences import (AUTOLOOP_SEQUENCE, AUTOPLAY_SEQUENCE,
                                          SCRIPT_DRIVEN_SEQUENCES)
 
@@ -346,6 +349,67 @@ def add_animobject_bged(data, graph_file):
     return False
 
 
-# ---------------------------------------------------------------------------
-# Armor / clothing NIF helpers
-# ---------------------------------------------------------------------------
+def _is_identity(rotation):
+    """Return True if a PyFFI Matrix33 is the identity matrix."""
+    return (abs(rotation.m_11 - 1.0) < 1e-4 and abs(rotation.m_22 - 1.0) < 1e-4 and
+            abs(rotation.m_33 - 1.0) < 1e-4 and abs(rotation.m_12) < 1e-4 and
+            abs(rotation.m_13) < 1e-4 and abs(rotation.m_21) < 1e-4 and
+            abs(rotation.m_23) < 1e-4 and abs(rotation.m_31) < 1e-4 and
+            abs(rotation.m_32) < 1e-4)
+
+
+def _identity_matrix():
+    """A fresh identity Matrix33."""
+    m = NifFormat.Matrix33()
+    m.m_11 = 1.0; m.m_22 = 1.0; m.m_33 = 1.0
+    return m
+
+
+def wrap_root_transform(root, has_skin, furn_shift):
+    """Move a static root's rotation onto an inner NiNode; True when wrapped.
+
+    Skyrim ignores a root rotation Oblivion honoured, so it moves down one
+    level; collision stays on the root and its body absorbs the transform.
+    The furniture origin shift rides the same wrapper.  FO3/FNV ignored the
+    rotation too, so for those sources it is zeroed instead.
+    See: docs/commentary/asset_convert_nif.md#root-rotation-wrapper
+    See: docs/commentary/asset_convert_falloutnv.md#root-rotation-ignored
+    """
+    if has_skin or not (hasattr(root, 'rotation') and hasattr(root, 'children')):
+        return False
+    if is_fallout_source():
+        root.rotation = _identity_matrix()
+    if _is_identity(root.rotation) and abs(furn_shift) <= 1e-4:
+        return False
+
+    inner = NifFormat.NiNode()
+    inner.name = root.name
+    inner.flags = NIF_FLAGS
+    r = root.rotation
+    for row in (1, 2, 3):
+        for col in (1, 2, 3):
+            setattr(inner.rotation, f'm_{row}{col}',
+                    getattr(r, f'm_{row}{col}'))
+    inner.translation.x = root.translation.x
+    inner.translation.y = root.translation.y
+    inner.translation.z = root.translation.z + furn_shift
+    inner.scale = root.scale
+
+    if getattr(root, 'collision_object', None) is not None:
+        bake_node_transform_into_body(root.collision_object, root,
+                                      extra_z=furn_shift)
+
+    inner.num_children = root.num_children
+    inner.children.update_size()
+    for j in range(root.num_children):
+        inner.children[j] = root.children[j]
+
+    root.rotation = _identity_matrix()
+    root.translation.x = 0.0
+    root.translation.y = 0.0
+    root.translation.z = 0.0
+    root.scale = 1.0
+    root.num_children = 1
+    root.children.update_size()
+    root.children[0] = inner
+    return True

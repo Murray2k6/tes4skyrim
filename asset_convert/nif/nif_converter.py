@@ -64,7 +64,7 @@ from asset_convert.character.skin_replacement import (apply_armor_offset,
 from asset_convert.character.head_gear import (is_ground_model,
                                                strip_gnd_skin)
 from asset_convert.character.prn_skin import get_prn_bone
-from asset_convert.nif.nif_passes import (add_animobject_bged,
+from asset_convert.nif.nif_passes import (add_animobject_bged, wrap_root_transform,
                                           add_bsx_flags,
                                           collect_sequence_names,
                                           convert_sound_text_keys,
@@ -126,8 +126,10 @@ from asset_convert.character.skyrim_overrides import (
     WEAPON_INV_MARKER_ZOOM,
 )
 from asset_convert.character.dismember_falloutnv import hide_dismember_caps
-from asset_convert.collision.collision import (bake_node_transform_into_body, convert_all_collisions,
-                        hoist_collision, remove_empty_collision_nodes)
+from asset_convert.collision.collision import (hoist_collision,
+                                               remove_empty_collision_nodes)
+from asset_convert.collision.collision_falloutnv import (
+    is_fallout_source, latch_source, merge_static_parts)
 from asset_convert.collision.collision_constraints import (enforce_ragdoll_tree,
                         scale_constraint_pivots, strip_marker_collision_bodies)
 from asset_convert.nif.tri_reconstruct import (clear_match_groups, fix_missing_triangles,
@@ -184,21 +186,6 @@ _HAVOK_SCALE = 0.1
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _is_identity(rotation):
-    """Return True if a PyFFI Matrix33 is the identity matrix."""
-    return (abs(rotation.m_11 - 1.0) < 1e-4 and abs(rotation.m_22 - 1.0) < 1e-4 and
-            abs(rotation.m_33 - 1.0) < 1e-4 and abs(rotation.m_12) < 1e-4 and
-            abs(rotation.m_13) < 1e-4 and abs(rotation.m_21) < 1e-4 and
-            abs(rotation.m_23) < 1e-4 and abs(rotation.m_31) < 1e-4 and
-            abs(rotation.m_32) < 1e-4)
-
-
-def _identity_matrix():
-    m = NifFormat.Matrix33()
-    m.m_11 = 1.0; m.m_22 = 1.0; m.m_33 = 1.0
-    return m
-
 
 # --- Furniture marker conversion ------------------------------------------
 # The full algorithm and data-verified ref/heading/z relations live in
@@ -627,55 +614,6 @@ def walk_node(parent, node, fix_textures, stats):
     return node
 
 
-def _wrap_root_transform(root, has_skin, furn_shift):
-    """Move a static root's rotation onto an inner NiNode; True when wrapped.
-
-    Skyrim ignores BSFadeNode root rotation for static placement but honours a
-    child NiNode's, so the transform moves down one level and the root is
-    zeroed.  Collision STAYS on the root -- a bhkCollisionObject on a child
-    node intermittently crashes hkpCollisionDispatcher -- so the rigid body
-    absorbs the vanishing transform instead.  The furniture origin shift rides
-    the same wrapper.
-    See: docs/commentary/asset_convert_nif.md#root-rotation-wrapper
-    """
-    if has_skin or not (hasattr(root, 'rotation') and hasattr(root, 'children')):
-        return False
-    if _is_identity(root.rotation) and abs(furn_shift) <= 1e-4:
-        return False
-
-    inner = NifFormat.NiNode()
-    inner.name = root.name
-    inner.flags = NIF_FLAGS
-    r = root.rotation
-    for row in (1, 2, 3):
-        for col in (1, 2, 3):
-            setattr(inner.rotation, f'm_{row}{col}',
-                    getattr(r, f'm_{row}{col}'))
-    inner.translation.x = root.translation.x
-    inner.translation.y = root.translation.y
-    inner.translation.z = root.translation.z + furn_shift
-    inner.scale = root.scale
-
-    if getattr(root, 'collision_object', None) is not None:
-        bake_node_transform_into_body(root.collision_object, root,
-                                      extra_z=furn_shift)
-
-    inner.num_children = root.num_children
-    inner.children.update_size()
-    for j in range(root.num_children):
-        inner.children[j] = root.children[j]
-
-    root.rotation = _identity_matrix()
-    root.translation.x = 0.0
-    root.translation.y = 0.0
-    root.translation.z = 0.0
-    root.scale = 1.0
-    root.num_children = 1
-    root.children.update_size()
-    root.children[0] = inner
-    return True
-
-
 def _run_animation_passes(root, stats):
     """The sequence passes that must follow the geometry walk, in order.
 
@@ -916,7 +854,7 @@ def _hoist_root_collision(root, wrapped, root_is_animated, has_constraints,
         return
     if not hasattr(root, 'collision_object') or root.collision_object is not None:
         return
-    if hoist_collision(root):
+    if (is_fallout_source() and merge_static_parts(root)) or hoist_collision(root):
         remove_empty_collision_nodes(root)
 
 
@@ -1095,7 +1033,7 @@ def _convert_one_root(data, i, root, stats, fix_textures, src_path, creature,
         process_controller_manager(root, None)
 
     furn_shift = stats.pop('_furn_origin_shift', 0.0)
-    wrapped = _wrap_root_transform(root, has_skin, furn_shift)
+    wrapped = wrap_root_transform(root, has_skin, furn_shift)
     if wrapped:
         stats['root_rotation_baked'] += 1
 
@@ -1202,6 +1140,7 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
         '_sky_type': sky_object_type_for(src_path),
     }
 
+    latch_source(data)
     _run_source_fixups(data, stats)
     stats['gore_caps_hidden'] = hide_dismember_caps(data)
 

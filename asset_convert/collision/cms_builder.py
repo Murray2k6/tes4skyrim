@@ -141,37 +141,22 @@ def _split_buckets(tris):
     return out
 
 
-def build_cms_collision(tris, sk_material, NifFormat):
-    """Build a complete bhkMoppBvTreeShape+CMS from a triangle soup.
-
-    tris: [((x,y,z), (x,y,z), (x,y,z)), ...] in Skyrim havok units, final
-    shape frame (identity rigid body).  sk_material: Skyrim material CRC.
-    Returns the bhkMoppBvTreeShape (caller sets the CMS target node), or
-    None on failure (caller falls back to a packed shape without MOPP).
-    """
-    tris = [t for t in tris
-            if all(math.isfinite(c) for v in t for c in v)
-            and _tri_extent(t) > 0.0]
-    if not tris:
-        return None
-
-    big, small = [], []
-    for t in tris:
-        (big if _tri_extent(t) >= _MAX_CHUNK_EXTENT else small).append(t)
-
+def _new_data(NifFormat, sk_material):
+    """A bhkCompressedMeshShapeData with the vanilla header, one material
+    (SKYL_STATIC) and one identity transform."""
     data = NifFormat.bhkCompressedMeshShapeData()
     data.bits_per_index = _BITS_PER_INDEX
     data.bits_per_w_index = _BITS_PER_W_INDEX
     data.mask_index = (1 << _BITS_PER_INDEX) - 1
     data.mask_w_index = (1 << _BITS_PER_W_INDEX) - 1
     data.error = 1.0 / _QUANT
-    data.unknown_int_3 = 1  # constant 1 in vanilla and MOPP_RL output alike
+    data.unknown_int_3 = 1
 
     data.num_materials = 1
     data.chunk_materials.update_size()
     mat = data.chunk_materials[0]
-    mat.material = int(sk_material)  # SkyrimHavokMaterial CRC
-    mat.layer = 1                    # SKYL_STATIC
+    mat.material = int(sk_material)
+    mat.layer = 1
     mat.byte_set_to_0 = 0
     mat.short_set_to_0 = 0
 
@@ -182,8 +167,12 @@ def build_cms_collision(tris, sk_material, NifFormat):
     t0.translation.w = 0.0
     t0.rotation.x = t0.rotation.y = t0.rotation.z = 0.0
     t0.rotation.w = 1.0
+    return data
 
-    # --- big triangles (float verts, key = index) --------------------------
+
+def _add_big_tris(data, big):
+    """Store `big` as float-vertex big triangles (key = index); welding is
+    filled from the bridge later."""
     big_vert_index = {}
     big_verts = []
     big_tri_rows = []
@@ -211,40 +200,50 @@ def build_cms_collision(tris, sk_material, NifFormat):
     for i, (a, b, c) in enumerate(big_tri_rows):
         bt = data.big_tris[i]
         bt.triangle_1, bt.triangle_2, bt.triangle_3 = a, b, c
-        bt.unknown_int_1 = 0    # material index (single-material list)
-        bt.unknown_short_1 = 0  # welding — filled from the bridge below
+        bt.unknown_int_1 = 0
+        bt.unknown_short_1 = 0
 
-    # --- chunks (u16 quantized verts, independent triples) -----------------
+
+def _quantize_bucket(bucket):
+    """(base, flat_u16_offsets, indices) of a chunk; triangles collapsed by
+    quantization are dropped."""
+    base = [min(v[i] for t in bucket for v in t) for i in range(3)]
+    vert_index = {}
+    offs = []
+    indices = []
+    for t in bucket:
+        idx = []
+        for v in t:
+            q = tuple(
+                max(0, min(65535, int(round((v[i] - base[i]) * _QUANT))))
+                for i in range(3)
+            )
+            i = vert_index.get(q)
+            if i is None:
+                i = len(vert_index)
+                vert_index[q] = i
+                offs.extend(q)
+            idx.append(i)
+        if idx[0] == idx[1] or idx[1] == idx[2] or idx[0] == idx[2]:
+            continue
+        indices.extend(idx)
+    return base, offs, indices
+
+
+def _add_chunks(data, small):
+    """Store `small` as u16-quantized chunks of independent index triples;
+    the welding array parallels the indices and starts zeroed."""
     buckets = _split_buckets(small)
     data.num_chunks = len(buckets)
     data.chunks.update_size()
     for ci, bucket in enumerate(buckets):
         ch = data.chunks[ci]
-        base = [min(v[i] for t in bucket for v in t) for i in range(3)]
-        vert_index = {}
-        offs = []      # flat u16 scalars
-        indices = []
-        for t in bucket:
-            idx = []
-            for v in t:
-                q = tuple(
-                    max(0, min(65535, int(round((v[i] - base[i]) * _QUANT))))
-                    for i in range(3)
-                )
-                i = vert_index.get(q)
-                if i is None:
-                    i = len(vert_index)
-                    vert_index[q] = i
-                    offs.extend(q)
-                idx.append(i)
-            if idx[0] == idx[1] or idx[1] == idx[2] or idx[0] == idx[2]:
-                continue  # collapsed by quantization
-            indices.extend(idx)
+        base, offs, indices = _quantize_bucket(bucket)
         ch.translation.x, ch.translation.y, ch.translation.z = base
         ch.translation.w = 0.0
         ch.material_index = 0
         ch.transform_index = 0
-        ch.unknown_short_1 = 65535  # constant in vanilla (Reference=0xFFFF)
+        ch.unknown_short_1 = 65535
         ch.num_vertices = len(offs)
         ch.vertices.update_size()
         for i, o in enumerate(offs):
@@ -255,16 +254,14 @@ def build_cms_collision(tris, sk_material, NifFormat):
             ch.indices[i] = ix
         ch.num_strips = 0
         ch.strips.update_size()
-        ch.num_indices_2 = len(indices)  # welding array parallels indices
+        ch.num_indices_2 = len(indices)
         ch.indices_2.update_size()
         for i in range(len(indices)):
             ch.indices_2[i] = 0
 
-    # Bounds over the decoded (quantized) geometry — vanilla stored bounds
-    # equal the decoded extents exactly.
-    keyed = decode_cms(data)
-    if not keyed:
-        return None
+
+def _set_bounds(data, keyed):
+    """Bounds over the decoded (quantized) geometry, as vanilla stores them."""
     lo = [min(v[i] for _k, t in keyed for v in t) for i in range(3)]
     hi = [max(v[i] for _k, t in keyed for v in t) for i in range(3)]
     data.bounds_min.x, data.bounds_min.y, data.bounds_min.z = lo
@@ -272,7 +269,10 @@ def build_cms_collision(tris, sk_material, NifFormat):
     data.bounds_max.x, data.bounds_max.y, data.bounds_max.z = hi
     data.bounds_max.w = 0.0
 
-    # --- MOPP + welding from Havok ------------------------------------------
+
+def _bridge_inputs(keyed):
+    """(vertices, triangles, shape_keys) for the MOPP bridge, welded by
+    exact vertex equality."""
     vert_index = {}
     vertices = []
     triangles = []
@@ -288,51 +288,48 @@ def build_cms_collision(tris, sk_material, NifFormat):
             idx.append(i)
         triangles.append(idx)
         shape_keys.append(key)
+    return vertices, triangles, shape_keys
 
+
+def _run_bridge_with_retry(vertices, triangles, shape_keys):
+    """The bridge report, retried in a scaled-up frame for degenerate hulls.
+
+    The MOPP encodes (v - origin) * scale, so building over vertices scaled
+    by k and storing origin/k with scale*k restates the same bytecode
+    exactly; the chunk data stays at native scale.
+    See: docs/commentary/asset_convert_collision.md#degenerate-hulls-mopp-retry
+    """
     report = run_mopp_bridge(vertices, triangles, shape_keys)
-    if report is None:
-        # Degenerate-scale retry.  Havok's MOPP/welding builder access-violates
-        # on hulls only a few hundredths of a havok unit across (it divides by
-        # near-zero edge lengths): Oblivion clutter ships them (paintbrush01 =
-        # 0.034 hu) and Morroblivion worse (inucaveuplant00 = 0.0098 hu, ~1000x
-        # smaller than its own visual mesh).  The MOPP encodes geometry as
-        # (v - origin) * scale, so building it over vertices scaled by k and
-        # then storing origin/k with scale*k is an EXACT restatement of the
-        # same bytecode for the original geometry -- no approximation, and the
-        # CMS/chunk data below is untouched (still native scale).
-        for k in (10.0, 100.0, 1000.0):
-            scaled = [(x * k, y * k, z * k) for x, y, z in vertices]
-            report = run_mopp_bridge(scaled, triangles, shape_keys)
-            if report is not None:
-                report = dict(report)
-                report['mopp_origin'] = [c / k for c in report['mopp_origin']]
-                report['mopp_scale'] = report['mopp_scale'] * k
-                break
-        if report is None:
-            return None
-    code = bytes.fromhex(report['mopp_data_hex'])
-    if not code:
-        return None
+    if report is not None:
+        return report
+    for k in (10.0, 100.0, 1000.0):
+        scaled = [(x * k, y * k, z * k) for x, y, z in vertices]
+        report = run_mopp_bridge(scaled, triangles, shape_keys)
+        if report is not None:
+            report = dict(report)
+            report['mopp_origin'] = [c / k for c in report['mopp_origin']]
+            report['mopp_scale'] = report['mopp_scale'] * k
+            return report
+    return None
 
-    # Independent verification with our own symbolic VM: clean walk and the
-    # terminal key set must equal the CMS key set.
-    walked = walk_mopp(code, len(code))
-    if walked['errors'] or walked['tris'] != set(shape_keys):
-        return None
 
-    welding = report.get('welding_info') or []
-    if len(welding) == len(shape_keys):
-        for key, w in zip(shape_keys, welding):
-            if not w:
-                continue
-            part = key >> _BITS_PER_W_INDEX
-            if part == 0:
-                data.big_tris[key].unknown_short_1 = int(w)
-            else:
-                offset = key & data.mask_index
-                data.chunks[part - 1].indices_2[offset] = int(w)
+def _apply_welding(data, shape_keys, welding):
+    """Store the bridge's per-triangle welding at each key's slot."""
+    if len(welding) != len(shape_keys):
+        return
+    for key, w in zip(shape_keys, welding):
+        if not w:
+            continue
+        part = key >> _BITS_PER_W_INDEX
+        if part == 0:
+            data.big_tris[key].unknown_short_1 = int(w)
+        else:
+            offset = key & data.mask_index
+            data.chunks[part - 1].indices_2[offset] = int(w)
 
-    # --- wrap in bhkCompressedMeshShape + bhkMoppBvTreeShape ----------------
+
+def _wrap_shapes(NifFormat, data, report, code):
+    """The bhkMoppBvTreeShape over a bhkCompressedMeshShape holding `data`."""
     cms = NifFormat.bhkCompressedMeshShape()
     cms.radius = 0.005
     cms.unknown_float_1 = 0.005
@@ -349,7 +346,7 @@ def build_cms_collision(tris, sk_material, NifFormat):
     mopp = NifFormat.bhkMoppBvTreeShape()
     mopp.shape = cms
     mopp.unknown_float = 1.0
-    mopp.build_type = 1  # BUILT_WITHOUT_CHUNK_SUBDIVISION (vanilla standard)
+    mopp.build_type = 1
     origin = report['mopp_origin']
     mopp.origin.x, mopp.origin.y, mopp.origin.z = origin[0], origin[1], origin[2]
     mopp.scale = report['mopp_scale']
@@ -358,3 +355,43 @@ def build_cms_collision(tris, sk_material, NifFormat):
     for i, b in enumerate(code):
         mopp.mopp_data[i] = b
     return mopp
+
+
+def build_cms_collision(tris, sk_material, NifFormat):
+    """Build a complete bhkMoppBvTreeShape+CMS from a triangle soup.
+
+    tris: [((x,y,z), (x,y,z), (x,y,z)), ...] in Skyrim havok units, final
+    shape frame (identity rigid body).  sk_material: Skyrim material CRC.
+    Returns the bhkMoppBvTreeShape (caller sets the CMS target node), or
+    None on failure.  The MOPP is verified with the symbolic VM: a clean
+    walk whose terminal keys equal the CMS key set.
+    """
+    tris = [t for t in tris
+            if all(math.isfinite(c) for v in t for c in v)
+            and _tri_extent(t) > 0.0]
+    if not tris:
+        return None
+    big, small = [], []
+    for t in tris:
+        (big if _tri_extent(t) >= _MAX_CHUNK_EXTENT else small).append(t)
+
+    data = _new_data(NifFormat, sk_material)
+    _add_big_tris(data, big)
+    _add_chunks(data, small)
+    keyed = decode_cms(data)
+    if not keyed:
+        return None
+    _set_bounds(data, keyed)
+
+    vertices, triangles, shape_keys = _bridge_inputs(keyed)
+    report = _run_bridge_with_retry(vertices, triangles, shape_keys)
+    if report is None:
+        return None
+    code = bytes.fromhex(report['mopp_data_hex'])
+    if not code:
+        return None
+    walked = walk_mopp(code, len(code))
+    if walked['errors'] or walked['tris'] != set(shape_keys):
+        return None
+    _apply_welding(data, shape_keys, report.get('welding_info') or [])
+    return _wrap_shapes(NifFormat, data, report, code)

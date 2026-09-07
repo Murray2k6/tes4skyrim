@@ -12,6 +12,7 @@ import math
 from collections import deque
 
 from collision_options import winding_fix_enabled
+from asset_convert.collision.collision_falloutnv import is_fallout_source
 
 #: An authored normal must oppose the face normal by this much to count.
 AUTHORED_NORMAL_DOT = -0.3
@@ -356,22 +357,19 @@ def _rewound(tris, flip):
 
 def repair_inverted_floors(tris, visual_tris=None, groups=None,
                            authored_normals=None):
-    """Rewind collision triangles whose winding was reversed at the source.
+    """Rewind collision triangles wound backwards; `(repaired_tris, n_flipped)`.
 
-    Havok mesh collision is single-sided, so a surface wound backwards is
-    walked straight through -- the "I fall through the floor" symptom.
-
-    Step 0 is UNGATED and reads the authored normal; steps 1-3 INFER the
-    answer from adjacency, enclosed volume and the render mesh, and are gated
-    per plugin (see collision_options) because inference costs false
-    positives.  Returns `(repaired_tris, n_flipped)`.
+    Step 0 reads the authored normal and is ungated; steps 1-3 infer from
+    adjacency, volume and the render mesh, gated per plugin except for
+    FO3/FNV sources, whose winding is random.
     See: docs/commentary/asset_convert_collision.md#winding-repair-steps
+    See: docs/commentary/asset_convert_falloutnv.md#two-sided-welding
     """
     if not tris:
         return tris, 0
 
     authored_flip = _authored_flips(tris, authored_normals)
-    if not winding_fix_enabled():
+    if not (winding_fix_enabled() or is_fallout_source()):
         return _rewound(tris, authored_flip)
 
     verts, idx = _weld(tris, groups)
