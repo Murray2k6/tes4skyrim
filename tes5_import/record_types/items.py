@@ -496,63 +496,57 @@ def convert_FURN(rec: dict) -> bytes:
     return _simple_object(rec, 'FURN', extra_subs=extra)
 
 
+# ---------------------------------------------------------------------------
+# Grass
+# ---------------------------------------------------------------------------
+
+#: iMinGrassSize in Oblivion_default.ini and Fallout_default.ini; the source planters cap their grid step at it.
+TES4_MIN_GRASS_SIZE = 80.0
+
+
+def _grass_data(rec: dict) -> bytes:
+    """GRAS DATA with PositionRange/Density rewritten for placement parity.
+
+    Skyrim steps its grid at max(PositionRange, 20); the source engines step
+    at max(PositionRange, 80) and boost density by 80/PositionRange when the
+    cap bites, so both are baked into the record.
+    See: docs/commentary/asset_convert_terrain.md#grass-placement-parity
+    """
+    src_range = get_float(rec, 'DATA.PositionRange')
+    boost = TES4_MIN_GRASS_SIZE / src_range if 0 < src_range < TES4_MIN_GRASS_SIZE else 1.0
+    data = bytearray(32)
+    data[0] = min(100, round(get_int(rec, 'DATA.Density') * boost))
+    data[1] = get_int(rec, 'DATA.MinSlope')
+    data[2] = get_int(rec, 'DATA.MaxSlope', 90)
+    struct.pack_into('<H', data, 4, get_int(rec, 'DATA.UnitFromWaterAmount'))
+    struct.pack_into('<I', data, 8, get_int(rec, 'DATA.UnitFromWaterType'))
+    struct.pack_into('<f', data, 12, max(src_range, TES4_MIN_GRASS_SIZE))
+    struct.pack_into('<f', data, 16, get_float(rec, 'DATA.HeightRange'))
+    struct.pack_into('<f', data, 20, get_float(rec, 'DATA.ColorRange'))
+    struct.pack_into('<f', data, 24, get_float(rec, 'DATA.WavePeriod'))
+    data[28] = get_int(rec, 'DATA.Flags')
+    return bytes(data)
+
+
 def convert_GRAS(rec: dict) -> bytes:
     """GRAS — Grass.
 
-    Every working GRAS record (vanilla Skyrim.esm, USSEP, Beyond Skyrim's
-    BSHeartland.esm, Skyrim Extended Cut, Legacy Orsinium) shares three
-    structural invariants the generic object path violates:
-      1. OBND is all ZEROS (never computed mesh bounds);
-      2. MODT is present (BSHeartland proves a 12-byte version-2 stub
-         with no texture hashes works);
-      3. the model path lives under meshes\\landscape\\grass\\ (45/45
-         surveyed MODL paths — the asset pipeline places a copy of each
-         converted grass NIF there, see grass_profile.grass_model_dest).
-    Grass is engine-instanced from LAND texture layers, not placed, so it
-    skips the normal object treatment.
+    Built by hand to honor the invariants every working GRAS record shares:
+    OBND all zeros, a version-2 MODT stub, and the model under
+    meshes\\landscape\\grass\\ (see grass_profile.grass_model_dest).
+    See: docs/commentary/asset_convert_terrain.md#grass-conversion-record-invariants-shader
     """
     from asset_convert.nif.grass_profile import grass_model_dest
     subs = b''
     edid = get_str(rec, 'EditorID')
     if edid:
         subs += pack_string_subrecord('EDID', edid)
-    subs += pack_obnd()  # all zeros — vanilla/BSHeartland invariant
+    subs += pack_obnd()
     path = get_str(rec, 'Model.MODL')
     if path:
         subs += pack_string_subrecord('MODL', grass_model_dest(path))
-        # MODT stub (version 2, no hashes) — present on every working GRAS
         subs += pack_subrecord('MODT', struct.pack('<III', 2, 0, 0))
-
-    # TES5 GRAS DATA is the same layout, but TES4 values were tuned for
-    # Oblivion's much coarser placement grid (iMinGrassSize=80 vs Skyrim's
-    # 20 — 16x fewer placement points).  Passed through raw, Density up to
-    # 100 with PositionRange up to 90 over-instances Skyrim's grass planter
-    # and CTDs (no log) on cells where dense grass textures cover whole
-    # quadrants.  Clamp both to the proven-working envelope: vanilla uses
-    # Density 3-6 / PositionRange <=32; BSHeartland (working Oblivion-style
-    # grass fields) goes up to Density 80 / PositionRange ~32.
-    density = min(get_int(rec, 'DATA.Density'), 80)
-    min_slope = get_int(rec, 'DATA.MinSlope')
-    max_slope = get_int(rec, 'DATA.MaxSlope', 90)
-    uf_water = get_int(rec, 'DATA.UnitFromWaterAmount')
-    uf_type = get_int(rec, 'DATA.UnitFromWaterType')
-    pos_range = min(get_float(rec, 'DATA.PositionRange'), 32.0)
-    h_range = get_float(rec, 'DATA.HeightRange')
-    c_range = get_float(rec, 'DATA.ColorRange')
-    wave = get_float(rec, 'DATA.WavePeriod')
-    flags = get_int(rec, 'DATA.Flags')
-    data = bytearray(32)
-    data[0] = density
-    data[1] = min_slope
-    data[2] = max_slope
-    struct.pack_into('<H', data, 4, uf_water)
-    struct.pack_into('<I', data, 8, uf_type)
-    struct.pack_into('<f', data, 12, pos_range)
-    struct.pack_into('<f', data, 16, h_range)
-    struct.pack_into('<f', data, 20, c_range)
-    struct.pack_into('<f', data, 24, wave)
-    data[28] = flags
-    subs += pack_subrecord('DATA', bytes(data))
+    subs += pack_subrecord('DATA', _grass_data(rec))
     return pack_record('GRAS', get_formid(rec, 'FormID'), get_int(rec, 'RecordFlags'), subs)
 
 

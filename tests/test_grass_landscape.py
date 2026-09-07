@@ -14,6 +14,9 @@ EXPORT_MESHES = Path('export/Oblivion.esm/meshes')
 # A known Oblivion grass model (GRAS record TES4GCLongGrass01)
 _GRASS_SAMPLE = 'plants/gclonggrass01.nif'
 
+#: An FNV grass model whose diffuse lives on TallGrassShaderProperty.file_name.
+_FNV_GRASS = Path('export/FalloutNV.esm/meshes/landscape/grass/nvgreengrass01.nif')
+
 
 def _grass_world_bounds(data):
     """(minZ, maxZ) of all geometry in root space — a rotation/flatten-invariant
@@ -77,6 +80,56 @@ class TestGrassProfile:
         assert b'landscape\\grass\\tes4_dementiagrass03.nif\x00' in data
         modt_at = data.index(b'MODT')
         assert data[modt_at + 6:modt_at + 18] == struct.pack('<III', 2, 0, 0)
+
+    def test_convert_gras_placement_parity(self):
+        """Source planters step at max(PositionRange, 80) and boost density by
+        80/PositionRange, so Density 40 at PositionRange 40 ships as 80 at 80."""
+        from tes5_import.record_types.items import convert_GRAS
+        rec = {'Signature': 'GRAS', 'FormID': '00050AA0', 'RecordFlags': '0',
+               'DATA.Density': '40', 'DATA.PositionRange': '40.0',
+               'DATA.HeightRange': '0.3', 'DATA.ColorRange': '0.3',
+               'DATA.WavePeriod': '10.0', 'DATA.Flags': '6'}
+        dat = convert_GRAS(rec)
+        dat = dat[dat.index(b'DATA') + 6:]
+        assert dat[0] == 80
+        assert struct.unpack_from('<f', dat, 12)[0] == 80.0
+
+    def test_convert_gras_density_saturates(self):
+        """FNV NVGreenGrass02: 35% at PositionRange 17 boosts to 100%, not 165%."""
+        from tes5_import.record_types.items import convert_GRAS
+        rec = {'Signature': 'GRAS', 'FormID': '0016ACCB', 'RecordFlags': '0',
+               'DATA.Density': '35', 'DATA.PositionRange': '17.0',
+               'DATA.HeightRange': '0.3', 'DATA.ColorRange': '0.25',
+               'DATA.WavePeriod': '30.0', 'DATA.Flags': '6'}
+        dat = convert_GRAS(rec)
+        dat = dat[dat.index(b'DATA') + 6:]
+        assert dat[0] == 100
+        assert struct.unpack_from('<f', dat, 12)[0] == 80.0
+
+    def test_convert_gras_wide_range_untouched(self):
+        """PositionRange above 80 and its density pass through unchanged."""
+        from tes5_import.record_types.items import convert_GRAS
+        rec = {'Signature': 'GRAS', 'FormID': '00000001', 'RecordFlags': '0',
+               'DATA.Density': '30', 'DATA.PositionRange': '90.0',
+               'DATA.HeightRange': '0.3', 'DATA.ColorRange': '0.3',
+               'DATA.WavePeriod': '10.0', 'DATA.Flags': '6'}
+        dat = convert_GRAS(rec)
+        dat = dat[dat.index(b'DATA') + 6:]
+        assert dat[0] == 30
+        assert struct.unpack_from('<f', dat, 12)[0] == 90.0
+
+    @pytest.mark.skipif(not _FNV_GRASS.exists(), reason='FNV export not available')
+    def test_tallgrass_shader_diffuse(self, tmp_path):
+        """FNV grass carries its diffuse on TallGrassShaderProperty.file_name."""
+        dst = tmp_path / 'fnvgrass.nif'
+        result = convert_nif(str(_FNV_GRASS), str(dst))
+        assert result['converted'], f"Conversion failed: {result.get('error')}"
+        data = NifFormat.Data()
+        with open(dst, 'rb') as f:
+            data.read(f)
+        sets = [b for b in data.blocks if isinstance(b, NifFormat.BSShaderTextureSet)]
+        assert sets
+        assert sets[0].textures[0].lower() == b'textures\\tes4\\landscape\\grass\\nvgreengrass.dds'
 
     @pytest.mark.skipif(not (EXPORT_MESHES / _GRASS_SAMPLE).exists(),
                         reason='Export meshes not available')

@@ -540,3 +540,17 @@ friction 0. Pivots sit at the child body's own centre expressed in each body's
 local space (both `center` fields are already in Skyrim Havok units by then).
 Frames are axis-aligned — twist = X, plane = Y, motor = Z — the orthonormal
 basis the 2010 layout requires, since a zero motor ships a singular basis.
+
+## <a id="nested-and-multiple-collision"></a>Nested and multiple collision
+
+**Code:** `asset_convert/collision/hoist.py`
+
+Skyrim reads the `bhkCollisionObject` on the root BSFadeNode. Oblivion and
+FO3/FNV meshes hang collision off child NiNodes, sometimes several (an SCOL has
+one per part) and sometimes two levels down. `hoist_collision()` moves every
+descendant collision object onto the root, carrying each part's transform
+relative to the root: one part goes into its body (`bhkRigidBodyT`) or, for a
+phantom, a `bhkTransformShape`; several static parts (`MO_SYS_FIXED`) merge
+into one root body holding a `bhkListShape` of transform-wrapped shapes. When
+the parts cannot be merged the first is hoisted and the rest are counted in
+`PARTS_DROPPED` for the conversion report.

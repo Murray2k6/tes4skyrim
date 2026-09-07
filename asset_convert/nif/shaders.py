@@ -662,8 +662,9 @@ def collect_shader_inputs(src, uv_transforms):
     """Harvest shader inputs from a shape's Oblivion / FO3 properties.
 
     Oblivion keeps them on NiTexturingProperty and friends; FO3/FNV keep their
-    texture paths in a BSShaderTextureSet on BSShaderPPLightingProperty. Both
-    are read here.
+    texture paths in a BSShaderTextureSet on BSShaderPPLightingProperty, or as
+    the single File Name of TallGrassShaderProperty (all 17 FNV grass models).
+    All are read here.
 
     See: docs/commentary/asset_convert_nif.md#fo3fnv-shader-properties
     """
@@ -681,6 +682,9 @@ def collect_shader_inputs(src, uv_transforms):
             out.diffuse_path = diffuse
             out.authored_normal = normal
             out.glow_path = glow or out.glow_path
+            continue
+        if isinstance(prop, NifFormat.TallGrassShaderProperty):
+            out.diffuse_path = prop.file_name or out.diffuse_path
             continue
         if isinstance(prop, NifFormat.NiVertexColorProperty):
             out.vertex_lighting_mode = int(prop.lighting_mode)

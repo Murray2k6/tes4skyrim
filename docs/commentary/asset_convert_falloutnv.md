@@ -172,3 +172,34 @@ Measured over `export/FalloutNV.esm/meshes/creatures/libertyprime`: 106 text
 keys, 15 of them multi-line, producing 14 malformed `Sound: ` lines in the
 shipped singlefile. `_classify_key` now takes one already-split key and
 `parse_kf_events` splits each value on newlines first.
+
+## <a id="fo3-havok-enums"></a>FO3/FNV Havok enums
+
+**Code:** `asset_convert/collision/collision_material_falloutnv.py`
+
+FO3/FNV share Oblivion's material enum only for indices 0-13 and diverge
+completely above it, so an FO3 value routed through the Oblivion table is
+silently mistranslated (FNV 16 HOLLOW_METAL reads as Oblivion "Cloth Stairs",
+26 TRANSPARENT_SMALL as "Line Of Sight"). The two tables are selected by
+source game and never merged.
+
+### <a id="source-game-latching"></a>Source-game latching
+
+A material index alone does not say which enum authored it, so
+`register_fallout_nif(user_version_2)` latches the source game once per NIF
+from the header (`user_version_2 == 34` is FO3/FNV) and `is_fallout_source()`
+routes every later material and layer lookup in that NIF to the FO3 tables.
+
+### <a id="materials--128-values-32-bases"></a>Materials: 128 values, 32 bases
+
+FO3 material values run 0-127: bits 0-4 pick the base material, bit 5 marks
+the platform variant and bit 6 the stairs variant of the same base, so a
+32-row base table plus a stairs table covers every authored value.
+`fo3_material()` returns the Skyrim material CRC; stairs variants map to the
+stairs CRC of their base, defaulting to stone stairs.
+
+### <a id="layers--diverge-from-19"></a>Layers: diverge from 19
+
+FO3 collision layers match Skyrim's numbering below 29 and are renumbered from
+29 (DEADBIP) onward; `FO3_TO_SKY_LAYER` maps each FO3 layer to its Skyrim
+`SKYL_*` value and passes unknown values through unchanged.

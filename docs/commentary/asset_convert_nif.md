@@ -1234,11 +1234,23 @@ a lighting shader over it samples an absent texcoord stream, which is the
 `OblivionArchGate01` "red triangle". Bit 0 means the same thing in both games,
 so it is copied rather than re-derived.
 
-**Absent triangle arrays are rebuilt.** Some vanilla Oblivion meshes — grass
-blades in particular — ship `NiTriShapeData` with `has_triangles=False`, the
-index array simply missing. Skyrim's grass planter CTDs on that. Legacy vertex
-match groups likewise appear on several Oblivion meshes and on no vanilla Skyrim
-mesh, so they are dropped.
+**Unflagged triangle arrays are raised; absent ones are rebuilt.**
+<a id="absent-triangle-arrays"></a> Some vanilla Oblivion meshes — grass blades
+in particular — ship `NiTriShapeData` with `has_triangles=False`. The earlier
+belief that the index array was missing was wrong: in
+`plants/groundcovermediumgrass01.nif` the 10 triangles sit in the file right
+after the clear flag (`0a00 1e000000 00` then `0,1,2, 3,4,5, ...`), pyffi reads
+them, and Oblivion renders them. What is missing is the FLAG, and a mesh
+written with it clear ships no index array, which Skyrim's grass planter
+dereferences and CTDs on. `fix_missing_triangles` therefore raises the flag
+when the array is populated and reconstructs blades from the UV roles only when
+it is genuinely empty. The Morrowind refactor had switched the test from the
+flag to array emptiness (the flag reads False on every pre-10.1 mesh), which
+silently stopped both paths for these Oblivion meshes: `has_triangles` stayed
+False, the writer dropped the triangles, and the grass CTD returned on every
+fresh build (caught by `tests/test_grass_landscape.py::test_triangle_reconstruction`).
+Legacy vertex match groups likewise appear on several Oblivion meshes and on
+no vanilla Skyrim mesh, so they are dropped.
 
 **`ExtraVectorsFlags` is reset to 0.** Skyrim accepts only 0 (none) or 16 (has
 binormal + tangent). Oblivion NIFs may store 1, binormals-only, which is invalid
@@ -2155,3 +2167,23 @@ Over the 120 source files sampled, every one of the 154 LOD nodes has
 `lod_levels[0].near_extent == 0.0`, so child 0 is always the level that renders
 at the camera. Child-count histogram: 77 nodes have 1 child (nothing to drop),
 76 have 2, 1 has 3.
+
+## <a id="fo3fnv-furniture-position-refs"></a>FO3/FNV furniture position refs
+
+**Code:** `asset_convert/nif/furniture_markers_falloutnv.py`
+
+`BSFurnitureMarker.position_ref` names a `furnituremarkerNN.nif`; Oblivion
+ships 8 of them, FO3/FNV ship 22. The extra refs fell through the TES4 heading
+table's default, and refs 5 and 6, being under 10, were read as beds although
+they seat. `FALLOUT_REF_HEADING` carries each FO3-only ref's heading, taken
+from the marker NIF's own lateral offset, and `FALLOUT_SIT_REFS` lists the
+refs below 10 that seat rather than sleep.
+
+## <a id="already-a-bsfadenode"></a>Roots that are already a BSFadeNode
+
+**Code:** `_normalise_fade_root` in `asset_convert/nif/nif_converter.py`
+
+The furniture-marker carry, superseded-marker drop and PRN conversion ran
+inside the NiNode-to-BSFadeNode root swap, so a source whose root is already a
+BSFadeNode (every FO3/FNV mesh) skipped all three. `_normalise_fade_root`
+applies the same passes to such a root.

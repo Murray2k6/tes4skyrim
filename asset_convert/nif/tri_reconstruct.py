@@ -1,20 +1,21 @@
-"""Reconstruct missing triangle arrays in NiTriShapeData.
+"""Raise or reconstruct the triangle array of a NiTriShapeData.
 
 Several vanilla Oblivion grass meshes (GroundCoverMediumGrass01,
 GroundCoverLongGrass01, GroundCoverPineappleWeed*, GroundCoverWildPlant*)
-ship with ``has_triangles = False``: Num Triangles / Num Triangle Points
-are set but the index array itself is absent.  Oblivion's grass renderer
-tolerated that; Skyrim's grass planter dereferences the missing data and
-CTDs (no crash log) wherever such a grass type spawns.
+ship with ``has_triangles = False`` while the index array itself follows in
+the file; a mesh written with the flag clear carries no triangles, and
+Skyrim's grass planter dereferences the missing data and CTDs (no crash
+log) wherever such a grass type spawns.  A populated array only needs its
+flag raised.  See: docs/commentary/asset_convert_nif.md#absent-triangle-arrays
 
-The geometry is reconstructible: these meshes are grass-blade triangle
-lists where every blade uses the same three UV coordinates (base-left,
-base-right, tip).  Verts are classified into the three roles by UV; the
-role whose vertex count equals Num Triangles anchors one blade each, and
-each anchor is paired with the candidate pair from the other two roles
-whose midpoint lies closest below/above it (blades are isosceles: the tip
-sits over the midpoint of its base).  Winding is chosen to agree with the
-stored vertex normals.
+When the array is genuinely empty the geometry is reconstructible: these
+meshes are grass-blade triangle lists where every blade uses the same three
+UV coordinates (base-left, base-right, tip).  Verts are classified into the
+three roles by UV; the role whose vertex count equals Num Triangles anchors
+one blade each, and each anchor is paired with the candidate pair from the
+other two roles whose midpoint lies closest below/above it (blades are
+isosceles: the tip sits over the midpoint of its base).  Winding is chosen
+to agree with the stored vertex normals.
 """
 
 
@@ -29,28 +30,12 @@ def _role_key(uv):
     return (round(uv.u, 3), round(uv.v, 3))
 
 
-def fix_missing_triangles(tri_data):
-    """Rebuild tri_data.triangles when the index array is really absent.
-
-    Returns True if triangles were reconstructed, False if nothing to do.
-    Raises ValueError when the mesh doesn't match the reconstructible
-    blade-list pattern (caller should surface the file for inspection).
-
-    Emptiness is decided on the array itself, never on `has_triangles`:
-    that flag does not exist below 10.1.0.0, so it reads False on every
-    Morrowind mesh and would condemn geometry that is perfectly present.
-    """
-    if not hasattr(tri_data, 'has_triangles'):
-        return False
-    if len(tri_data.triangles) or not tri_data.num_triangles:
-        return False
-
-    nt = tri_data.num_triangles
+def _uv_roles(tri_data):
+    """The three UV-role vertex groups sorted by mean height: base, base, tip."""
     nv = tri_data.num_vertices
     if not tri_data.num_uv_sets or nv < 3:
         raise UnreconstructibleGeometry(
             'missing triangles and no UV roles to reconstruct from')
-
     uvs = tri_data.uv_sets[0]
     roles = {}
     for i in range(nv):
@@ -58,19 +43,19 @@ def fix_missing_triangles(tri_data):
     if len(roles) != 3:
         raise UnreconstructibleGeometry(
             f'missing triangles; expected 3 UV roles, found {len(roles)}')
-
     verts = tri_data.vertices
+    return sorted(roles.values(), key=lambda g: sum(verts[i].z for i in g) / len(g))
 
-    def pos(i):
-        v = verts[i]
-        return (v.x, v.y, v.z)
 
-    # The tip role is the one sitting highest; the other two are base
-    # corners.  Blades are isosceles: the tip sits over the midpoint of
-    # its base pair, which is the pairing metric in both anchor cases.
-    groups = sorted(roles.values(),
-                    key=lambda g: sum(pos(i)[2] for i in g) / len(g))
-    base_a, base_b, tips = groups
+def _pair_blades(tri_data, pos):
+    """One (anchor, other, other) index triple per blade, unwound.
+
+    Anchors on the tips when there is one per blade, else on the base role
+    with one vert per blade; the partner pair is the one whose midpoint the
+    tip tops (blades are isosceles).
+    """
+    nt = tri_data.num_triangles
+    base_a, base_b, tips = groups = _uv_roles(tri_data)
 
     def blade_cost(l, r, t):
         lx, ly, _ = pos(l)
@@ -78,40 +63,58 @@ def fix_missing_triangles(tri_data):
         tx, ty, _ = pos(t)
         return ((lx + rx) / 2 - tx) ** 2 + ((ly + ry) / 2 - ty) ** 2
 
-    tris = []
     if len(tips) == nt:
-        # One tip per blade: pick the base pair whose midpoint it tops.
-        for t in tips:
-            best = min(((blade_cost(l, r, t), l, r)
-                        for l in base_a for r in base_b))
-            tris.append((t, best[1], best[2]))
-    else:
-        # Shared tips: anchor on a base role with one vert per blade.
-        anchor, other = ((base_a, base_b) if len(base_a) == nt else
-                         (base_b, base_a) if len(base_b) == nt else (None, None))
-        if anchor is None:
-            raise ValueError(f'missing triangles; no UV role has {nt} verts '
-                             f'(role sizes {[len(g) for g in groups]})')
-        for l in anchor:
-            best = min(((blade_cost(l, r, t), r, t)
-                        for r in other for t in tips))
-            tris.append((l, best[1], best[2]))
+        return [min(((blade_cost(l, r, t), t, l, r) for l in base_a for r in base_b))[1:]
+                for t in tips]
+    anchor, other = ((base_a, base_b) if len(base_a) == nt else
+                     (base_b, base_a) if len(base_b) == nt else (None, None))
+    if anchor is None:
+        raise ValueError(f'missing triangles; no UV role has {nt} verts '
+                         f'(role sizes {[len(g) for g in groups]})')
+    return [min(((blade_cost(l, r, t), l, r, t) for r in other for t in tips))[1:]
+            for l in anchor]
 
-    # Winding: agree with stored vertex normals
+
+def _wind_with_normal(tri, pos, normals):
+    """The triangle wound so its face normal agrees with vertex a's normal."""
+    a, b, c = tri
+    if normals is None:
+        return tri
+    pa, pb, pc = pos(a), pos(b), pos(c)
+    e1 = [pb[k] - pa[k] for k in range(3)]
+    e2 = [pc[k] - pa[k] for k in range(3)]
+    face = (e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0])
+    n = normals[a]
+    if face[0] * n.x + face[1] * n.y + face[2] * n.z < 0:
+        return (a, c, b)
+    return tri
+
+
+def fix_missing_triangles(tri_data):
+    """Raise `has_triangles` over a populated array, or rebuild an empty one.
+
+    Returns True if triangles were reconstructed, False if nothing to do.
+    Raises ValueError when the mesh doesn't match the reconstructible
+    blade-list pattern (caller should surface the file for inspection).
+    Emptiness is judged on the array: the flag does not exist below 10.1.0.0
+    and reads False on every Morrowind mesh.
+    """
+    if not hasattr(tri_data, 'has_triangles') or not tri_data.num_triangles:
+        return False
+    if len(tri_data.triangles):
+        tri_data.has_triangles = True
+        return False
+
+    verts = tri_data.vertices
+
+    def pos(i):
+        v = verts[i]
+        return (v.x, v.y, v.z)
+
     normals = tri_data.normals if tri_data.has_normals else None
-    fixed = []
-    for a, b, c in tris:
-        if normals is not None:
-            pa, pb, pc = pos(a), pos(b), pos(c)
-            e1 = [pb[k] - pa[k] for k in range(3)]
-            e2 = [pc[k] - pa[k] for k in range(3)]
-            face = (e1[1] * e2[2] - e1[2] * e2[1],
-                    e1[2] * e2[0] - e1[0] * e2[2],
-                    e1[0] * e2[1] - e1[1] * e2[0])
-            n = normals[a]
-            if face[0] * n.x + face[1] * n.y + face[2] * n.z < 0:
-                a, b, c = a, c, b
-        fixed.append((a, b, c))
+    fixed = [_wind_with_normal(tri, pos, normals) for tri in _pair_blades(tri_data, pos)]
 
     tri_data.has_triangles = True
     tri_data.num_triangles = len(fixed)
