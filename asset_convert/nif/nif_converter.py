@@ -79,7 +79,9 @@ from asset_convert.nif.sequences import (apply_rest_visibility,
                                          match_seq_shader_types,
                                          process_controller_manager)
 from asset_convert.character.wearable_plan import (body_part_for_flags,
-                                                   body_parts_for_flags)
+                                                   body_parts_for_flags,
+                                                   mesh_is_female)
+from asset_convert.character.wearable_plan_falloutnv import shield_flags
 from asset_convert.havok.hkx_skeleton import BONE_RENAMES
 from asset_convert.character import wearable_plan as wp
 from asset_convert.character.body_wrap import morph_converted_to_weight1
@@ -885,7 +887,7 @@ def _classify_wearable(src_path, nif_basename, worn, biped_flags):
     """
     lowered = src_path.lower().replace('\\', '/')
     in_armor_dir = worn or 'armor' in lowered or 'clothes' in lowered
-    is_shield = (bool(biped_flags & (1 << 13)) if biped_flags
+    is_shield = (shield_flags(biped_flags) if biped_flags
                  else 'shield' in nif_basename)
     authored_bp = body_part_for_flags(biped_flags) if biped_flags else None
     allowed = body_parts_for_flags(biped_flags) if biped_flags else None
@@ -1196,6 +1198,62 @@ def _convert_nif(data, fix_textures=True, src_path='', weight=0,
 # Public API
 # ---------------------------------------------------------------------------
 
+def _read_source(src_path, dst_path, result):
+    """Read a source NIF, or None with result['error'] / ['copied'] set.
+
+    Already-Skyrim versions are copied to dst_path unchanged with their texture
+    bytes harvested; unsupported versions and scene-less animation files
+    (creatures/*/idleanims/*.nif hold only a NiControllerSequence) are skipped.
+    """
+    data = NifFormat.Data()
+    try:
+        with open(src_path, 'rb') as f:
+            data.inspect(f)
+    except Exception:
+        result['error'] = 'RD'
+        return None
+    if (data.version, data.user_version_2) in _SKYRIM_VERSIONS:
+        dst_dir = os.path.dirname(dst_path)
+        if dst_dir:
+            os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy2(src_path, dst_path)
+        with open(src_path, 'rb') as f:
+            _harvest_texture_bytes(f.read(), result['textures'])
+        result['copied'] = True
+        return None
+    if data.version not in _SUPPORTED_VERSIONS:
+        result['error'] = 'VER'
+        return None
+    data = NifFormat.Data()
+    try:
+        with open(src_path, 'rb') as f:
+            data.inspect(f)
+            data.read(f)
+    except Exception:
+        result['error'] = 'RD'
+        return None
+    if not any(isinstance(r, NifFormat.NiAVObject) for r in data.roots):
+        result['error'] = 'NOGEO'
+        return None
+    return data
+
+
+def _authored_wear(src_path, src_meshes_dir, wearable_plan, creature, hair):
+    """(worn, biped flags) the plugin states for this mesh; latches its gender.
+
+    Hair carries biped bit 1, the slot a helmet-bearing record would, so it
+    resolves body part 131 without guessing.  Asked before the conversion so
+    the armor rules apply to gear filed outside meshes\armor and clothes.
+    """
+    plan = (wearable_plan if src_meshes_dir is not None and not creature
+            and not hair else None)
+    wp.latch_female(plan, src_path, src_meshes_dir)
+    if plan is None:
+        return bool(hair), 0x02 if hair else 0
+    return (wp.is_worn(plan, src_path, src_meshes_dir),
+            wp.biped_flags_for(plan, src_path, src_meshes_dir))
+
+
 def convert_nif(src_path, dst_path, *, fix_textures=True, remap_skeleton=None,
                 src_meshes_dir=None, creature=False, wearable_plan=None,
                 parallax=False, textures_only=False, tex_fallback=(),
@@ -1248,64 +1306,11 @@ def convert_nif(src_path, dst_path, *, fix_textures=True, remap_skeleton=None,
     if not _PYFFI:
         result['error'] = 'pyffi not installed'
         return result
-
-    # Inspect version without full read
-    data = NifFormat.Data()
-    try:
-        with open(src_path, 'rb') as f:
-            data.inspect(f)
-    except Exception:
-        result['error'] = 'RD'
+    data = _read_source(src_path, dst_path, result)
+    if data is None:
         return result
-
-    if (data.version, data.user_version_2) in _SKYRIM_VERSIONS:
-        # Already Skyrim — copy as-is.  Nothing rewrote its texture paths, so
-        # scan the bytes for them; the prune must not drop what this still uses.
-        dst_dir = os.path.dirname(dst_path)
-        if dst_dir:
-            os.makedirs(dst_dir, exist_ok=True)
-        shutil.copy2(src_path, dst_path)
-        with open(src_path, 'rb') as f:
-            _harvest_texture_bytes(f.read(), result['textures'])
-        result['copied'] = True
-        return result
-
-    if data.version not in _SUPPORTED_VERSIONS:
-        # Too old or unrecognised — skip, do not copy
-        result['error'] = 'VER'
-        return result
-
-    # Full read (fresh Data object so inspect state is clean)
-    data = NifFormat.Data()
-    try:
-        with open(src_path, 'rb') as f:
-            data.inspect(f)
-            data.read(f)
-    except Exception:
-        result['error'] = 'RD'
-        return result
-
-    # Standalone animation files (e.g. creatures/*/idleanims/*.nif) hold only a
-    # NiControllerSequence — no scene graph at all.  There is nothing to convert
-    # and every pass below assumes a NiAVObject root, so skip rather than crash.
-    if not any(isinstance(r, NifFormat.NiAVObject) for r in data.roots):
-        result['error'] = 'NOGEO'
-        return result
-
-    # Does the plugin itself wear this mesh?  Asked before the conversion so the
-    # armor rules (dismember skin, NiNode root, skeleton retarget) apply to gear
-    # filed outside meshes\armor and meshes\clothes.
-    _worn = bool(hair)
-    # Biped bit 1 (Hair) — the same authored slot a helmet-bearing record
-    # would carry, so the converter resolves body part 131 without guessing.
-    _biped_flags = 0x02 if hair else 0
-    if wearable_plan is not None and src_meshes_dir is not None and not creature             and not hair:
-        from asset_convert.character import wearable_plan as _wp
-        _worn = _wp.is_worn(wearable_plan, src_path, src_meshes_dir)
-        # What the plugin says this mesh IS (head/body/hands/feet/shield), so
-        # the converter never has to guess the slot from the filename.
-        _biped_flags = _wp.biped_flags_for(wearable_plan, src_path,
-                                           src_meshes_dir)
+    _worn, _biped_flags = _authored_wear(src_path, src_meshes_dir, wearable_plan,
+                                         creature, hair)
 
     stats = _convert_nif(data, fix_textures=fix_textures,
                          src_path=str(src_path), creature=creature,
@@ -1480,7 +1485,7 @@ def _write_weight_variants(data, buf, src_path, dst_path, src_meshes_dir,
 
     w1_bytes = None
     try:
-        if morph_converted_to_weight1(data, '/f/' in srcl):
+        if morph_converted_to_weight1(data, mesh_is_female(src_path)):
             buf1 = _io.BytesIO()
             data.write(buf1)
             w1_bytes = buf1.getvalue()
@@ -1507,8 +1512,7 @@ def _write_beast_head_variants(src_path, dst_path, *, fix_textures,
     default armature -- the pre-existing behaviour, never worse than it.
     """
     from asset_convert.character import head_fit
-    female = '/f/' in str(src_path).replace(chr(92), '/').lower()
-    races = head_fit.beast_races_available(female)
+    races = head_fit.beast_races_available(mesh_is_female(src_path))
     if not races:
         return
 

@@ -15,8 +15,8 @@ apply_patches()
 from pyffi.formats.nif import NifFormat
 
 from asset_convert.character import head_fit
-from asset_convert.character.skyrim_overrides import (
-    OBLIVION_TO_SKYRIM_BONE_MAP)
+from asset_convert.character.skyrim_overrides_falloutnv import bone_map_for
+from asset_convert.character.wearable_plan import mesh_is_female
 
 
 def is_ground_model(nif_basename: str) -> bool:
@@ -90,7 +90,7 @@ def fit_prn_head_blocks(data, prn_block_ids, src_path, race=None) -> set:
     fall back to the legacy constants.
     See: docs/commentary/asset_convert_armor.md#head-gear-fit
     """
-    female = '/f/' in str(src_path).replace('\\', '/').lower()
+    female = mesh_is_female(src_path)
     if not head_fit.fit_available(female):
         return set()
 
@@ -133,20 +133,18 @@ def remap_bone_names(data) -> int:
 
     Skyrim's character skeleton uses fully qualified node names with bracket
     tags (e.g. 'NPC Spine1 [Spn1]') that differ from Oblivion's Bip01 rig.
-    Any NiNode in the tree whose name is in OBLIVION_TO_SKYRIM_BONE_MAP is
-    renamed in-place so the game's skin deformation system can find the bones.
-    Returns the number of bones that were renamed.
+    Any NiNode in the tree whose name is in the source skeleton's bone table
+    is renamed in-place so the game's skin deformation system can find the
+    bones.  Returns the number of bones that were renamed.
     """
+    named = [(block, bytes(block.name).rstrip(b'\x00').decode('latin-1', errors='replace'))
+             for root in data.roots if root is not None
+             for block in root.tree() if isinstance(block, NifFormat.NiNode)]
+    bone_map = bone_map_for({name for _, name in named})
     count = 0
-    for root in data.roots:
-        if root is None:
-            continue
-        for block in root.tree():
-            if isinstance(block, NifFormat.NiNode):
-                raw = bytes(block.name).rstrip(b'\x00')
-                name = raw.decode('latin-1', errors='replace')
-                mapped = OBLIVION_TO_SKYRIM_BONE_MAP.get(name)
-                if mapped:
-                    block.name = mapped.encode('latin-1')
-                    count += 1
+    for block, name in named:
+        mapped = bone_map.get(name)
+        if mapped:
+            block.name = mapped.encode('latin-1')
+            count += 1
     return count

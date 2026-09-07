@@ -59,6 +59,7 @@ from asset_convert.character.skyrim_overrides import (
 # ---------------------------------------------------------------------------
 from asset_convert.character.skyrim_overrides_falloutnv import (
     FALLOUT_SKELETON_MARKERS, bone_map_for, is_fallout_skeleton)
+from asset_convert.character.wearable_plan import mesh_is_female
 
 _GENERATED_DIR = paths.GENERATED
 
@@ -1140,8 +1141,7 @@ def retarget_skin_to_skyrim(data, src_path: str = '', prn_out: set | None = None
 
     Returns the number of geometries retargeted.
     """
-    src_lower = src_path.replace('\\', '/').lower()
-    female = '/f/' in src_lower
+    female = mesh_is_female(src_path)
 
     sk_skel = load_skeleton(SKEL_SKYRIM_FEMALE if female else SKEL_SKYRIM_MALE)
     ob_skel = _source_skeleton(data)

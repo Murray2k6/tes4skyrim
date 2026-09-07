@@ -357,6 +357,22 @@ equivalent: both hands share 33-Hands, and the four head-accessory bits
 distribute across Circlet/Ears/Head by where the item actually sits. Weapon
 (bit 5) is dropped outright — an ARMO occupying it would block the weapon.
 
+### <a id="upper-body-covers-feet"></a>Upper Body covers the feet
+
+FNV's naked body is one `characters\_male\upperbody.nif` (torso, arms, legs
+and feet as a single skin) plus `lefthand.nif` / `righthand.nif`; there is no
+foot mesh and no foot slot. So an Upper Body item is a whole-body outfit with
+its footwear built in. Mapping bit 2 to 32-Body alone left the built ARMA at
+Body+Forearms (BOD2 `0x14`), and Skyrim's own feet addon kept rendering over
+the outfit's boots (the Caravaneer Outfit, flags 4, as do 222 of the 380 FNV
+ARMO records). `biped_slot_tables` therefore adds 37-Feet to Upper Body for a
+Fallout source, and `ARMA_BODY_COVERAGE_EXTRA` then brings in Calves.
+
+The mesh side keeps a single 32 partition for the whole outfit
+(`wearable_plan_falloutnv.FNV_BIPED_BIT_BODY_PART`): a partition renders
+wherever the ARMA claims its slot, and letting the bone-mass resolver split
+the pants shape between 32 and 37 gains nothing.
+
 ## <a id="child-worldspaces"></a>Child worldspaces: the engine defaults PNAM to *everything*
 
 `TESWorldSpace::Load` (SkyrimSE.exe GOG/AE, RVA `0x2c5620`) handles WNAM at

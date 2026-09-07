@@ -17,7 +17,10 @@ from asset_convert.nif.nif_converter import (
     rewrite_tex_path,
     convert_nif,
 )
-from asset_convert.character import wearable_plan
+from asset_convert.character import wearable_plan, wearable_plan_falloutnv
+from asset_convert.character.head_gear import remap_bone_names
+from asset_convert.collision import collision_falloutnv
+from pyffi.formats.nif import NifFormat
 from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP as BONE_MAP
 from tes5_import.record_types import world_falloutnv
 from tes5_import.record_types.common import _convert_biped_flags
@@ -4803,6 +4806,58 @@ class TestFalloutBoneAliases:
         assert oblivion_alias_map(None) == {}
 
 
+class TestFalloutMeshSideSlots:
+    """The converter reads FNV bits through its own table, and FNV bones rename.
+
+    See: docs/commentary/asset_convert_falloutnv.md#fnv-biped-slots-mesh-side
+    """
+
+    def teardown_method(self):
+        """Clear the per-NIF Fallout latch."""
+        collision_falloutnv._SOURCE[0] = False
+
+    def test_fallout_bits_use_the_fallout_table(self):
+        """FNV Left Hand is a glove, Upper Body still 32, Earrings is not a shield."""
+        collision_falloutnv._SOURCE[0] = True
+        assert wearable_plan.body_part_for_flags(1 << 3) == 33
+        assert wearable_plan.body_parts_for_flags(1 << 2) == [32]
+        assert wearable_plan.body_part_for_flags(1 << 10) == 131
+        assert not wearable_plan_falloutnv.shield_flags(1 << 13)
+        collision_falloutnv._SOURCE[0] = False
+        assert wearable_plan.body_part_for_flags(1 << 3) == 44
+        assert wearable_plan_falloutnv.shield_flags(1 << 13)
+
+    def test_fallout_only_bones_are_renamed(self):
+        """A twist bone keeps its FNV name unless the tree says it is FNV."""
+        data = NifFormat.Data()
+        root = NifFormat.NiNode()
+        root.name = b'Scene Root'
+        twist = NifFormat.NiNode()
+        twist.name = b'Bip01 L ForeTwist'
+        root.num_children = 1
+        root.children.update_size()
+        root.children[0] = twist
+        data.roots = [root]
+        assert remap_bone_names(data) == 1
+        assert bytes(twist.name) == b'NPC L ForearmTwist1 [LLt1]'
+
+    def test_female_only_biped_model_is_female(self, tmp_path):
+        """Gender comes from the record, not from an f/ folder in the path."""
+        rec = ('---RECORD_BEGIN---\n'
+               'Male.BipedModel.MODL=armor\\x\\suit.nif\n'
+               'Female.BipedModel.MODL=armor\\x\\suitf.nif\n'
+               'BMDT.BipedFlags=4\n---RECORD_END---\n')
+        (tmp_path / 'ARMO.txt').write_text(rec, encoding='utf-8')
+        (tmp_path / 'CLOT.txt').write_text('', encoding='utf-8')
+        plan = wearable_plan.build_plan(tmp_path)
+        meshes = tmp_path / 'meshes'
+        wearable_plan.latch_female(plan, meshes / 'armor' / 'x' / 'suitf.nif', meshes)
+        assert wearable_plan.mesh_is_female('armor/x/suitf.nif')
+        wearable_plan.latch_female(plan, meshes / 'armor' / 'x' / 'suit.nif', meshes)
+        assert not wearable_plan.mesh_is_female('armor/x/suit.nif')
+        assert wearable_plan.mesh_is_female('armor/f/suit.nif')
+
+
 class TestFalloutBipedSlotsAreNotOblivions:
     """FNV biped bits share only 0-2 with Oblivion's.
 
@@ -4813,13 +4868,20 @@ class TestFalloutBipedSlotsAreNotOblivions:
         """Clear the per-plugin Fallout latch."""
         world_falloutnv._IS_FALLOUT_SOURCE.clear()
 
-    def test_head_body_hair_agree(self):
-        """Bits 0-2 mean the same thing in both games."""
-        for bit in (0, 1, 2):
+    def test_head_and_hair_agree(self):
+        """Bits 0-1 mean the same thing in both games."""
+        for bit in (0, 1):
             world_falloutnv.register_fallout_source({'TERM': [1]})
             fnv = _convert_biped_flags(1 << bit)
             world_falloutnv._IS_FALLOUT_SOURCE.clear()
             assert _convert_biped_flags(1 << bit) == fnv
+
+    def test_upper_body_also_covers_feet(self):
+        """FNV's one body mesh runs to the toes; Oblivion's Upper Body does not."""
+        world_falloutnv.register_fallout_source({'TERM': [1]})
+        assert _convert_biped_flags(1 << 2) == (1 << 2) | (1 << 7)
+        world_falloutnv._IS_FALLOUT_SOURCE.clear()
+        assert _convert_biped_flags(1 << 2) == (1 << 2)
 
     def test_hat_reaches_a_head_slot_not_a_weapon_slot(self):
         """FNV bit 10 is Hat; Oblivion's table gave it no slot at all."""

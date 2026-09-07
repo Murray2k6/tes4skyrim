@@ -27,6 +27,8 @@ ground-model fallback changes there, change it here too.
 import os
 from pathlib import Path
 
+from asset_convert.character.wearable_plan_falloutnv import biped_bit_body_parts
+
 # TES4 BMDT biped bits 2=UpperBody 3=LowerBody 4=Hand 5=Foot — the gear the
 # vanilla weight slider applies to.  Mirrors _build_arma's `use_slider`.
 _SLIDER_BIPED_MASK = 0b111100
@@ -36,6 +38,8 @@ BASE = 1        # <name>.nif
 W0 = 2          # <name>_0.nif
 W1 = 4          # <name>_1.nif
 WORN = 8        # named as an ARMA worn (biped) model by some ARMO/CLOT record
+FEMALE = 16
+MALE = 32
 
 # TES4 BMDT biped bit -> the Skyrim body part the geometry belongs in.  This is
 # the plugin's OWN statement of what the item is, so it replaces guessing the
@@ -73,7 +77,7 @@ def body_part_for_flags(biped_flags: int):
     headgear.  None means the flags say nothing useful and the caller should
     fall back to inspecting the mesh.
     """
-    for bit, bp in _BIPED_BIT_BODY_PART:
+    for bit, bp in biped_bit_body_parts(_BIPED_BIT_BODY_PART):
         if biped_flags & (1 << bit):
             return bp
     return None
@@ -166,7 +170,7 @@ def body_parts_for_flags(biped_flags: int) -> list:
     against (see skin_retarget._body_part_from_skin_bones).
     """
     out = []
-    for bit, bp in _BIPED_BIT_BODY_PART:
+    for bit, bp in biped_bit_body_parts(_BIPED_BIT_BODY_PART):
         if biped_flags & (1 << bit) and bp not in out:
             out.append(bp)
     return out
@@ -233,8 +237,8 @@ def build_plan(export_dir, _seen=None) -> dict:
             # fact only the plugin knows (see is_worn).
             worn_flags = WORN | (
                 (W0 | W1) if (biped_flags & _SLIDER_BIPED_MASK) else BASE)
-            want(male_biped, worn_flags)
-            want(female_biped or male_biped, worn_flags)
+            want(male_biped, worn_flags | MALE)
+            want(female_biped or male_biped, worn_flags | FEMALE)
 
             # ARMO ground models (MOD2/MOD4): always the plain mesh, and the
             # biped mesh stands in when the record ships no world model.
@@ -264,6 +268,20 @@ def variants_for(plan: dict, src_path, meshes_root) -> int:
     except ValueError:
         return BASE
     return plan.get(_norm(rel), BASE)
+
+
+_FEMALE_LATCH = [False]
+
+
+def latch_female(plan: dict, src_path, meshes_root):
+    """Record whether the NIF about to convert is worn by women only."""
+    v = variants_for(plan, src_path, meshes_root) if plan else 0
+    _FEMALE_LATCH[0] = bool(v & FEMALE) and not v & MALE
+
+
+def mesh_is_female(src_path) -> bool:
+    """Fitted to the female body: a Female.BipedModel, else Oblivion's f/ folder."""
+    return _FEMALE_LATCH[0] or '/f/' in str(src_path).replace(chr(92), '/').lower()
 
 
 def is_worn(plan: dict, src_path, meshes_root) -> bool:

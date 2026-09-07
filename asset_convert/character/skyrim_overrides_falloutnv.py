@@ -11,9 +11,6 @@ See: docs/commentary/asset_convert_falloutnv.md#fnv-skeleton-bones
 
 from asset_convert.character.skyrim_overrides import OBLIVION_TO_SKYRIM_BONE_MAP
 
-#: Bones only FO3/FNV skeletons carry; their presence identifies the source.
-FALLOUT_SKELETON_MARKERS = ('Bip01 L Thumb1', 'Bip01 LUpArmTwistBone')
-
 #: FO3/FNV bone -> Skyrim bone, for the names Oblivion's table does not cover.
 FALLOUT_TO_SKYRIM_BONE_MAP = {
     'Bip01 LUpArmTwistBone': 'NPC L UpperarmTwist1 [LUt1]',
@@ -30,6 +27,9 @@ FALLOUT_TO_SKYRIM_BONE_MAP = {
     'Bip01 RPauldron': 'NPC R Clavicle [RClv]',
     'Weapon': 'WEAPON',
 }
+
+#: Bones only FO3/FNV skeletons carry; any one of them identifies the source.
+FALLOUT_SKELETON_MARKERS = frozenset(FALLOUT_TO_SKYRIM_BONE_MAP) - {'Weapon'}
 
 #: FO3/FNV rig helpers with no Skyrim counterpart; skinning must never use them.
 FALLOUT_DROPPED_BONES = frozenset({

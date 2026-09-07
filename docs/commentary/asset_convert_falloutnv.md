@@ -30,6 +30,46 @@ Every target above was verified present in both
 `skeleton_bones_falloutnv.json` and `skeleton_bones_skyrim_male.json` before
 the table was written.
 
+### <a id="rename-follows-the-source-table"></a>The rename pass must use the same table
+
+`retarget_skin_to_skyrim` moved the FNV-only bones to their Skyrim positions
+through the merged table, but `head_gear.remap_bone_names` looked names up in
+`OBLIVION_TO_SKYRIM_BONE_MAP` alone, so the twist, thumb and pauldron nodes
+kept their FNV names in the output. Skyrim's skeleton has no such bones and the
+vertices weighted to them stop following the arm. On the Caravaneer Outfit
+190 of the 362 `arms:0` vertices (the outer forearm and the upper arm) sat on
+unrenamed bones -- the "lower arms splay outward" report -- and on the Great
+Khan suit 139 of the fur vest's 331 vertices, all at the shoulders. 362 of the
+686 FNV armor NIFs reference at least one of these names. The rename now picks
+its table from the NiNode names the tree carries, exactly as the retarget does.
+
+## <a id="fnv-biped-slots-mesh-side"></a>FNV biped slots, mesh side
+
+**Code:** `asset_convert/character/wearable_plan_falloutnv.py`
+
+`wearable_plan._BIPED_BIT_BODY_PART` is Oblivion's bit table. Read through it,
+FNV Left Hand (bit 3) became LowerBody 44, Weapon (5) became Feet, PipBoy and
+Backpack (6, 7) became Ring 36, bit 13 (Earrings) read as Shield, and hats,
+glasses, masks and chokers had no entry at all and fell back to filename
+guessing. A partition whose slot the ARMA does not claim is culled, so a glove
+partitioned 44 under an ARMA claiming 33 is invisible.
+`FNV_BIPED_BIT_BODY_PART` mirrors the importer's `FNV_BIPED_SLOT_MAP` (body
+part = slot number; head gear = the converter's 131) and is selected by the
+per-NIF source latch. Upper Body stays a single 32 partition:
+[upper-body-covers-feet](tes4_export_falloutnv.md#upper-body-covers-feet).
+
+### <a id="gender-from-the-record"></a>Gender from the record, not the folder
+
+Every gender decision in the retarget was `'/f/' in path`. Oblivion files
+female gear under `armor\<set>\f\`; FNV names it by suffix
+(`republicanF_01.nif`, `greatkhan_v2_f.nif`). Of the 153 distinct female biped
+model paths in FalloutNV.esm, 99 have no `f` folder, so those outfits were
+fitted to the male Skyrim body and skeleton and then written into the ARMA's
+female model slot. `build_plan` now records MALE / FEMALE bits per mesh from
+the record's two biped model fields, `convert_nif` latches "female-only" per
+NIF, and `mesh_is_female` answers from the latch first and the folder second,
+so Oblivion's layout is unchanged.
+
 ## <a id="fnv-animation-pose"></a>FNV animation pose
 
 **Code:** `asset_convert/character/skin_retarget.py` `load_animation_deltas`

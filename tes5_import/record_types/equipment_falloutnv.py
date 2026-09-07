@@ -51,9 +51,15 @@ FNV_BIPED_SLOT_MAP = {
 }
 
 
-def biped_slot_map():
-    """The source game's biped bit table, or None to use Oblivion's.
+#: FO3/FNV Upper Body is the whole body but the hands: it also claims 37-Feet.
+_FNV_BODY_EXTRA = {2: [7]}
+
+
+def biped_slot_tables(oblivion_map: dict, oblivion_extra: dict) -> tuple:
+    """(slot map, conflict extras) for the source game.
 
     See: docs/commentary/tes4_export_falloutnv.md#fnv-biped-slots
     """
-    return FNV_BIPED_SLOT_MAP if is_fallout_source() else None
+    if not is_fallout_source():
+        return oblivion_map, oblivion_extra
+    return FNV_BIPED_SLOT_MAP, {**oblivion_extra, **_FNV_BODY_EXTRA}

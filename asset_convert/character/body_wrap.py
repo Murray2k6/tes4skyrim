@@ -57,6 +57,7 @@ from asset_convert.nif.pyffi_monkey_patch import apply_patches
 apply_patches()
 from asset_convert import paths
 from asset_convert.character.skyrim_overrides_falloutnv import oblivion_alias_map
+from asset_convert.character.wearable_plan import mesh_is_female
 
 try:
     from pyffi.formats.nif import NifFormat
@@ -1021,8 +1022,7 @@ def get_field(female: bool):
 def wrap_available(src_path: str) -> bool:
     """True when the wrap field for this NIF's gender can be used (the legacy
     FK-drift piece offsets must then be skipped)."""
-    female = '/f/' in src_path.replace('\\', '/').lower()
-    return get_field(female) is not None
+    return get_field(mesh_is_female(src_path)) is not None
 
 
 def wrap_has_head(src_path: str) -> bool:
@@ -1034,8 +1034,7 @@ def wrap_has_head(src_path: str) -> bool:
     corrections interpolated from neck/shoulder triangles drag it into the
     middle of the skull.
     """
-    female = '/f/' in src_path.replace('\\', '/').lower()
-    field = get_field(female)
+    field = get_field(mesh_is_female(src_path))
     return field is not None and getattr(field, 'has_head', False)
 
 

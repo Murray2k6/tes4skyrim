@@ -186,13 +186,13 @@ def _convert_biped_flags(tes4_flags: int) -> int:
     See: docs/commentary/asset_convert_armor.md#biped-slot-conversion
     """
     from ..constants import BIPED_SLOT_MAP, BIPED_SLOT_EXTRA
-    from .equipment_falloutnv import biped_slot_map
+    from .equipment_falloutnv import biped_slot_tables
+    slot_map, slot_extra = biped_slot_tables(BIPED_SLOT_MAP, BIPED_SLOT_EXTRA)
     tes5 = 0
-    for tes4_bit, tes5_bit in (biped_slot_map() or BIPED_SLOT_MAP).items():
+    for tes4_bit, tes5_bit in slot_map.items():
         if tes4_flags & (1 << tes4_bit):
             tes5 |= (1 << tes5_bit)
-    # Apply equipment-conflict extras (e.g. helmet → also block Circlet slot)
-    for tes5_bit, extra_bits in BIPED_SLOT_EXTRA.items():
+    for tes5_bit, extra_bits in slot_extra.items():
         if tes5 & (1 << tes5_bit):
             for eb in extra_bits:
                 tes5 |= (1 << eb)
